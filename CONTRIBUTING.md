@@ -1,6 +1,6 @@
 # Contributing
 
-The two products share one source tree and one versioned knowledge bank:
+GAME owns the shared compiler and versioned knowledge bank; GAME-MACOS is an optional companion. See [PLATFORMS.md](PLATFORMS.md) for the adapter contract and dependency-update policy:
 
 ```sh
 python3 target_cli.py cpp --profile profiles/your-title.json next-game \

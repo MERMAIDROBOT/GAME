@@ -44,7 +44,7 @@ SOURCE_FILES = ('pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTRO
                 'tests/test_enhancements.py', 'target_cli.py', 'tests/test_targets.py',
                 'CONTRIBUTING.md', 'LICENSE', 'UPSTREAM-NOTICES.md',
                 '.github/workflows/both-targets.yml', '.github/PULL_REQUEST_TEMPLATE.md',
-                'source_freeze.py', 'tests/test_source_freeze.py', 'requirements.txt')
+                'source_freeze.py', 'tests/test_source_freeze.py', 'requirements.txt', 'platform_adapter.py', 'tests/test_platform_adapter.py', 'PLATFORMS.md')
 
 
 def package_source(root=ROOT):

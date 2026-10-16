@@ -9,16 +9,18 @@ produces generated C++ representing machine-code behavior; it does not recover
 an original developer's C++ source, names, comments or architecture. Translating
 an executable does not by itself make a game playable.
 
-## Two targets, one project
+## Shared engine and optional platform repositories
 
 | Interface | Purpose | Current limit |
 |---|---|---|
 | `target_cli.py cpp` | Disc intake, executable inspection, analysis and C++ translation | Upstream toolchain/platform support and missing runtime contracts still need qualification |
 | `target_cli.py macos` | Shared translation plus experimental native runtime/build/package tooling | Generic clean build does not yet reproduce every feature of the accepted first-title build |
 
-Both interfaces use the same modules and knowledge bank. Every push and pull
-request runs a shared synthetic CI matrix on Linux/macOS; changes do not need
-to be copied into a second repository.
+The primary product in this repository is PS2 → C++. The optional macOS adapter
+lives in [GAME-MACOS](https://github.com/MERMAIDROBOT/GAME-MACOS), pins this core
+as a submodule, and receives Dependabot update PRs. Both use one knowledge bank
+and shared implementation. Other device adapters can use the same API. See
+[PLATFORMS.md](PLATFORMS.md) for propagation, review and compatibility checks.
 
 ## What is implemented
 
