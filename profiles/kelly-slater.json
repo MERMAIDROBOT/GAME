@@ -1,0 +1,16 @@
+{
+  "id": "kelly-slater-us",
+  "title": "Kelly Slater's Pro Surfer",
+  "private_dir": "../../work/kelly-slater",
+  "expected_executable": "SLUS_203.34",
+  "expected_sha256": "75a241fa2487903ceded01553642c965273250d513a12a332a0a4f8a8bd37e0e",
+  "runtime_status": "v56_user_accepted_local_app_generic_clean_build_pending",
+  "notes": "User accepted v56 Oct15. Normal app packaged with identical accepted engine/GPU hashes. Earlier pipeline build outputs and test evidence are historical; the generic native-build command does not yet consolidate all v56 runtime/enhancement changes.",
+  "renderer_worker": true,
+  "graphics_history": false,
+  "application_support_storage": true,
+  "compiled_vu": true,
+  "async_presentation": true,
+  "accepted_local_app": "../Kelly Slater's Pro Surfer.app",
+  "accepted_version": "56.0"
+}

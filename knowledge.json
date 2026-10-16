@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "revision": 1,
+  "rules": [
+    {
+      "id": "ee-sqrt-ft", "revision": 1, "scope": "shared", "status": "active",
+      "kind": "fpu_operand", "helper": "FPU_SQRT_S",
+      "opcode_mask": "ffe0003f", "opcode_value": "46000004",
+      "operand": "ft", "legacy_operand": "fs",
+      "evidence": "MR-TR-14; original instruction encoding and synthetic register controls",
+      "fixtures": [
+        {"word": "460c0044", "before": "ctx->f[1] = FPU_SQRT_S(ctx->f[0]);", "after": "ctx->f[1] = FPU_SQRT_S(ctx->f[12]);"},
+        {"word": "460c0044", "before": "ctx->f[1] = FPU_SQRT_S(ctx->f[12]);", "after": "ctx->f[1] = FPU_SQRT_S(ctx->f[12]);"}
+      ]
+    },
+    {
+      "id": "runtime-memory-ownership", "revision": 1, "scope": "shared", "status": "active",
+      "kind": "memory_disjoint",
+      "evidence": "WORKLOG85; memory.py ELF/BSS/runtime/declared heap ownership contract",
+      "fixtures": [
+        {"reserved": [{"name":"runtime","start":100,"end":200}], "occupied": [{"name":"heap","start":150,"end":300}], "conflicts":1},
+        {"reserved": [{"name":"runtime","start":100,"end":200}], "occupied": [{"name":"heap","start":200,"end":300}], "conflicts":0}
+      ]
+    },
+    {
+      "id": "iop-import-contracts", "revision": 1, "scope": "shared", "status": "active",
+      "kind": "iop_import_audit",
+      "evidence": "MR-UN-9; local IopImportRegistry: 20-byte header, jr-ra/ordinal stubs, major-version matching",
+      "qualification": "Detects required imports only; an import name or implemented handler does not prove behavior"
+    }
+  ]
+}

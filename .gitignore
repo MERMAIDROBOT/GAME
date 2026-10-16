@@ -1,0 +1,27 @@
+.private/
+__pycache__/
+*.pyc
+.DS_Store
+*.app/
+# Never commit retail game data or generated game code.
+disc-root/
+generated/
+games/
+*.iso
+*.bin
+*.img
+*.IRX
+*.irx
+*.ST2
+*.st2
+*.PSS
+*.pss
+SLUS_*
+SLES_*
+SLPS_*
+SCES_*
+SCUS_*
+
+.work/
+knowledge-history/
+*.zip
