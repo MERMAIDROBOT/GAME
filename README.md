@@ -41,11 +41,11 @@ to be copied into a second repository.
 
 ## Try the interface
 
-Requires Python 3.11+. Tests also need Pillow and Clang; native macOS work needs
+Requires Python 3.11+. Tests also need Pillow, NumPy and Clang; native macOS work needs
 Apple Command Line Tools. Public tool downloads are a separate setup stage.
 
 ```sh
-python3 -m pip install Pillow==11.3.0
+python3 -m pip install -r requirements.txt
 python3 target_cli.py cpp --help
 python3 target_cli.py macos --help
 python3 -m unittest discover -s tests -v
