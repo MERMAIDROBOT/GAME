@@ -1,49 +1,57 @@
-# Shared compiler and optional platform adapters
+# One repository, optional platform targets
 
-`MERMAIDROBOT/GAME` owns PS2 intake, analysis, C++ translation, the versioned
-knowledge bank, shared contracts and test fixtures. Its primary interface is
-`python3 target_cli.py cpp ...`. Generated C++ is a machine-code translation,
-not restoration of a developer's original source.
+GAME contains the shared PS2-to-C++ engine and optional platform adapters. Users
+clone once; contributors submit one PR. Common fixes reach every target through
+the same versioned source and knowledge bank, without synchronization bots or
+copied compiler implementations. No second repository or Git submodule is needed.
 
-`MERMAIDROBOT/GAME-MACOS` is an optional macOS companion. It references an exact
-core commit through a Git submodule instead of copying compiler code. The early
-adapter delegates to the experimental native implementation still in core while
-runtime source consolidation continues. Physical extraction of those older
-macOS internals is unfinished; the adapter is not a new complete native backend.
-
-## How changes propagate
-
-- Shared fixes belong in GAME, regardless of where they were discovered.
-- GAME's PR matrix checks both target interfaces, plus the latest macOS adapter
-  against the candidate core on macOS. A broken adapter contract blocks that
-  check; requiring checks before merge needs repository branch protection.
-- GAME-MACOS tests its pinned core and latest core. A scheduled compatibility run
-  repeats every six hours. Dependabot checks the core submodule daily and opens
-  an update PR when its commit changes. GitHub may delay scheduled runs.
-- Update PRs need review/merge. They are not automatically merged and propagation
-  is not instantaneous. No cross-repository write token is stored or required.
-- A macOS-only fix stays in its adapter. If it changes a shared contract, submit
-  the shared fix to GAME first, test it against the adapter, then update the
-  adapter's core pin. There is no competing copied core to synchronize backward.
-
-## Add another target
-
-Create a platform repository with an `adapter.json` declaring `schema: 1`, a
-stable `id`, `core_api: 1`, supported host `systems` (Darwin/Linux/Windows), and a
-relative Python `entrypoint`. Pin GAME as its `core` submodule. The entrypoint
-receives arguments unchanged and `PS2_PORT_LAB_CORE` pointing to the shared engine.
-
-```sh
-python3 platform_adapter.py --adapter /local/target/adapter.json --describe
-python3 platform_adapter.py --adapter /local/target/adapter.json doctor
+```text
+GAME/
+  run.py                    # one user entry point, cpp by default
+  pipeline.py               # shared intake/analysis/translation stages
+  knowledge.py / .json       # reviewed growing rule bank
+  platforms/
+    macos/
+      adapter.json
+      macos_adapter.py
+  tests/                     # shared and platform contract regressions
 ```
 
-Discovery reads metadata without importing adapter code. Running an adapter
-executes explicitly installed local Python code; metadata validation is not a
-sandbox. Review third-party adapters before running them. Platform adapters must
-qualify ABI, graphics, audio, controls, clocks and packaging independently. A new
-manifest alone cannot make translated C++ work on a device.
+```sh
+python3 run.py --list-targets
+python3 run.py doctor
+python3 run.py --profile /local/game.json next-game --name first
+python3 run.py --target macos --profile /local/game.json build-native
+```
 
-Contribute game-independent corrections as tested, provenance-backed rules;
-proposed rules remain inactive. Use synthetic inputs in public PRs. Retail assets,
-generated retail C++, saves, binaries and raw game diagnostics remain private.
+The macOS target requires macOS. Its current adapter delegates to experimental
+native internals still in native.py; clean v56 source/build consolidation and
+physical runtime extraction into platform-specific modules remain unfinished.
+The legacy target_cli.py and explicit platform_adapter.py interfaces remain
+available for scripts. Adding a target does not make arbitrary games playable.
+
+## Add a device target
+
+Add `platforms/<target>/adapter.json` with `schema: 1`, a unique stable `id`,
+`core_api: 1`, supported host `systems` (Darwin/Linux/Windows), and a relative
+Python `entrypoint`. Keep implementation next to its manifest. A supported host
+is the computer running the compiler; describe the output device separately.
+
+The entrypoint receives forwarded arguments and PS2_PORT_LAB_CORE pointing to
+the shared engine. Discovery validates metadata without importing target code.
+Execution runs installed local Python; this is not a sandbox. Review adapters
+before running them. Unsupported platform/ABI operations must fail explicitly.
+
+Contribute synthetic tests, dependency pins/notices and platform build/package
+recipes. Qualify ABI, graphics, audio, controls, clocks and packaging separately.
+Put game-independent corrections in the shared engine or knowledge bank with
+provenance and regression fixtures. Keep revision-specific exceptions gated.
+Never contribute retail assets, generated/decompiled retail code, saves, binaries
+or raw game traces. Both shared code and adapters use the project's GPL-3.0 terms;
+upstream dependency/model terms remain separate.
+
+Every PR runs the shared synthetic suite and cpp/macOS target checks from that
+same checkout. Required merge checks still depend on repository protection
+settings. CI does not establish full gameplay fidelity or universal compatibility.
+
+The former GAME-MACOS companion is superseded by platforms/macos in this repo.

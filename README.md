@@ -9,18 +9,20 @@ produces generated C++ representing machine-code behavior; it does not recover
 an original developer's C++ source, names, comments or architecture. Translating
 an executable does not by itself make a game playable.
 
-## Shared engine and optional platform repositories
+## One checkout, optional output targets
 
-| Interface | Purpose | Current limit |
+Clone this repository once. The shared engine is at the root; optional platform
+adapters live under `platforms/`. No companion repository or submodule is needed.
+
+| Target | Command | Purpose |
 |---|---|---|
-| `target_cli.py cpp` | Disc intake, executable inspection, analysis and C++ translation | Upstream toolchain/platform support and missing runtime contracts still need qualification |
-| `target_cli.py macos` | Shared translation plus experimental native runtime/build/package tooling | Generic clean build does not yet reproduce every feature of the accepted first-title build |
+| C++ (default) | `python3 run.py ...` | Local PS2 intake, analysis and C++ translation |
+| macOS | `python3 run.py --target macos ...` | Shared translation plus experimental native build/package tooling |
+| Future platforms | Add `platforms/<target>/adapter.json` | Extend the same core API with a tested target implementation |
 
-The primary product in this repository is PS2 → C++. The optional macOS adapter
-lives in [GAME-MACOS](https://github.com/MERMAIDROBOT/GAME-MACOS), pins this core
-as a submodule, and receives Dependabot update PRs. Both use one knowledge bank
-and shared implementation. Other device adapters can use the same API. See
-[PLATFORMS.md](PLATFORMS.md) for propagation, review and compatibility checks.
+Shared fixes, platform changes and regression tests use one PR stream. CI tests
+both targets from the same commit. The C++ workflow does not initialize the Mac
+adapter. See [PLATFORMS.md](PLATFORMS.md) for the extension contract.
 
 ## What is implemented
 
@@ -47,9 +49,13 @@ Requires Python 3.11+. Tests also need Pillow, NumPy and Clang; native macOS wor
 Apple Command Line Tools. Public tool downloads are a separate setup stage.
 
 ```sh
+git clone https://github.com/MERMAIDROBOT/GAME.git
+cd GAME
 python3 -m pip install -r requirements.txt
-python3 target_cli.py cpp --help
-python3 target_cli.py macos --help
+python3 run.py --help
+python3 run.py --list-targets
+python3 run.py doctor
+python3 run.py --target macos doctor
 python3 -m unittest discover -s tests -v
 python3 pipeline.py doctor
 ```
@@ -67,7 +73,7 @@ replacement work. This repository does **not** yet rebuild that complete stack
 from a fresh checkout. Exact runtime/IOP/renderer source and link consolidation,
 revision-gated adapters, native conformance and second-title validation remain
 required. No universal compatibility, original-source recovery or 120 FPS claim
-is made. The latest local generic suite passed 164 tests; CI results are separate.
+is made. The latest local generic suite passed 171 tests; CI results are separate.
 
 Start with [ENGINE.md](ENGINE.md), [COMPILER.md](COMPILER.md),
 [NEXT-GAME.md](NEXT-GAME.md), [TEXTURES.md](TEXTURES.md) and

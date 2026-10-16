@@ -1,6 +1,6 @@
 # Contributing
 
-GAME owns the shared compiler and versioned knowledge bank; GAME-MACOS is an optional companion. See [PLATFORMS.md](PLATFORMS.md) for the adapter contract and dependency-update policy:
+GAME contains the shared compiler, versioned knowledge bank and optional platform targets in one repository. See [PLATFORMS.md](PLATFORMS.md) for the adapter contract. Shared fixes and platform improvements use the same PR:
 
 ```sh
 python3 target_cli.py cpp --profile profiles/your-title.json next-game \

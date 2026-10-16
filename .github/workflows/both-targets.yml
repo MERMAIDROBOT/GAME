@@ -19,22 +19,18 @@ jobs:
         with: {python-version: '3.13'}
       - run: python -m pip install -r requirements.txt
       - run: python -m unittest discover -s tests -v
-      - run: python target_cli.py ${{ matrix.target }} --help
+      - run: python run.py --target ${{ matrix.target }} --help
+      - run: python run.py --target ${{ matrix.target }} doctor
       - run: python pipeline.py source-package
   # Retail assets, generated game code, binaries and raw game diagnostics are
   # deliberately absent. These jobs test generic contracts, not game playability.
 
-  macos-adapter:
+  bundled-macos-adapter:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: MERMAIDROBOT/GAME-MACOS
-          path: .adapter-macos
       - uses: actions/setup-python@v5
         with: {python-version: '3.13'}
       - run: python -m pip install -r requirements.txt
-      - run: python platform_adapter.py --adapter .adapter-macos/adapter.json --describe
-      - run: python platform_adapter.py --adapter .adapter-macos/adapter.json --help
-      - run: python platform_adapter.py --adapter .adapter-macos/adapter.json doctor
+      - run: python platform_adapter.py --adapter platforms/macos/adapter.json --describe
+      - run: python run.py --target macos doctor
