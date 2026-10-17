@@ -15,7 +15,8 @@ class NativeDiagnosticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             private=Path(directory)
             (private/'analysis').mkdir()
-            (private/'analysis/translation-stage.json').write_text(json.dumps({'success':True}))
+            (private/'analysis/translation-stage.json').write_text(json.dumps({'success':True,'accepted':True}))
+            (private/'generated').mkdir(); (private/'generated/a.cpp').write_text('void a() {}\n')
             with self.assertRaisesRegex(ValueError,'knowledge bank'):
                 native.build_native({'id':'synthetic'},private)
 
@@ -28,7 +29,8 @@ class NativeDiagnosticsTests(unittest.TestCase):
             (private/'disc-root/TEST.ELF').write_bytes(minimal_elf())
             bank=knowledge.load()
             expected=knowledge.sha(json.dumps(bank,sort_keys=True).encode())
-            (private/'analysis/translation-stage.json').write_text(json.dumps({'knowledge_bank_sha256':expected}))
+            (private/'analysis/translation-stage.json').write_text(json.dumps({'knowledge_bank_sha256':expected,'accepted':True}))
+            (private/'generated').mkdir(); (private/'generated/a.cpp').write_text('void a() {}\n')
             with self.assertRaisesRegex(ValueError,'ownership gate'):
                 native.build_native({'id':'synthetic','expected_executable':'TEST.ELF'},private)
 

@@ -20,13 +20,17 @@ class NextGameTests(unittest.TestCase):
         (self.disc/'SYSTEM.CNF').write_text('BOOT2 = cdrom0:\\TEST.ELF;1\n')
         (self.disc/'TEST.ELF').write_bytes(minimal_elf())
         self.profile = self.root/'game.json'
-        lab.save(self.profile, dict(id='synthetic', title='Synthetic', private_dir=str(self.private)))
+        lab.save(self.profile, dict(id='synthetic', title='Synthetic', private_dir=str(self.private),
+                                    private_dir_absolute_opt_in=True))
         self.called=[]
     def tearDown(self): self.temp.cleanup()
     def fake(self, command, private):
         self.called.append(command)
         artifact=dict(next_game.STAGES)[command]
         lab.save(private/artifact, {'success':True, 'command':command})
+        if command == 'translate':
+            lab.save(private/artifact, {'success':True, 'accepted':True, 'blockers':[], 'command':command,
+                                        'counts':{'processed':1,'recompiled':1,'stubs':0,'skipped':0,'decode_failures':0,'warnings':0,'errors':0}})
         if command == 'analyze':
             (private/'analysis/recomp.toml').write_text('[general]\n')
         if command == 'translate':

@@ -28,7 +28,10 @@ The macOS target requires macOS. Its current adapter delegates to experimental
 native internals still in native.py; clean v56 source/build consolidation and
 physical runtime extraction into platform-specific modules remain unfinished.
 The legacy target_cli.py and explicit platform_adapter.py interfaces remain
-available for scripts. Adding a target does not make arbitrary games playable.
+available for scripts. `run.py --help` forwards to the selected target and lists
+its commands; run.py, target_cli.py, pipeline.py and the macOS adapter share one
+error wrapper (`ERROR: ...`, exit 1). Game-processing commands need an explicit
+per-game `--profile`. Adding a target does not make arbitrary games playable.
 
 ## Add a device target
 

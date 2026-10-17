@@ -24,7 +24,7 @@ LOCK = json.loads((ROOT / 'toolchain.lock.json').read_text())
 NETWORK_APIS = re.compile(r'\b(?:socket|connect|sendto|sendmsg|curl_\w*|WinHttp\w*|InternetOpen\w*|popen|system)\s*\(|#include[^\n]*(?:curl|socket|http|asio|winsock)', re.I)
 SOURCE_FILES = ('pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTROLS.md', 'PRIVACY.md',
                 'STATUS.md', 'RUNTIME_COMPARISON.md', '.gitignore', 'toolchain.lock.json',
-                'profiles/kelly-slater.json', 'cmake/AttachGame.cmake', 'cmake/LocalLauncher.m',
+                'profiles/example-game.json', 'cmake/AttachGame.cmake', 'cmake/LocalLauncher.m',
                 'patches/runtime-diagnostics.patch', 'tests/test_pipeline.py',
                 'tests/test_native.py', 'tests/test_scenarios.py', 'tests/runtime_timer.cpp',
                 'vectors.py', 'tools/vu1_recomp.cpp', 'tools/PS2Recomp-LICENSE', 'tests/test_vectors.py',
@@ -44,7 +44,7 @@ SOURCE_FILES = ('pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTRO
                 'tests/test_enhancements.py', 'target_cli.py', 'tests/test_targets.py',
                 'CONTRIBUTING.md', 'LICENSE', 'UPSTREAM-NOTICES.md',
                 '.github/workflows/both-targets.yml', '.github/PULL_REQUEST_TEMPLATE.md',
-                'source_freeze.py', 'tests/test_source_freeze.py', 'requirements.txt', 'platform_adapter.py', 'tests/test_platform_adapter.py', 'PLATFORMS.md', 'run.py', 'tests/test_entrypoint.py',
+                'source_freeze.py', 'tests/test_source_freeze.py', 'requirements.txt', 'platform_adapter.py', 'tests/test_platform_adapter.py', 'PLATFORMS.md', 'run.py', 'tests/test_entrypoint.py', 'tests/test_engine_fixes.py',
                 'platforms/macos/adapter.json', 'platforms/macos/macos_adapter.py')
 
 
@@ -91,15 +91,63 @@ def safe_relative(value):
     return path
 
 
+PRIVATE_ROOT = ROOT / '.private'
+PROFILE_COMMANDS_WITHOUT_PROFILE = {'doctor', 'bootstrap', 'bootstrap-runtime', 'source-package',
+                                    'knowledge-add', 'package-accepted-app', 'new-profile'}
+
+
+def private_directory(profile, root=ROOT):
+    """Resolve a profile's private game storage without silently leaving the checkout.
+
+    Default: <root>/.private/games/<id>. A relative private_dir must stay under
+    <root>/.private. An existing project elsewhere needs an absolute private_dir
+    plus "private_dir_absolute_opt_in": true; it may not be inside the reusable
+    source tree (outside .private) or contain the source tree.
+    """
+    root = Path(root).resolve()
+    private_root = (root / '.private').resolve()
+    value = profile.get('private_dir')
+    if value is None:
+        resolved = (private_root / 'games' / profile['id']).resolve()
+    elif not isinstance(value, str) or not value:
+        raise ValueError('Profile private_dir must be a nonempty string')
+    elif Path(value).is_absolute():
+        if profile.get('private_dir_absolute_opt_in') is not True:
+            raise ValueError('An absolute private_dir requires "private_dir_absolute_opt_in": true in the profile')
+        resolved = Path(value).resolve()
+    else:
+        resolved = (root / safe_relative(value)).resolve()
+        if not resolved.is_relative_to(private_root):
+            raise ValueError('A relative private_dir must stay under .private/; for an existing project elsewhere '
+                             'use an absolute path with "private_dir_absolute_opt_in": true')
+    if value is None or not Path(value).is_absolute():
+        # Default/relative storage is only safe while it really stays inside this
+        # checkout. A symlinked .private (or a symlink below it) that resolves
+        # elsewhere needs the explicit absolute private_dir opt-in instead.
+        if not resolved.is_relative_to(root):
+            raise ValueError('.private storage resolves outside the source tree (symlink?); use an absolute '
+                             'private_dir with "private_dir_absolute_opt_in": true for storage elsewhere')
+        if private_root != root / '.private':
+            raise ValueError('.private storage root must not redirect into a public source directory')
+    if resolved == Path('/') or root.is_relative_to(resolved):
+        raise ValueError('Private game directory cannot contain the source tree')
+    if resolved.is_relative_to(root) and not resolved.is_relative_to(root / '.private'):
+        raise ValueError('Private game directory inside the source tree must be under .private/')
+    return resolved
+
+
 def load_profile(path):
+    if path is None:
+        raise ValueError('This command needs an explicit per-game --profile (see profiles/example-game.json)')
     path = Path(path).resolve()
+    if not path.is_file():
+        raise ValueError(f'Profile not found: {path}; create one with new-profile or next-game --title/--source')
     profile = json.loads(path.read_text())
-    if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', profile['id']):
+    if not isinstance(profile, dict):
+        raise ValueError('Profile must be a JSON object')
+    if not isinstance(profile.get('id'), str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', profile['id']):
         raise ValueError('Profile id must contain lowercase letters, digits, hyphens or underscores')
-    private = (ROOT / profile.get('private_dir', f'.private/games/{profile["id"]}')).resolve()
-    if private == ROOT or private == ROOT.parent or private == Path('/'):
-        raise ValueError('Private game directory cannot be the source root or filesystem root')
-    return profile, private
+    return profile, private_directory(profile)
 
 
 def boot_executable(root, profile):
@@ -351,6 +399,71 @@ def analyze(profile, private):
     print('Analyzer finished; configuration saved locally')
 
 
+CPP_SUFFIXES = {'.cpp', '.cc', '.cxx', '.c++'}
+
+
+def generated_sources(directory):
+    """The one generated-C++ inventory shared by translation, knowledge, syntax checks and builds.
+
+    Every consumer (including cmake/AttachGame.cmake) reads top-level *.cpp only, so nested
+    or differently suffixed C++ fails closed instead of being silently skipped.
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        raise ValueError('No generated source directory; run translate first')
+    top, unsupported = [], []
+    for path in directory.rglob('*'):
+        if path.suffix.lower() not in CPP_SUFFIXES:
+            continue
+        if path.is_symlink():
+            raise ValueError(f'Generated C++ must not be a symlink: {path.name}')
+        if path.parent == directory and path.suffix == '.cpp':
+            top.append(path)
+        else:
+            unsupported.append(str(path.relative_to(directory)))
+    if unsupported:
+        raise ValueError(f'Nested or non-.cpp generated C++ is not supported by all consumers: {sorted(unsupported)[:5]}')
+    return sorted(top)
+
+
+SUMMARY = re.compile(r'Functions processed: (\d+), recompiled: (\d+), stubs: (\d+), skipped: (\d+), decode failures: (\d+)')
+DIAGNOSTICS = re.compile(r'Warnings: (\d+), errors: (\d+)')
+
+
+def translation_acceptance(report):
+    """Parse the recompiler summary. Missing/unrecognized summaries and reported errors fail closed.
+
+    Stubs and skipped functions are reported separately: they are not implementations.
+    """
+    counts, blockers = {}, []
+    summary, diagnostics = SUMMARY.search(report), DIAGNOSTICS.search(report)
+    if summary:
+        counts.update(zip(['processed', 'recompiled', 'stubs', 'skipped', 'decode_failures'], map(int, summary.groups())))
+    else:
+        blockers.append('recompiler function summary missing or unrecognized')
+    if diagnostics:
+        counts.update(warnings=int(diagnostics[1]), errors=int(diagnostics[2]))
+    else:
+        blockers.append('recompiler warning/error summary missing or unrecognized')
+    if counts.get('decode_failures'):
+        blockers.append(f"{counts['decode_failures']} instruction decode failures")
+    if counts.get('errors'):
+        blockers.append(f"{counts['errors']} recompiler errors")
+    return dict(counts=counts, accepted=not blockers, blockers=blockers,
+                stub_functions=counts.get('stubs'), skipped_functions=counts.get('skipped'),
+                stubs_are_implementations=False)
+
+
+def require_accepted_translation(private):
+    path = Path(private) / 'analysis/translation-stage.json'
+    if not path.is_file():
+        raise ValueError('Run translate first')
+    stage = json.loads(path.read_text())
+    if stage.get('accepted') is not True:
+        raise ValueError('Translation was not accepted: ' + '; '.join(stage.get('blockers') or ['legacy record without acceptance; retranslate']))
+    return stage
+
+
 def correct_generated_sqrt(directory):
     """Compatibility entry point backed by the executable knowledge bank."""
     from knowledge import apply_translation
@@ -377,26 +490,28 @@ def translate(profile, private):
     corrections = learned['totals']
     save(private/'analysis/knowledge-translation.json', learned)
     save(private / 'analysis/sqrt-translation-corrections.json', corrections)
-    files = list((private / 'generated').rglob('*.cpp'))
+    files = generated_sources(private / 'generated')
     if not files:
         raise RuntimeError('Tool exited successfully but emitted no C++ files')
-    report = (private / 'logs/translate.log').read_text(errors='replace')
-    summary = re.search(r'Functions processed: (\d+), recompiled: (\d+), stubs: (\d+), skipped: (\d+), decode failures: (\d+)', report)
-    counts = dict(zip(['processed', 'recompiled', 'stubs', 'skipped', 'decode_failures'], map(int, summary.groups()))) if summary else {}
-    warnings = re.search(r'Warnings: (\d+), errors: (\d+)', report)
-    if warnings:
-        counts.update(warnings=int(warnings[1]), errors=int(warnings[2]))
-    save(private / 'analysis/translation-stage.json', {'success': True, 'cpp_files': len(files), 'counts': counts,
-         'cpp_bytes': sum(p.stat().st_size for p in files), 'tool_revision': LOCK['ps2recomp']['revision'],
+    acceptance = translation_acceptance((private / 'logs/translate.log').read_text(errors='replace'))
+    save(private / 'analysis/translation-stage.json', {'success': acceptance['accepted'], **acceptance,
+         'cpp_files': len(files), 'cpp_bytes': sum(p.stat().st_size for p in files),
+         'tool_revision': LOCK['ps2recomp']['revision'],
          'native_build_verified': False, 'runtime_verified': False,
          'knowledge_bank_revision': learned['bank_revision'], 'knowledge_bank_sha256': learned['bank_sha256']})
-    print(f'Translation emitted {len(files)} C++ files. Native build and gameplay remain unverified.')
+    counts = acceptance['counts']
+    print(f'Translation emitted {len(files)} C++ files; {counts.get("stubs", "unknown")} stub and '
+          f'{counts.get("skipped", "unknown")} skipped functions are not implementations.')
+    if not acceptance['accepted']:
+        raise RuntimeError('Translation not accepted; downstream native stages are blocked: ' + '; '.join(acceptance['blockers']))
+    print('Native build and gameplay remain unverified.')
 
 
 def check_generated(profile, private):
     """Check representative generated source with the native compiler, not a game build."""
     directory = private / 'generated'
-    files = sorted(directory.glob('*.cpp'))
+    require_accepted_translation(private)
+    files = generated_sources(directory)
     if not files:
         raise ValueError('Run translate first')
     # Spread a general sample across the inventory and include largest functions.
@@ -437,7 +552,7 @@ def status(profile, private):
 
 def main(target=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--profile', default=str(ROOT / ('profiles/game.json' if target else 'profiles/kelly-slater.json')))
+    parser.add_argument('--profile', help='Explicit per-game profile JSON (required for game processing)')
     sub = parser.add_subparsers(dest='command', required=True)
     for cmd in ['doctor', 'bootstrap', 'bootstrap-runtime', 'build-native', 'test-runtime', 'boot-probe', 'diagnose', 'package-local', 'verify', 'inspect', 'analyze', 'translate', 'check-generated', 'prepare', 'status']:
         sub.add_parser(cmd)
@@ -492,10 +607,19 @@ def main(target=None):
     comparison.add_argument('baseline', help='Baseline local run name')
     comparison.add_argument('candidate', help='Candidate local run name')
     comparison.add_argument('--name', required=True, help='Unique local comparison name')
-    new = sub.add_parser('new-profile')
+    new = sub.add_parser('new-profile', help='Create a per-game profile under .private/profiles (never inside public profiles/)')
     new.add_argument('id')
     new.add_argument('--title', required=True)
+    new.add_argument('--source', help='Mounted disc directory; pins BOOT2 executable and SHA-256')
+    new.add_argument('--output', help='Profile path (default .private/profiles/<id>.json); filename must be <id>.json')
     args = parser.parse_args()
+    # A next-game parent passes its resolved tool/work root. A mismatch means this
+    # child would use different tools than the parent's resume contract pinned.
+    expected = os.environ.get('PS2_PORT_LAB_EXPECTED_WORK')
+    if expected and Path(expected).resolve() != WORK:
+        raise RuntimeError(f'Work directory mismatch: parent pinned {expected}, child resolved {WORK}')
+    if expected:
+        print(f'[pipeline] work={WORK}', flush=True)
     if target is not None:
         from target_cli import check_target
         try: check_target(target, args.command)
@@ -514,12 +638,18 @@ def main(target=None):
         return
     if args.command == 'next-game':
         from next_game import run, create_profile
+        if args.profile is None:
+            raise ValueError('next-game needs an explicit per-game --profile path (it is created when missing)')
         if not Path(args.profile).exists():
             if not args.title or not args.source:
                 raise ValueError('New profile requires --title and --source')
             if not args.execute:
                 raise ValueError('Create a profile with new-profile first, or use --execute with --title/--source')
             create_profile(args.profile, args.title, args.source)
+        elif args.title:
+            existing, _ = load_profile(args.profile)
+            if existing.get('title') != args.title:
+                raise ValueError(f'Profile {args.profile} belongs to {existing.get("title")!r}; use a separate profile for another title')
         report = run(args.profile, args.name, args.source, args.through, args.execute, args.resume)
         print(json.dumps({'status':report['status'], 'playable_certified':False,
                           'remaining_gates':report['remaining_gates']}, indent=2))
@@ -543,12 +673,21 @@ def main(target=None):
     if args.command == 'new-profile':
         if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', args.id):
             raise ValueError('Invalid profile id')
-        path = ROOT / f'profiles/{args.id}.json'
+        path = Path(args.output).resolve() if args.output else PRIVATE_ROOT / f'profiles/{args.id}.json'
+        if path.stem != args.id or path.suffix != '.json':
+            raise ValueError('Profile filename must be <id>.json')
         if path.exists():
             raise ValueError('Profile already exists')
-        save(path, {'id': args.id, 'title': args.title, 'runtime_status': 'not_integrated'})
+        if args.source:
+            from next_game import create_profile
+            create_profile(path, args.title, args.source)
+        else:
+            save(path, {'id': args.id, 'title': args.title, 'runtime_status': 'not_integrated'})
         print(path)
+        print(f'Use it explicitly: python3 run.py --profile "{path}" <command>')
         return
+    if args.command in PROFILE_COMMANDS_WITHOUT_PROFILE:
+        raise RuntimeError('Unhandled profile-free command: ' + args.command)
     profile, private = load_profile(args.profile)
     private.mkdir(parents=True, exist_ok=True)
     if args.command == 'freeze-source':
@@ -632,9 +771,14 @@ def main(target=None):
         globals()[args.command](profile, private)
 
 
-if __name__ == '__main__':
+def cli(target=None):
+    """Shared command-line wrapper for pipeline.py, run.py targets and platform adapters."""
     try:
-        main()
+        main(target)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as e:
         print(f'ERROR: {e}', file=sys.stderr)
         sys.exit(1)
+
+
+if __name__ == '__main__':
+    cli()

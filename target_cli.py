@@ -20,7 +20,7 @@ def main():
     if len(sys.argv)<2 or sys.argv[1] not in {'cpp','macos'}:
         raise SystemExit('Usage: python3 target_cli.py {cpp|macos} [pipeline options] command')
     target=sys.argv.pop(1)
-    pipeline.main(target=target)
+    pipeline.cli(target=target)
 
 
 if __name__=='__main__': main()

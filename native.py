@@ -91,10 +91,9 @@ def build_native(profile, private):
     # The native product must consume current executable knowledge and a declared
     # memory contract; a linked runner is unsafe evidence if these are missing.
     from knowledge import load, plan, sha
-    translation = private/'analysis/translation-stage.json'
-    if not translation.is_file():
-        raise ValueError('Run translate first')
-    stage = json.loads(translation.read_text())
+    # Missing/unrecognized recompiler summaries and reported decode/errors block native builds.
+    stage = lab.require_accepted_translation(private)
+    lab.generated_sources(private / 'generated')  # nested/unsupported generated C++ fails closed
     bank = load()
     expected_bank = sha(json.dumps(bank,sort_keys=True).encode())
     if stage.get('knowledge_bank_sha256') != expected_bank:

@@ -6,23 +6,35 @@ download games, call AI services, or claim an arbitrary disc is playable.
 One-time public-tool setup, separate from processing retail input:
 
 ```sh
-python3 pipeline.py doctor
-python3 pipeline.py bootstrap
-python3 pipeline.py bootstrap-runtime
+python3 run.py doctor
+python3 run.py bootstrap
+python3 run.py --target macos bootstrap-runtime
 ```
 
-For a new game, choose a distinct ID (and a separate profile for each revision):
+For a new game, choose a distinct ID and an explicit profile path (a separate
+profile for each revision). `next-game` has no default profile:
 
 ```sh
-python3 pipeline.py --profile profiles/next-title.json next-game \
+python3 run.py --profile .private/profiles/next-title.json next-game \
   --title "Next title" --source /Volumes/DISC_NAME --name first --through translate --execute
 ```
+
+If the profile already exists for a different title, the command stops rather
+than reusing it. The profile filename (without `.json`) becomes the title ID;
+private storage defaults to `.private/games/<id>` (see README "Profiles and
+private storage").
 
 This command creates a missing profile and pins its boot executable revision,
 imports/resumes the disc copy, verifies checksums, reads BOOT2
 and the MIPS ELF, runs the executable knowledge contract/import stage, analyzes functions, generates C++, applies the versioned rule bank including the known SQRT.S
 operand issue and runs representative native syntax checks. It stops at the first
 failure with a local ticket and log, rather than continuing with invalid output.
+Translation must be accepted: a missing or unrecognized recompiler summary, any
+decode failure or any recompiler error blocks the run before syntax checks. Stub
+and skipped function counts are reported separately; they are not implementations.
+Nested generated C++ fails closed. Child stages run as separate `pipeline.py`
+processes with the parent's tool/work root (`PS2_PORT_LAB_WORK`) and refuse to run
+if they resolve a different one; other `PS2_PORT_*`/`PS2X_*` settings are removed.
 `--through intake` stops after inspection; omitting `--execute` only records a plan.
 
 Reports live in the profile's private `next-game-runs/first/report.json`.
@@ -31,7 +43,7 @@ not automatic IOP import coverage: that still needs module-level analysis.
 To resume after an interruption with the same mounted source and unchanged tools:
 
 ```sh
-python3 pipeline.py --profile profiles/next-title.json next-game \
+python3 run.py --profile .private/profiles/next-title.json next-game \
   --source /Volumes/DISC_NAME --name first --through translate --execute --resume
 ```
 

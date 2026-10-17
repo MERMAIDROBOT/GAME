@@ -1,0 +1,6 @@
+{
+  "id": "example-game",
+  "title": "Example title (template; create real profiles under .private/profiles)",
+  "runtime_status": "not_integrated",
+  "notes": "Template only. Create a real per-game profile with: python3 run.py new-profile <id> --title \"Title\" --source /Volumes/DISC. Private storage defaults to .private/games/<id>. An existing project elsewhere may set an absolute private_dir together with \"private_dir_absolute_opt_in\": true."
+}

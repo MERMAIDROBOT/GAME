@@ -59,7 +59,7 @@ def outputs(private, command, artifact):
     return {str(p.relative_to(private)):lab.digest(p) for p in paths if p.is_file()}
 
 
-def run(profile_path, name, source=None, through='intake', execute=False, resume=False, runner=None):
+def run(profile_path, name, source=None, through='intake', execute=False, resume=False, runner=None, process_audit=True):
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', name): raise ValueError('Invalid run name')
     if through not in {'intake', 'translate'}: raise ValueError('Unknown automation target')
     profile, private = lab.load_profile(profile_path)
@@ -77,7 +77,7 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
     tools = {str(p): lab.digest(p) if p.is_file() else None for p in
              [lab.BUILD/'ps2xAnalyzer/ps2_analyzer', lab.BUILD/'ps2xRecomp/ps2_recomp']}
     contract = dict(profile_sha256=lab.digest(profile_path), executable_sha256=identity,
-                    implementation=engine, tools=tools, source=str(disc.resolve()), through=through)
+                    implementation=engine, tools=tools, work=str(lab.WORK), source=str(disc.resolve()), through=through)
     if previous and previous['contract'] != contract:
         raise ValueError('Resume input/profile/tooling changed; start a new run')
     stages = ([('import', 'disc-manifest.json')] if source else []) + STAGES[:3 if through == 'intake' else 6]
@@ -97,7 +97,7 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
     with lock_path.open('a+') as lock:
         try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError: raise RuntimeError('Another next-game run owns the pipeline slot')
-        if runner is None:
+        if runner is None and process_audit:
             # Fail closed if process visibility is unavailable. Never stop another worker.
             active = subprocess.check_output(['/bin/ps', '-axo', 'comm='], text=True)
             conflicts = [p for p in active.splitlines() if any(Path(p.strip()).name == n for n in
@@ -127,15 +127,21 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
                 if runner:
                     runner(command, private)
                 else:
+                    # Strip game/runtime toggles, but keep this run's pinned tool/work root:
+                    # child stages must use the same tools the resume contract recorded.
                     env = {k:v for k,v in os.environ.items() if not k.startswith(('PS2_PORT_', 'PS2X_'))}
+                    env['PS2_PORT_LAB_WORK'] = env['PS2_PORT_LAB_EXPECTED_WORK'] = str(lab.WORK)
                     # Download/setup commands are intentionally absent from this workflow.
                     with log.open('w') as stream:
                         subprocess.run(arguments, stdout=stream, stderr=subprocess.STDOUT, env=env, check=True)
                 if not (private/artifact).is_file(): raise RuntimeError('Stage did not produce its required artifact')
                 if command == 'translate':
-                    counts = json.loads((private/artifact).read_text()).get('counts', {})
+                    stage = json.loads((private/artifact).read_text())
+                    counts = stage.get('counts', {})
                     if counts.get('errors', 0) or counts.get('decode_failures', 0):
                         raise RuntimeError('Translation reports errors/decode failures; resolve instruction coverage before proceeding')
+                    if stage.get('accepted') is not True:
+                        raise RuntimeError('Translation not accepted: ' + '; '.join(stage.get('blockers') or ['missing acceptance record']))
                 if command in mapped:
                     from enhancements import record_stage
                     record_stage(profile,private,mapped[command],artifact)

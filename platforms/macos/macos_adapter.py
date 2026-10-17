@@ -16,7 +16,7 @@ def main():
     if API_VERSION != 1:
         raise SystemExit('Unsupported core API; update this adapter')
     import pipeline
-    pipeline.main(target='macos')
+    pipeline.cli(target='macos')
 
 
 if __name__ == '__main__':

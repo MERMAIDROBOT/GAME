@@ -119,7 +119,8 @@ def apply_translation(directory, identity=None, bank=None, only=None, write=True
     directory=Path(directory).resolve(); pending=[]; records=[]
     selected=[r for r in bank['rules'] if r['kind']=='fpu_operand' and eligible(r,identity) and (only is None or r['id'] in only)]
     totals=dict(instructions=0,corrected=0,files_changed=0)
-    for path in sorted(directory.glob('*.cpp')):
+    # Shared inventory: nested generated C++ fails closed rather than escaping the rules.
+    for path in lab.generated_sources(directory):
         if path.is_symlink() or not path.resolve().is_relative_to(directory): raise ValueError('Unsafe generated source')
         raw=path.read_bytes(); original=raw.decode(); updated=original; applied=[]
         for rule in selected:

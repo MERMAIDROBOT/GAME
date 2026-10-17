@@ -9,12 +9,12 @@ The existing pipeline imports and verifies a local disc, inspects its ELF, runs 
 The new recipe layer consolidates provenance before rebuilding:
 
 ```sh
-python3 pipeline.py --profile profiles/TITLE.json compiler-toolchain --name host-01
+python3 pipeline.py --profile .private/profiles/TITLE.json compiler-toolchain --name host-01
 
-python3 pipeline.py --profile profiles/TITLE.json compiler-plan \
+python3 pipeline.py --profile .private/profiles/TITLE.json compiler-plan \
   --recipe compiler-recipes/REVISION.json --name review-01
 
-python3 pipeline.py --profile profiles/TITLE.json compiler-stage \
+python3 pipeline.py --profile .private/profiles/TITLE.json compiler-stage \
   --recipe compiler-recipes/REVISION.json --name sources-01
 ```
 
@@ -65,7 +65,7 @@ Whole-machine snapshots, automatic stub/import coverage, full independent-render
 
 ## Revision-gated title adapters
 
-`pipeline.py stage-adapters --manifest compiler-adapters/REVISION.json --name adapter-01` validates a private schema1 manifest against the title ID, boot executable hash and each module's full input hash. Every edit has a file offset, expected original bytes and equal-length replacement bytes; optional guards verify other instruction/context bytes. All revisions and guards must pass before any patched copy is emitted. Overlaps, size changes and unknown input revisions fail.
+`pipeline.py --profile PROFILE stage-adapters --manifest compiler-adapters/REVISION.json --name adapter-01` validates a private schema1 manifest against the title ID, boot executable hash and each module's full input hash. Every edit has a file offset, expected original bytes and equal-length replacement bytes; optional guards verify other instruction/context bytes. All revisions and guards must pass before any patched copy is emitted. Overlaps, size changes and unknown input revisions fail.
 
 Each adapter records its reason and removal condition. Outputs and reports stay under the private `adapter-runs` directory; the imported disc is untouched. Staging does not automatically activate a module in game loading or packaging. That integration and a regression run are required before removing an equivalent title-specific workaround from shared runtime code. Actual patch bytes/descriptors and patched modules stay out of the reusable source archive.
 
@@ -94,7 +94,7 @@ an isolated snapshot, pins compiler/SDK inputs, rebuilds, and compares native
 code with a preserved reference object. Example (all paths are private/local):
 
 ```sh
-python3 target_cli.py cpp freeze-source --compile-db /local/work/compile_commands.json \
+python3 target_cli.py cpp --profile PROFILE freeze-source --compile-db /local/work/compile_commands.json \
   --unit /Component.cpp --source /local/work/Component.cpp \
   --reference /local/work/Component.cpp.o --name component-closure-01
 ```

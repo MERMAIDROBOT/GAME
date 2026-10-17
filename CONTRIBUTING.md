@@ -3,9 +3,9 @@
 GAME contains the shared compiler, versioned knowledge bank and optional platform targets in one repository. See [PLATFORMS.md](PLATFORMS.md) for the adapter contract. Shared fixes and platform improvements use the same PR:
 
 ```sh
-python3 target_cli.py cpp --profile profiles/your-title.json next-game \
+python3 run.py --profile .private/profiles/your-title.json next-game \
   --title "Your title" --source /local/disc --name first --through translate --execute
-python3 target_cli.py macos --help
+python3 run.py --target macos --help
 ```
 
 The C++ export target is host-independent at the Python interface; real toolchain

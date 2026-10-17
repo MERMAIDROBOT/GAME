@@ -73,7 +73,7 @@ replacement work. This repository does **not** yet rebuild that complete stack
 from a fresh checkout. Exact runtime/IOP/renderer source and link consolidation,
 revision-gated adapters, native conformance and second-title validation remain
 required. No universal compatibility, original-source recovery or 120 FPS claim
-is made. The latest local generic suite passed 171 tests; CI results are separate.
+is made. The latest local generic suite passed 190 tests (2026-10-17); CI results are separate.
 
 Start with [ENGINE.md](ENGINE.md), [COMPILER.md](COMPILER.md),
 [NEXT-GAME.md](NEXT-GAME.md), [TEXTURES.md](TEXTURES.md) and
@@ -119,28 +119,62 @@ drop-in macOS backend.
 
 Requires Python 3.11+, Git, Apple's Command Line Tools on macOS, and network access during tool setup only.
 
-From this directory:
+From this directory. `run.py` is the user entry point; `run.py --help` lists every
+command of the selected target and `run.py <command> --help` shows its options.
+`pipeline.py` accepts the same commands for scripts. Errors print `ERROR: ...`
+and exit 1 rather than a traceback.
+
+### Profiles and private storage
+
+Every game-processing command needs an explicit per-game `--profile`; there is
+no default game. `profiles/example-game.json` is only a template. Create a
+profile, pinned to the boot executable on a mounted disc:
 
 ```sh
-python3 pipeline.py doctor
-python3 pipeline.py bootstrap
-python3 pipeline.py --profile profiles/kelly-slater.json verify
-python3 pipeline.py --profile profiles/kelly-slater.json inspect
-python3 pipeline.py --profile profiles/kelly-slater.json analyze
-python3 pipeline.py --profile profiles/kelly-slater.json translate
-python3 pipeline.py --profile profiles/kelly-slater.json check-generated
-python3 pipeline.py --profile profiles/kelly-slater.json status
+python3 run.py new-profile my-game --title "My game" --source /Volumes/DISC_NAME
+# writes .private/profiles/my-game.json (or --output PATH named my-game.json)
 ```
+
+Game storage defaults to `.private/games/<id>` (ignored by Git). A relative
+`private_dir` must stay under `.private/`. An existing project stored elsewhere
+may use an absolute `private_dir` only together with
+`"private_dir_absolute_opt_in": true`; storage inside the source tree outside
+`.private/`, or a directory containing the source tree, is rejected. Profiles are
+never migrated or rewritten automatically.
+
+Later examples write `PROFILE` (or `$P`) for this per-game profile path.
+
+```sh
+P=.private/profiles/my-game.json
+python3 run.py doctor
+python3 run.py bootstrap
+python3 run.py --profile $P import /Volumes/DISC_NAME
+python3 run.py --profile $P verify
+python3 run.py --profile $P inspect
+python3 run.py --profile $P analyze
+python3 run.py --profile $P translate
+python3 run.py --profile $P check-generated
+python3 run.py --profile $P status
+```
+
+`translate` accepts its output only when the recompiler's function summary and
+warning/error summary are both present and report zero decode failures and zero
+errors. Otherwise it records `accepted: false` with blockers, exits with an error,
+and `check-generated`/`build-native` refuse to run. Stub and skipped functions are
+recorded separately (`stub_functions`, `skipped_functions`) and are not
+implementations. Generated C++ must be top-level `*.cpp`; nested or other C++
+suffixes fail closed in translation, the knowledge rewrite, syntax checks and the
+CMake overlay until every consumer supports them.
 
 Native runtime stages (local macOS builds):
 
 ```sh
-python3 pipeline.py bootstrap-runtime
-python3 pipeline.py --profile profiles/kelly-slater.json build-native
-python3 pipeline.py --profile profiles/kelly-slater.json test-runtime
-python3 pipeline.py --profile profiles/kelly-slater.json boot-probe
-python3 pipeline.py --profile profiles/kelly-slater.json diagnose
-python3 pipeline.py --profile profiles/kelly-slater.json package-local
+python3 run.py --target macos bootstrap-runtime
+python3 run.py --target macos --profile $P build-native
+python3 run.py --target macos --profile $P test-runtime
+python3 run.py --target macos --profile $P boot-probe
+python3 run.py --target macos --profile $P diagnose
+python3 run.py --target macos --profile $P package-local
 ```
 
 `bootstrap-runtime` downloads/builds public dependencies without reading game files. FFmpeg is built with network support disabled and MPEG-2 decoding enabled. `build-native` uses the already-downloaded sources with CMake fetching disabled, and attaches local generated game files through the generic build overlay. It compiles and links the entire game runner. `boot-probe` launches that local runner for up to 30 seconds, records exit/timeout and diagnostics, and stops it. A timeout or successful exit does not establish that menus or gameplay work.
@@ -151,12 +185,12 @@ python3 pipeline.py --profile profiles/kelly-slater.json package-local
 
 `prepare` runs verification, inspection, analysis, and translation in sequence. `bootstrap` downloads and builds the pinned public toolchain separately from any game processing. Setup may need platform fixes when a new upstream revision is selected. See `PRIVACY.md` for the local-only processing policy.
 
-For another disc:
+For another disc, create a separate profile (one per title and revision):
 
 ```sh
-python3 pipeline.py new-profile my-game --title "My game"
-python3 pipeline.py --profile profiles/my-game.json import /Volumes/DISC_NAME
-python3 pipeline.py --profile profiles/my-game.json prepare
+python3 run.py new-profile other-game --title "Other game" --source /Volumes/OTHER_DISC
+python3 run.py --profile .private/profiles/other-game.json import /Volumes/OTHER_DISC
+python3 run.py --profile .private/profiles/other-game.json prepare
 ```
 
 An import produces a directory copy and checksum manifest, not a sector-level ISO. It is resumable: previously copied files are checked locally before skipping them. Import stops on a read failure and retains completed files. For discs with multiple executables or unusual boot layouts, edit the profile's `expected_executable` after inspecting the input. Unsupported or stripped executables may require a Ghidra function map instead of the analyzer fallback.
@@ -168,7 +202,7 @@ An import produces a directory copy and checksum manifest, not a sector-level IS
 | Import / verify | Per-file sizes and SHA-256 checks | Independent authenticity of a retail dump |
 | Inspect | ELF layout, symbols, boot path, compiler clues | Exact compiler identity or complete function boundaries |
 | Analyze | Upstream analyzer configuration and logs | Correct runtime bindings |
-| Translate | C++ output, tool return code, output inventory | Compilable output or playable behavior |
+| Translate | C++ output, tool return code, output inventory, acceptance (summary present, zero decode failures/errors), separate stub/skip counts | Compilable output or playable behavior |
 | Check generated | Native syntax checks of representative files | Full native build, linking, or runtime behavior |
 | Native build / local package | Full native executable and local debug app | Correct boot, menus, gameplay, or a distributable application |
 | Behavioral validation | Still required per game | No compatibility or graphics accuracy claim yet |
@@ -192,11 +226,11 @@ The window thread captures input and the guest reads a synchronized snapshot. Qu
 
 ## Display timing and graphics interrupt diagnostics
 
-The local runtime patch schedules display refreshes from elapsed host time so slow abstract guest-cycle accounting does not stall VBlank. Other scheduled events retain their cycle-based eligibility. Run `PS2_PORT_HOST_VSYNC_TEST=1 python3 pipeline.py test-runtime` to check display progress across a deliberately slow guest dispatch. Synthetic tests also check that a VIF command's interrupt reaches its registered guest handler exactly once.
+The local runtime patch schedules display refreshes from elapsed host time so slow abstract guest-cycle accounting does not stall VBlank. Other scheduled events retain their cycle-based eligibility. Run `PS2_PORT_HOST_VSYNC_TEST=1 python3 pipeline.py --profile PROFILE test-runtime` to check display progress across a deliberately slow guest dispatch. Synthetic tests also check that a VIF command's interrupt reaches its registered guest handler exactly once.
 
-For a bounded local transition probe, use `PS2_PORT_TEST_START=1 python3 pipeline.py diagnose`. In headless diagnostic mode this injects a brief Start press every two seconds, beginning after two seconds. It is disabled in normal-window launches. Passing a synthetic test does not establish menu or gameplay correctness; inspect the private probe log and framebuffer locally.
+For a bounded local transition probe, use `PS2_PORT_TEST_START=1 python3 pipeline.py --profile PROFILE diagnose`. In headless diagnostic mode this injects a brief Start press every two seconds, beginning after two seconds. It is disabled in normal-window launches. Passing a synthetic test does not establish menu or gameplay correctness; inspect the private probe log and framebuffer locally.
 
-To record local GS draw history during a transition probe, run `PS2_PORT_GS_TRACE=1 PS2_PORT_TEST_START=1 python3 pipeline.py diagnose`. This explicitly unpauses the runtime's otherwise paused graphics history. The private log records recent draw/transfer counts, draw bounds and the selected presentation framebuffer. A synthetic recording check is available with `PS2_PORT_GS_TRACE=1 python3 pipeline.py test-runtime`. Event counts refer to a bounded recent history, not lifetime totals.
+To record local GS draw history during a transition probe, run `PS2_PORT_GS_TRACE=1 PS2_PORT_TEST_START=1 python3 pipeline.py --profile PROFILE diagnose`. This explicitly unpauses the runtime's otherwise paused graphics history. The private log records recent draw/transfer counts, draw bounds and the selected presentation framebuffer. A synthetic recording check is available with `PS2_PORT_GS_TRACE=1 python3 pipeline.py --profile PROFILE test-runtime`. Event counts refer to a bounded recent history, not lifetime totals.
 
 Graphics tracing also saves a private JSONL event history and a 4 MiB VRAM snapshot beside it. `PS2_PORT_VU_TRACE=1` logs a bounded sample of matrix applications per call site. These files stay under the private game directory and must not be included in a source archive.
 
@@ -237,10 +271,10 @@ Store each game-specific scenario JSON under that game's private directory. Exam
 Allowed options also include `PS2_PORT_WATCH` and `PS2_PORT_HEAP_TRACE`. Unknown diagnostic environment options are rejected. The runner removes inherited `PS2_PORT_*` diagnostic flags so shell settings cannot silently alter the comparison. Definitions and reports contain game-specific observations and remain private.
 
 ```sh
-python3 pipeline.py scenario /absolute/private/game/analysis/scenarios/level.json --name baseline
+python3 pipeline.py --profile PROFILE scenario /absolute/private/game/analysis/scenarios/level.json --name baseline
 # After a candidate fix and build-native:
-python3 pipeline.py scenario /absolute/private/game/analysis/scenarios/level.json --name candidate
-python3 pipeline.py compare-scenarios baseline candidate --name comparison
+python3 pipeline.py --profile PROFILE scenario /absolute/private/game/analysis/scenarios/level.json --name candidate
+python3 pipeline.py --profile PROFILE compare-scenarios baseline candidate --name comparison
 python3 pipeline.py source-package
 ```
 
@@ -264,7 +298,7 @@ Keyboard button sampling also consumes queued key-press events, retaining quick 
 
 `PS2_PORT_GS_THREAD=1` selects a bounded CPU renderer worker queue; the default remains synchronous. This is adapted from the pinned comparison runtime, with blocking FINISH/flush/readback semantics, copied upload buffers, portable floating-point environment propagation and worker-error reporting. It provides no GPU acceleration.
 
-Run `PS2_PORT_GS_THREAD=1 python3 pipeline.py test-runtime` to exercise the runtime/VU/graphics suites with the worker enabled. A private scenario may also set this switch. Compare captured imagery and progression as well as timing: enabling a second thread is not proof of better FPS. The packaged launcher reads the boolean `renderer_worker` profile setting, which defaults to false for other discs. Kelly Slater enables it after two controlled paired comparisons showed higher guest-flip cadence. This remains experimental; complete gameplay and enhanced display FPS are unverified.
+Run `PS2_PORT_GS_THREAD=1 python3 pipeline.py --profile PROFILE test-runtime` to exercise the runtime/VU/graphics suites with the worker enabled. A private scenario may also set this switch. Compare captured imagery and progression as well as timing: enabling a second thread is not proof of better FPS. The packaged launcher reads the boolean `renderer_worker` profile setting, which defaults to false for other discs. Kelly Slater enables it after two controlled paired comparisons showed higher guest-flip cadence. This remains experimental; complete gameplay and enhanced display FPS are unverified.
 
 ## Private state-based navigation
 
@@ -378,14 +412,14 @@ Reports retain both errors and the block size. ACK, fresh-capture and stable-out
 requirements still apply. These are navigation checks, not rendering-quality proof.
 
 
-Local raw graphics replay is available through `pipeline.py replay-raw-gs CAPTURE --backend BACKEND_JSON --name UNIQUE_NAME [--batch on|off] [--timeout 300]`. Both inputs must resolve inside the selected profile's private game directory. Output stays under `logs/replays/UNIQUE_NAME`; existing runs are never overwritten.
+Local raw graphics replay is available through `pipeline.py --profile PROFILE replay-raw-gs CAPTURE --backend BACKEND_JSON --name UNIQUE_NAME [--batch on|off] [--timeout 300]`. Both inputs must resolve inside the selected profile's private game directory. Output stays under `logs/replays/UNIQUE_NAME`; existing runs are never overwritten.
 
 The backend JSON is private and uses schema1, protocol `pgscap-cli-v1`, and `executable`/`moltenvk` objects, each containing an absolute local `path` and its lowercase `sha256`. It may also record dependency revisions and source hashes. The native executable must accept `--capture PATH --output DIRECTORY --moltenvk PATH` and emit `result.json` and a full4MiB `vram.bin`. This command requires an explicitly built and pinned experimental backend; it does not install a renderer automatically.
 
 Preflight checks the capture's complete records and supported ingress before launching. Results retain capture/backend hashes, treatment, native status, logs and terminal snapshot hash. A successful command means a completed observation: inspect `matches_recorded_footer` separately. A CPU/GPU mismatch is not accepted rendering correctness. PGSCAP is not a PCSX2 GS dump and does not yet retain temporal scanout boundaries; replay cannot measure jitter, simulation speed, gameplay or display FPS. The cross-profile lock prevents overlapping instances of this replay command; audit other game/build/GPU processes before running it. All captures, backend manifests and results remain excluded from the source archive.
 
 
-Run `pipeline.py memory-audit --runtime-header /local/runtime/Helpers/State.h --layout analysis/memory-layout.json --name unique-audit` before adopting runtime-owned EE pools for a title. The layout stays inside private game storage and contains an `occupied` array of objects with `name`, hexadecimal-string `start`, and hexadecimal-string `size` fields. Include known guest heap, stack, callback arenas and other reservations. ELF load segments, including BSS, are added automatically. The command fingerprints the disc, layout and runtime header, rejects pool overlaps and malformed ranges, and preserves its report under `analysis/memory-audits/unique-audit/`. Existing audits are never overwritten. Exit2 means a collision; malformed input also fails.
+Run `pipeline.py --profile PROFILE memory-audit --runtime-header /local/runtime/Helpers/State.h --layout analysis/memory-layout.json --name unique-audit` before adopting runtime-owned EE pools for a title. The layout stays inside private game storage and contains an `occupied` array of objects with `name`, hexadecimal-string `start`, and hexadecimal-string `size` fields. Include known guest heap, stack, callback arenas and other reservations. ELF load segments, including BSS, are added automatically. The command fingerprints the disc, layout and runtime header, rejects pool overlaps and malformed ranges, and preserves its report under `analysis/memory-audits/unique-audit/`. Existing audits are never overwritten. Exit2 means a collision; malformed input also fails.
 
 This is an explicit audit command, not an automatic build/package gate. A passing result certifies only disjointness of declared ranges. It does not establish that an arbitrary game or PS2 kernel leaves a proposed low-memory region free; dynamic overlays and unknown allocations still require investigation. Actual layouts and reports remain excluded from the source archive.
 
