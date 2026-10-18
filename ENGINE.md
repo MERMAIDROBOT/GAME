@@ -95,3 +95,115 @@ asset-free portable semantic tests, not a full God of War or Kelly Slater game.
 The existing installed game and its generated source are not patched in place.
 Changing the knowledge-bank revision invalidates downstream receipts by design;
 future builds must retranslate and requalify rather than reuse an old acceptance.
+
+## Engine improvement priorities — October 17, 2026
+
+These are planned capability improvements, not implemented-feature claims.
+Prioritize successful, accurate conversion of additional titles. Build speed is
+supporting engineering work; loaded-code/guest-pointer work moves up when a
+reproducible compatibility failure demonstrates the need.
+
+| Priority | Capability | Direct engine benefit | Completion evidence |
+|---|---|---|---|
+| 1 | CPU instruction and floating-point accuracy | Fewer incorrect translations across titles | Compiled synthetic cases and independent expected results, with known deviations explicit |
+| 2 | VU0/VU1 translation and coverage | More geometry/animation programs execute correctly through native code | Complete state, memory and graphics-event comparisons, observed coverage and safe fallback |
+| 3 | Shared runtime behavior | More titles retain correct audio, saving, scheduling and native-service behavior | Versioned service contracts, original/native comparisons and isolated persistence tests |
+| 4 | Automatic failure diagnosis and reusable rules | Subsequent conversions expose actionable gaps and reuse verified corrections | Deterministic failure reports, synthetic reproducers and revisioned shared regressions |
+
+### 1. Instruction accuracy
+
+Extend the existing SQRT.S and PMULTH regression mechanisms into an instruction
+conformance runner. Compare generated code with independent expected values and,
+where qualified, a reference interpreter. Cover register aliases and zero
+registers, packed lanes, HI/LO, delay slots, likely branches, floating-point
+special values, denormals and rounding.
+
+Latest upstream float helpers are candidates, not a blanket upgrade. Their
+current tests document skipped denormal cases and tolerated rounding differences.
+A green upstream suite therefore cannot stand for bit-exact PS2 conformance.
+
+Acceptance requires failing-before/passing-after controls and a machine-readable
+deviation report. Unsupported instructions, unobserved comparisons, missing
+fixtures and exhausted execution budgets remain explicitly unverified or failed.
+
+References:
+[PS2Recomp float tests](https://github.com/ran-j/PS2Recomp/blob/eb8688b2fd191129f103a39543002c005b33409c/ps2xTest/src/ps2_float_semantics_tests.cpp),
+[PS2 hardware expected results](https://github.com/unknownbrackets/ps2autotests/blob/97469ffbed8631277b94e28d01dabd702aa97ef3/tests/cpu/ee_fpu/arithmetic.expected).
+
+### 2. VU coverage and correctness
+
+Extend the existing captured-program AOT workflow rather than build a duplicate.
+Track program bytes, entry PC, semantic mode, observed comparisons and interpreter
+fallback. Investigate VU0 microcode coverage and guarded VU1 deduplication.
+A hash match alone is insufficient to select compiled code.
+
+Qualify micro-PC wrapping, branch/VI backup, Q/P and flag latency, E-bit delay
+slots, self-modification, floating-point contraction and ordered GIF effects.
+A synthetic review of Devil Kings found an image-end delay-slot candidate larger
+than micro memory; its runtime rejects it safely. Preserve that fallback while
+fixing or adapting the analysis, rather than treating the finding as a proven
+rendering defect.
+
+Acceptance compares registers, flags, ACC/Q/P, memory and graphics events.
+Unsupported programs must retain a safe path. Approximate throughput modes and
+speculative worker execution stay disabled until strict comparisons pass and
+measured player routes show a benefit at the correct simulation speed.
+
+References:
+[Devil Kings analysis](https://github.com/DavvidMac/PS2Recomp-DevilKings/blob/b65592e383703e6def6e840f289681ba512a8903/ps2xRuntime/tools/vu1rec.py),
+[compiled-program guard](https://github.com/DavvidMac/PS2Recomp-DevilKings/blob/b65592e383703e6def6e840f289681ba512a8903/ps2xRuntime/src/lib/vu/ps2_vu1_compiled.cpp).
+
+### 3. Reusable runtime behavior
+
+Consolidate the existing generic runtime fixes before adopting another fork.
+Define required guest memory/register effects, scheduling, interrupts, deferred
+callbacks, clocks and module-version identity for each native replacement.
+Retain original execution or a qualified fallback when recognition fails.
+
+Validate audio channel/sample order, movie synchronization and underruns; thread,
+timer and RPC behavior; memory-card protocol and ECC; and durable save updates.
+Use synthetic fixtures and isolated copied cards, never destructive tests on
+user saves. Test interrupted commits and reopening/remounting, not merely a
+successful host file write. Correct menu audio does not qualify gameplay or movies.
+
+Keep title addresses, library variants and exceptional behavior in fingerprinted
+profiles. Generalize a fix only when its underlying contract is established.
+
+References:
+[native IOP module/service interface](https://github.com/Waffle565/God-Of-War-Native-Port/blob/49ca62c1d20b4659c61df6286c54e86edf411012/ps2xIOP/src/native/iop_native.h),
+[PCSX2 memory-card implementation](https://github.com/PCSX2/pcsx2/blob/091ab68708a555198d80a7216965481c7ddd0d98/pcsx2/SIO/Memcard/MemoryCardFile.cpp).
+
+### 4. Automatic failure diagnosis and accumulated knowledge
+
+Extend existing translation acceptance, import audits, next-game failure tickets
+and the versioned knowledge bank. Record unsupported opcodes/services, unresolved
+dispatch targets, fallback use and unqualified assumptions with tool/runtime
+versions and local module fingerprints. Reuse the existing player-mode and
+cadence gates so a menu or attract demo cannot pass as playable conversion.
+
+Discovery output is evidence, not automatically a correction. Candidate function
+boundaries, pointers and structures retain confidence/provenance and unresolved
+status until verified. Never accept an address as universal across titles or
+overlays.
+
+Every shared correction needs an independent behavioral basis, a synthetic
+reproducer, a negative control, revisioned provenance and regression coverage.
+Private reports stay local; public issues and PRs contain generic source and
+synthetic fixtures only. A later title may add a rule or invalidate an assumption;
+the engine does not train itself merely by collecting notes.
+
+References:
+[web compiler discovery](https://github.com/snuri00/ps2-web-recomp/blob/c628ae843209f6e4cef34ec04efb6267a1618882/recomp/analysis.cpp),
+[miss reporting and dispatch](https://github.com/snuri00/ps2-web-recomp/blob/c628ae843209f6e4cef34ec04efb6267a1618882/runtime/src/dispatch.cpp).
+
+### Implementation gates
+
+Start with the instruction/FPU conformance runner and visible deviation ledger.
+Then qualify a bounded VU improvement and a version-guarded runtime service
+through that evidence framework. Extend failure reports alongside each change,
+so verified lessons become executable tests and shared rules.
+
+Both C++ export and optional macOS workflows use the same shared fixes and PR
+stream. Keep the known-good application available. Adopt code selectively only
+after license, dependency, edge-case and regression review; source inspection or
+another title's reported FPS does not meet these gates.
