@@ -98,6 +98,10 @@ future builds must retranslate and requalify rather than reuse an old acceptance
 
 ## Engine improvement priorities — October 17, 2026
 
+The VU workflow now includes [entry dependency analysis](VU-DEPENDENCIES.md) in
+private reports and compilation manifests. This adds bounded diagnostic evidence
+for priority 2, with explicit unknown results and no runtime optimization activation.
+
 Implementation update: [scalar FPU corrections and compiled conformance](FPU.md)
 now implement a bounded part of priorities 1 and 4. The revision-3 bank corrects
 DIV/RSQRT emission, the native runtime receives reviewed scalar helpers, and

@@ -1,5 +1,15 @@
 # Reusable source licensing and dependencies
 
+## VU dependency analysis
+
+`vu_dependency_core.py` adapts the usage decoder, control-flow and live-input
+analysis from DavvidMac/PS2Recomp-DevilKings commit
+`b65592e383703e6def6e840f289681ba512a8903`,
+`ps2xRuntime/tools/vu1rec.py` (GPL-3.0). The adapter's source header records the
+changes; `tools/PS2Recomp-LICENSE` preserves the GPL-3.0 text. No generated title
+code or microprogram image is included. See [VU-DEPENDENCIES.md](VU-DEPENDENCIES.md)
+for the analysis limits and the optimizations deliberately not activated.
+
 ## Scalar FPU implementation and independent test reference
 
 `tools/ps2_scalar_fpu.h`, `patches/scalar-fpu.patch` and `fpu.py` adapt the scalar

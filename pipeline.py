@@ -46,6 +46,7 @@ SOURCE_FILES = ('pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTRO
                 '.github/workflows/both-targets.yml', '.github/PULL_REQUEST_TEMPLATE.md',
                 'source_freeze.py', 'tests/test_source_freeze.py', 'requirements.txt', 'platform_adapter.py', 'tests/test_platform_adapter.py', 'PLATFORMS.md', 'run.py', 'tests/test_entrypoint.py', 'tests/test_engine_fixes.py',
                 'mmi.py', 'tests/test_mmi.py', 'texture_seams.py', 'tests/test_texture_seams.py',
+                'vu_dependencies.py', 'vu_dependency_core.py', 'tests/test_vu_dependencies.py', 'VU-DEPENDENCIES.md',
                 'conformance.py', 'fpu.py', 'tests/test_fpu.py', 'tests/test_conformance.py',
                 'tests/fixtures/fpu-hardware.json', 'tools/ps2_scalar_fpu.h',
                 'tools/reference/ps2float.c', 'tools/reference/ps2float.h',
@@ -609,6 +610,9 @@ def main(target=None):
     textures.add_argument('--manifest', required=True)
     textures.add_argument('--name', required=True)
     sub.add_parser('compile-vu').add_argument('capture',help='Captured vector-code directory inside private game storage')
+    dep = sub.add_parser('analyze-vu-dependencies', help='Describe modeled VU entry inputs without enabling optimizations')
+    dep.add_argument('capture', help='Captured VU1 image directory inside private game storage')
+    dep.add_argument('--name', required=True)
     replay = sub.add_parser('replay-raw-gs', help='Replay a private capture through a pinned local backend')
     replay.add_argument('capture', help='Capture path relative to private game storage')
     replay.add_argument('--backend', required=True, help='Private pinned backend JSON path')
@@ -781,6 +785,9 @@ def main(target=None):
         from cadence import analyze_capture
         report = analyze_capture(profile, private, args.capture, args.name, args.expected_field_hz)
         print(json.dumps(report))
+    elif args.command == 'analyze-vu-dependencies':
+        from vu_dependencies import analyze_capture
+        print(json.dumps(analyze_capture(private,args.capture,args.name),indent=2))
     elif args.command == 'compile-vu':
         from vectors import compile_vu
         compile_vu(profile,private,args.capture)

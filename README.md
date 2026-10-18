@@ -26,6 +26,11 @@ adapter. See [PLATFORMS.md](PLATFORMS.md) for the extension contract.
 
 ## What is implemented
 
+- [Bounded VU1 dependency reports](VU-DEPENDENCIES.md), adapted from Devil Kings:
+  per-entry incoming-state descriptions, explicit unknowns and hash-pinned
+  evidence attached to private VU compilations. These do not enable speculative
+  execution or certify hardware correctness.
+
 - [Scalar FPU correction and compiled conformance checks](FPU.md): opcode-guarded
   DIV/RSQRT fixes, PS2 scalar result helpers, 174 published hardware-vector rows,
   and an independent integer reference backend. Known rounding deviations remain
