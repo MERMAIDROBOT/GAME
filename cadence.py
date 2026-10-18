@@ -107,10 +107,11 @@ def analyze(rows, expected_field_hz=60000/1001):
 def analyze_capture(profile, private, capture, name, expected_field_hz=60000/1001):
     from compiler import identifier
     from pipeline import digest, save
-    from replay import private_file
     identifier(name)
     private = Path(private).resolve()
-    source = private_file(private, capture)
+    source = (private/capture).resolve()
+    if not source.is_relative_to(private) or not source.is_file():
+        raise ValueError('Telemetry inputs must be files inside private game storage')
     if source.stat().st_size > MAX_BYTES:
         raise ValueError('Telemetry capture exceeds size limit')
     before = digest(source)

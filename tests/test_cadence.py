@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 from cadence import analyze, analyze_capture
 from target_cli import check_target
 
@@ -70,7 +71,9 @@ class CadenceTests(unittest.TestCase):
             private = Path(temp)/'private'; private.mkdir()
             source = private/'capture.csv'
             source.write_text('seconds,field,hash_valid,image_changed\n0,0,1,1\n1,60,1,1\n')
-            result = analyze_capture({'id':'synthetic'},private,source.name,'a',60)
+            # The core analyzer must not depend on Unix-only replay locking.
+            with patch.dict(sys.modules, {'replay':None, 'fcntl':None}):
+                result = analyze_capture({'id':'synthetic'},private,source.name,'a',60)
             report = private/'analysis/cadence/a/report.json'
             self.assertEqual(json.loads(report.read_text()),result)
             self.assertTrue(result['local_only'])
