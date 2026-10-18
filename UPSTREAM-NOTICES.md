@@ -1,5 +1,22 @@
 # Reusable source licensing and dependencies
 
+## Scalar FPU implementation and independent test reference
+
+`tools/ps2_scalar_fpu.h`, `patches/scalar-fpu.patch` and `fpu.py` adapt the scalar
+helpers and DIV/RSQRT generator corrections from ran-j/PS2Recomp commit
+`eb8688b2fd191129f103a39543002c005b33409c` (GPL-3.0). The hardware-vector collection
+at `tests/fixtures/fpu-hardware.json` is reformatted from that commit's
+`ps2xTest/src/ps2_float_hw_vectors.inc`; its original expected values come from
+published ps2autotests EE FPU results. No retail code or new hardware capture is
+included. Changes and qualification limits are described in [FPU.md](FPU.md).
+
+`tools/reference/ps2float.c` and `.h` are unmodified from libretro/ps2 commit
+`d4908f40fb32f43c5055852ecaed3c52aa725dce`, `pcsx2/ps2float.c` and `.h`.
+Their original PCSX2 copyright notices and LGPL-3.0-or-later terms remain in the
+files. `tools/reference/COPYING.LESSER` and `COPYING.GPLv3` preserve the license
+texts. The model is compiled locally for conformance tests, not linked into the
+game runtime or treated as proof of untested hardware behavior.
+
 The reusable engine source is prepared under GPL-3.0; the license text is in
 LICENSE. Existing upstream notices remain in copied/derived components. This
 does not license any user's retail game assets or generated game-specific code.

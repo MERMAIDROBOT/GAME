@@ -46,6 +46,11 @@ SOURCE_FILES = ('pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTRO
                 '.github/workflows/both-targets.yml', '.github/PULL_REQUEST_TEMPLATE.md',
                 'source_freeze.py', 'tests/test_source_freeze.py', 'requirements.txt', 'platform_adapter.py', 'tests/test_platform_adapter.py', 'PLATFORMS.md', 'run.py', 'tests/test_entrypoint.py', 'tests/test_engine_fixes.py',
                 'mmi.py', 'tests/test_mmi.py', 'texture_seams.py', 'tests/test_texture_seams.py',
+                'conformance.py', 'fpu.py', 'tests/test_fpu.py', 'tests/test_conformance.py',
+                'tests/fixtures/fpu-hardware.json', 'tools/ps2_scalar_fpu.h',
+                'tools/reference/ps2float.c', 'tools/reference/ps2float.h',
+                'tools/reference/COPYING.LESSER', 'tools/reference/COPYING.GPLv3',
+                'patches/scalar-fpu.patch', 'FPU.md',
                 'cadence.py', 'tests/test_cadence.py', 'NEW-REPOSITORIES-2026-10-17.md', 'CADENCE.md',
                 'platforms/macos/adapter.json', 'platforms/macos/macos_adapter.py')
 
@@ -95,7 +100,7 @@ def safe_relative(value):
 
 PRIVATE_ROOT = ROOT / '.private'
 PROFILE_COMMANDS_WITHOUT_PROFILE = {'doctor', 'bootstrap', 'bootstrap-runtime', 'source-package',
-                                    'knowledge-add', 'package-accepted-app', 'new-profile'}
+                                    'knowledge-add', 'package-accepted-app', 'new-profile', 'instruction-check'}
 
 
 def private_directory(profile, root=ROOT):
@@ -566,6 +571,10 @@ def main(target=None):
         sub.add_parser(cmd)
     sub.add_parser('import').add_argument('source')
     sub.add_parser('source-package')
+    check = sub.add_parser('instruction-check', help='Compile scalar FPU result checks against published hardware vectors')
+    check.add_argument('--backend', choices=['scalar','reference','legacy'], default='scalar')
+    check.add_argument('--allow-known-rounding', action='store_true', help='Explicitly qualify documented one-step rounding differences')
+    check.add_argument('--report', help='New local JSON report path; existing files are not overwritten')
     sub.add_parser('knowledge-plan', help='Detect reusable contracts and run configured knowledge gates')
     sub.add_parser('enhancement-plan', help='Schedule every graphics/game/runtime stage; missing evidence cannot pass')
     freeze = sub.add_parser('freeze-source', help='Rebuild and freeze a unit using actual compiler-discovered dependencies')
@@ -638,6 +647,21 @@ def main(target=None):
         except ValueError as error: parser.error(str(error))
     if args.command == 'source-package':
         package_source()
+        return
+    if args.command == 'instruction-check':
+        from conformance import run
+        path = Path(args.report) if args.report else None
+        if path and (path.exists() or path.is_symlink()):
+            raise ValueError('Conformance report already exists')
+        report = run(args.backend, args.allow_known_rounding)
+        if path:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open('x') as handle:
+                json.dump(report, handle, indent=2)
+                handle.write('\n')
+        print(json.dumps(report, indent=2))
+        if not report['accepted']:
+            raise RuntimeError('Instruction check is not accepted; inspect deviations/failures')
         return
     if args.command == 'knowledge-add':
         from knowledge import add_rule

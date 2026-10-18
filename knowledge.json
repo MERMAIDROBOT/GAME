@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": 2,
+  "revision": 3,
   "rules": [
     {
       "id": "ee-sqrt-ft",
@@ -94,6 +94,32 @@
         },
         {
           "word": "70221f09",
+          "emission": "corrected"
+        }
+      ]
+    },
+    {
+      "id": "ee-scalar-div-rsqrt",
+      "revision": 1,
+      "scope": "shared",
+      "status": "active",
+      "kind": "fpu_scalar",
+      "evidence": "ran-j/PS2Recomp #272 eb8688b; 174 published hardware result vectors and compiled synthetic operand/alias/negative controls; scalar results only, FCR31 is not fully qualified",
+      "fixtures": [
+        {
+          "word": "46041883",
+          "emission": "legacy"
+        },
+        {
+          "word": "46041896",
+          "emission": "legacy"
+        },
+        {
+          "word": "46041883",
+          "emission": "corrected"
+        },
+        {
+          "word": "46041896",
           "emission": "corrected"
         }
       ]

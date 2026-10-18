@@ -26,6 +26,11 @@ adapter. See [PLATFORMS.md](PLATFORMS.md) for the extension contract.
 
 ## What is implemented
 
+- [Scalar FPU correction and compiled conformance checks](FPU.md): opcode-guarded
+  DIV/RSQRT fixes, PS2 scalar result helpers, 174 published hardware-vector rows,
+  and an independent integer reference backend. Known rounding deviations remain
+  explicit; this does not qualify all CPU/VU behavior or retail gameplay.
+
 - Resumable local disc-file import with checksums, BOOT2 discovery, revision-pinned
   profiles, ELF inspection, PS2Recomp analysis/translation and representative
   generated-source syntax checks.

@@ -133,6 +133,7 @@ def build_native(profile, private):
         raise RuntimeError('Native build reported success without the runner binary')
     lab.save(record, {'success': True, 'binary': str(binary), 'sha256': lab.digest(binary),
                      'runtime_verified': False, 'built_at': time.time(),
+                     'runtime_patches': {name: lab.digest(lab.ROOT/name) for name in RUNTIME_PATCHES},
                      'vu_execution_supported':True,'compiled_vu':vu_record})
     print('Native runner linked locally. Gameplay remains unverified.')
 
@@ -172,15 +173,20 @@ def test_runtime(profile, private):
     print('Synthetic runtime in synchronous/worker modes, IOP imports, host input/presentation, 43 VU and 45 texture, palette and VRAM checks passed; no retail code executed.')
 
 
+RUNTIME_PATCHES = ('patches/runtime-diagnostics.patch', 'patches/scalar-fpu.patch')
+
+
 def apply_runtime_patch():
-    patch = lab.ROOT / 'patches/runtime-diagnostics.patch'
-    if not patch.exists():
-        return
-    reverse = subprocess.run(['git', '-C', str(lab.SOURCE), 'apply', '--reverse', '--check', str(patch)], capture_output=True)
-    if reverse.returncode == 0:
-        return
-    subprocess.run(['git', '-C', str(lab.SOURCE), 'apply', '--check', str(patch)], check=True)
-    subprocess.run(['git', '-C', str(lab.SOURCE), 'apply', str(patch)], check=True)
+    """Ordered public patches; missing or incompatible patches fail explicitly."""
+    for name in RUNTIME_PATCHES:
+        patch = lab.ROOT / name
+        if not patch.is_file():
+            raise ValueError('Required runtime source patch missing: '+name)
+        command = ['git', '-C', str(lab.SOURCE), 'apply']
+        if subprocess.run([*command, '--reverse', '--check', str(patch)], capture_output=True).returncode == 0:
+            continue
+        subprocess.run([*command, '--check', str(patch)], check=True)
+        subprocess.run([*command, str(patch)], check=True)
 
 
 def boot_probe(profile, private, headless=False):

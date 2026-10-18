@@ -1,0 +1,1229 @@
+{
+  "schema": 1,
+  "provenance": {
+    "vectors": "ran-j/PS2Recomp@eb8688b2fd191129f103a39543002c005b33409c/ps2xTest/src/ps2_float_hw_vectors.inc",
+    "original_expected": "unknownbrackets/ps2autotests@97469ffbed8631277b94e28d01dabd702aa97ef3/tests/cpu/ee_fpu/*.expected",
+    "license": "GPL-3.0 (upstream vector collection)",
+    "hardware_rerun": false
+  },
+  "cases": [
+    {
+      "op": "add",
+      "a": "00000000",
+      "b": "00000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "00000000",
+      "b": "80000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "80000000",
+      "b": "00000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "80000000",
+      "b": "80000000",
+      "expected": "80000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "00000000",
+      "b": "3f800000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "3f800000",
+      "b": "3f800000",
+      "expected": "40000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "3f800000",
+      "b": "00000000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "40000000",
+      "b": "40000000",
+      "expected": "40800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "40400000",
+      "b": "3f800000",
+      "expected": "40800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "40400000",
+      "b": "40400000",
+      "expected": "40c00000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "7fffffff",
+      "b": "7fffffff",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "7fffffff",
+      "b": "ffffffff",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "ffffffff",
+      "b": "7fffffff",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "ffffffff",
+      "b": "ffffffff",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "7fffffff",
+      "b": "00000000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "00000000",
+      "b": "7fffffff",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "00000000",
+      "b": "7f800000",
+      "expected": "7f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "7f800000",
+      "b": "7f800000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "ff800000",
+      "b": "7f800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "3f800000",
+      "b": "bf800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "3fffffff",
+      "b": "3f800000",
+      "expected": "403fffff",
+      "upstream_known": 1
+    },
+    {
+      "op": "add",
+      "a": "7f800001",
+      "b": "3f800000",
+      "expected": "7f800001",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "00000001",
+      "b": "3f800000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "3f800000",
+      "b": "3fffffff",
+      "expected": "403fffff",
+      "upstream_known": 1
+    },
+    {
+      "op": "add",
+      "a": "3f800000",
+      "b": "7f800001",
+      "expected": "7f800001",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "3f800000",
+      "b": "00000001",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "7fffffff",
+      "b": "3f800000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "ffffffff",
+      "b": "3f800000",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "3f800000",
+      "b": "7fffffff",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "3f800000",
+      "b": "ffffffff",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "add",
+      "a": "00001337",
+      "b": "deadbeef",
+      "expected": "deadbeef",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "00000000",
+      "b": "00000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "00000000",
+      "b": "80000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "80000000",
+      "b": "00000000",
+      "expected": "80000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "80000000",
+      "b": "80000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "00000000",
+      "b": "3f800000",
+      "expected": "bf800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "3f800000",
+      "b": "3f800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "3f800000",
+      "b": "00000000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "40000000",
+      "b": "40000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "40400000",
+      "b": "3f800000",
+      "expected": "40000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "40400000",
+      "b": "40400000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "7fffffff",
+      "b": "7fffffff",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "7fffffff",
+      "b": "ffffffff",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "ffffffff",
+      "b": "7fffffff",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "ffffffff",
+      "b": "ffffffff",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "7fffffff",
+      "b": "00000000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "00000000",
+      "b": "7fffffff",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "00000000",
+      "b": "7f800000",
+      "expected": "ff800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "7f800000",
+      "b": "7f800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "ff800000",
+      "b": "7f800000",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "3f800000",
+      "b": "bf800000",
+      "expected": "40000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "3fffffff",
+      "b": "3f800000",
+      "expected": "3f7ffffe",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "7f800001",
+      "b": "3f800000",
+      "expected": "7f800001",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "00000001",
+      "b": "3f800000",
+      "expected": "bf800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "3f800000",
+      "b": "3fffffff",
+      "expected": "bf7ffffe",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "3f800000",
+      "b": "7f800001",
+      "expected": "ff800001",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "3f800000",
+      "b": "00000001",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "7fffffff",
+      "b": "3f800000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "ffffffff",
+      "b": "3f800000",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "3f800000",
+      "b": "7fffffff",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "3f800000",
+      "b": "ffffffff",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "sub",
+      "a": "00001337",
+      "b": "deadbeef",
+      "expected": "5eadbeef",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "00000000",
+      "b": "00000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "00000000",
+      "b": "80000000",
+      "expected": "80000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "80000000",
+      "b": "00000000",
+      "expected": "80000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "80000000",
+      "b": "80000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "00000000",
+      "b": "3f800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "3f800000",
+      "b": "3f800000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "3f800000",
+      "b": "00000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "40000000",
+      "b": "40000000",
+      "expected": "40800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "40400000",
+      "b": "3f800000",
+      "expected": "40400000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "40400000",
+      "b": "40400000",
+      "expected": "41100000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "7fffffff",
+      "b": "7fffffff",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "7fffffff",
+      "b": "ffffffff",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "ffffffff",
+      "b": "7fffffff",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "ffffffff",
+      "b": "ffffffff",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "7fffffff",
+      "b": "00000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "00000000",
+      "b": "7fffffff",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "00000000",
+      "b": "7f800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "7f800000",
+      "b": "7f800000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "ff800000",
+      "b": "7f800000",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "3f800000",
+      "b": "bf800000",
+      "expected": "bf800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "3fffffff",
+      "b": "3f800000",
+      "expected": "3fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "7f800001",
+      "b": "3f800000",
+      "expected": "7f800001",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "00000001",
+      "b": "3f800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "3f800000",
+      "b": "3fffffff",
+      "expected": "3ffffffe",
+      "upstream_known": 1
+    },
+    {
+      "op": "mul",
+      "a": "3f800000",
+      "b": "7f800001",
+      "expected": "7f800001",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "3f800000",
+      "b": "00000001",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "7fffffff",
+      "b": "3f800000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "ffffffff",
+      "b": "3f800000",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "mul",
+      "a": "3f800000",
+      "b": "7fffffff",
+      "expected": "7ffffffe",
+      "upstream_known": 1
+    },
+    {
+      "op": "mul",
+      "a": "3f800000",
+      "b": "ffffffff",
+      "expected": "fffffffe",
+      "upstream_known": 1
+    },
+    {
+      "op": "mul",
+      "a": "00001337",
+      "b": "deadbeef",
+      "expected": "80000000",
+      "upstream_known": 2
+    },
+    {
+      "op": "div",
+      "a": "00000000",
+      "b": "00000000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "00000000",
+      "b": "80000000",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "80000000",
+      "b": "00000000",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "80000000",
+      "b": "80000000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "00000000",
+      "b": "3f800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "3f800000",
+      "b": "3f800000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "3f800000",
+      "b": "00000000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "40000000",
+      "b": "40000000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "40400000",
+      "b": "3f800000",
+      "expected": "40400000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "40400000",
+      "b": "40400000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "7fffffff",
+      "b": "7fffffff",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "7fffffff",
+      "b": "ffffffff",
+      "expected": "bf800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "ffffffff",
+      "b": "7fffffff",
+      "expected": "bf800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "ffffffff",
+      "b": "ffffffff",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "7fffffff",
+      "b": "00000000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "00000000",
+      "b": "7fffffff",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "00000000",
+      "b": "7f800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "7f800000",
+      "b": "7f800000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "ff800000",
+      "b": "7f800000",
+      "expected": "bf800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "3f800000",
+      "b": "bf800000",
+      "expected": "bf800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "3fffffff",
+      "b": "3f800000",
+      "expected": "3fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "7f800001",
+      "b": "3f800000",
+      "expected": "7f800001",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "00000001",
+      "b": "3f800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "3f800000",
+      "b": "3fffffff",
+      "expected": "3f000001",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "3f800000",
+      "b": "7f800001",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "3f800000",
+      "b": "00000001",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "7fffffff",
+      "b": "3f800000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "ffffffff",
+      "b": "3f800000",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "3f800000",
+      "b": "7fffffff",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "3f800000",
+      "b": "ffffffff",
+      "expected": "80000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "div",
+      "a": "00001337",
+      "b": "deadbeef",
+      "expected": "80000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "00000000",
+      "b": "00000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "80000000",
+      "b": "00000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "3f800000",
+      "b": "00000000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "40000000",
+      "b": "00000000",
+      "expected": "3fb504f3",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "40400000",
+      "b": "00000000",
+      "expected": "3fddb3d7",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "7fffffff",
+      "b": "00000000",
+      "expected": "5fb504f3",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "ffffffff",
+      "b": "00000000",
+      "expected": "5fb504f3",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "7f800000",
+      "b": "00000000",
+      "expected": "5f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "ff800000",
+      "b": "00000000",
+      "expected": "5f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "41c80000",
+      "b": "00000000",
+      "expected": "40a00000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "bf800000",
+      "b": "00000000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "3fffffff",
+      "b": "00000000",
+      "expected": "3fb504f3",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "7f800001",
+      "b": "00000000",
+      "expected": "5f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "00000001",
+      "b": "00000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "00001337",
+      "b": "00000000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "sqrt",
+      "a": "deadbeef",
+      "b": "00000000",
+      "expected": "4f152108",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "00000000",
+      "b": "00000000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "00000000",
+      "b": "80000000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "80000000",
+      "b": "00000000",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "80000000",
+      "b": "80000000",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "00000000",
+      "b": "3f800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "3f800000",
+      "b": "3f800000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "3f800000",
+      "b": "00000000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "40000000",
+      "b": "40000000",
+      "expected": "3fb504f3",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "40400000",
+      "b": "3f800000",
+      "expected": "40400000",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "40400000",
+      "b": "40400000",
+      "expected": "3fddb3d7",
+      "upstream_known": 1
+    },
+    {
+      "op": "rsqrt",
+      "a": "7fffffff",
+      "b": "7fffffff",
+      "expected": "5fb504f2",
+      "upstream_known": 1
+    },
+    {
+      "op": "rsqrt",
+      "a": "7fffffff",
+      "b": "ffffffff",
+      "expected": "5fb504f2",
+      "upstream_known": 1
+    },
+    {
+      "op": "rsqrt",
+      "a": "ffffffff",
+      "b": "7fffffff",
+      "expected": "dfb504f2",
+      "upstream_known": 1
+    },
+    {
+      "op": "rsqrt",
+      "a": "ffffffff",
+      "b": "ffffffff",
+      "expected": "dfb504f2",
+      "upstream_known": 1
+    },
+    {
+      "op": "rsqrt",
+      "a": "7fffffff",
+      "b": "00000000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "00000000",
+      "b": "7fffffff",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "00000000",
+      "b": "7f800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "7f800000",
+      "b": "7f800000",
+      "expected": "5f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "ff800000",
+      "b": "7f800000",
+      "expected": "df800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "3f800000",
+      "b": "41c80000",
+      "expected": "3e4ccccd",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "40a00000",
+      "b": "41c80000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "41c80000",
+      "b": "41c80000",
+      "expected": "40a00000",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "3f800000",
+      "b": "bf800000",
+      "expected": "3f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "3fffffff",
+      "b": "3f800000",
+      "expected": "3fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "7f800001",
+      "b": "3f800000",
+      "expected": "7f800001",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "00000001",
+      "b": "3f800000",
+      "expected": "00000000",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "3f800000",
+      "b": "3fffffff",
+      "expected": "3f3504f3",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "3f800000",
+      "b": "7f800001",
+      "expected": "1f800000",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "3f800000",
+      "b": "00000001",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "7fffffff",
+      "b": "3f800000",
+      "expected": "7fffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "ffffffff",
+      "b": "3f800000",
+      "expected": "ffffffff",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "3f800000",
+      "b": "7fffffff",
+      "expected": "1f3504f3",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "3f800000",
+      "b": "ffffffff",
+      "expected": "1f3504f3",
+      "upstream_known": 0
+    },
+    {
+      "op": "rsqrt",
+      "a": "00001337",
+      "b": "deadbeef",
+      "expected": "00000000",
+      "upstream_known": 0
+    }
+  ]
+}

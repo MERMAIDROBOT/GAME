@@ -10,7 +10,7 @@ import re
 import struct
 import pipeline as lab
 
-KINDS = {'mmi_pmulth', 'fpu_operand', 'memory_disjoint', 'iop_import_audit'}
+KINDS = {'fpu_scalar', 'mmi_pmulth', 'fpu_operand', 'memory_disjoint', 'iop_import_audit'}
 FIELDS = {'ft':16, 'fs':11}
 
 
@@ -77,6 +77,21 @@ def validate(bank):
                     if rule['helper']==other['helper'] and ((value ^ int(other['opcode_value'],16)) & common)==0:
                         raise ValueError('Overlapping active rewrite rules')
                 rewrites.append(rule)
+        if rule['kind']=='fpu_scalar' and rule['status']=='active':
+            from fpu import rewrite, legacy, emit, VALUES, MASK
+            if sum(r.get('kind')=='fpu_scalar' and r.get('status')=='active' for r in bank['rules'])!=1:
+                raise ValueError('Overlapping scalar FPU rules')
+            observed=set()
+            for fixture in rule.get('fixtures',[]):
+                word=int(fixture['word'],16); form=fixture['emission']
+                if form not in {'legacy','corrected'}: raise ValueError('Invalid scalar FPU fixture')
+                before=legacy(word) if form=='legacy' else emit(word)
+                result,count,changed=rewrite(f'// 0x1000: 0x{word:08x} instruction\n'+before)
+                if count!=1 or changed!=int(form=='legacy') or emit(word) not in result:
+                    raise ValueError('Scalar FPU regression fixture failed')
+                observed.add((word&MASK,form))
+            if observed!={(op,form) for op in VALUES for form in ('legacy','corrected')}:
+                raise ValueError('Scalar FPU fixtures need both opcodes, correction and idempotence')
         if rule['kind']=='mmi_pmulth':
             from mmi import rewrite, legacy, emit
             if any(r.get('kind')=='mmi_pmulth' and r is not rule and r.get('status')=='active'
@@ -132,15 +147,18 @@ def add_rule(bank_path,candidate_path):
 def apply_translation(directory, identity=None, bank=None, only=None, write=True):
     bank=validate(bank) if bank is not None else load()
     directory=Path(directory).resolve(); pending=[]; records=[]
-    selected=[r for r in bank['rules'] if r['kind'] in {'fpu_operand','mmi_pmulth'} and eligible(r,identity) and (only is None or r['id'] in only)]
+    selected=[r for r in bank['rules'] if r['kind'] in {'fpu_operand','mmi_pmulth','fpu_scalar'} and eligible(r,identity) and (only is None or r['id'] in only)]
     totals=dict(instructions=0,corrected=0,files_changed=0)
     # Shared inventory: nested generated C++ fails closed rather than escaping the rules.
     for path in lab.generated_sources(directory):
         if path.is_symlink() or not path.resolve().is_relative_to(directory): raise ValueError('Unsafe generated source')
         raw=path.read_bytes(); original=raw.decode(); updated=original; applied=[]
         for rule in selected:
-            if rule['kind']=='mmi_pmulth':
-                from mmi import rewrite
+            if rule['kind'] in {'mmi_pmulth','fpu_scalar'}:
+                if rule['kind']=='mmi_pmulth':
+                    from mmi import rewrite
+                else:
+                    from fpu import rewrite
                 updated,count,changed=rewrite(updated)
                 totals['instructions']+=count; totals['corrected']+=changed
                 if count: applied.append(dict(id=rule['id'],matched=count,changed=changed))
@@ -154,7 +172,11 @@ def apply_translation(directory, identity=None, bank=None, only=None, write=True
                 return match[1]+result
             updated=pattern.sub(replace,updated)
             # Unrecognized emission cannot silently escape the active rule.
-            if len(re.findall(re.escape(rule['helper'])+r'\s*\(',updated)) != count:
+            nested=0
+            if rule['helper']=='FPU_SQRT_S':
+                from fpu import nested_sqrt_calls
+                nested=nested_sqrt_calls(updated)
+            if len(re.findall(re.escape(rule['helper'])+r'\s*\(',updated)) != count+nested:
                 raise ValueError('FPU helper without a recognized instruction record: '+path.name)
             totals['instructions']+=count; totals['corrected']+=changed
             if count: applied.append(dict(id=rule['id'],matched=count,changed=changed))

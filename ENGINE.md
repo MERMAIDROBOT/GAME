@@ -98,6 +98,12 @@ future builds must retranslate and requalify rather than reuse an old acceptance
 
 ## Engine improvement priorities — October 17, 2026
 
+Implementation update: [scalar FPU corrections and compiled conformance](FPU.md)
+now implement a bounded part of priorities 1 and 4. The revision-3 bank corrects
+DIV/RSQRT emission, the native runtime receives reviewed scalar helpers, and
+`instruction-check` reports exact results, declared deviations and failures
+against 174 published hardware rows. This is not completion of the four tracks.
+
 These are planned capability improvements, not implemented-feature claims.
 Prioritize successful, accurate conversion of additional titles. Build speed is
 supporting engineering work; loaded-code/guest-pointer work moves up when a
