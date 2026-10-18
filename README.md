@@ -436,3 +436,11 @@ with compiled synthetic regression controls. Classified SR batches support
 [periodic texture context, animation-family treatment and explicit seam gates](TEXTURES.md#seam-preserving-classified-ai-batches).
 These additions do not change an already installed game, activate an untested
 renderer or certify that a generated texture pack is loaded in-game.
+
+## Engine improvement priorities
+
+The [capability roadmap](ENGINE.md#engine-improvement-priorities--october-17-2026)
+prioritizes instruction accuracy, VU coverage, shared runtime behavior and automatic
+failure diagnosis. It records planned work and acceptance gates separately from
+implemented features. Incremental build speed is supporting work; loaded-code
+handling is prioritized when a reproduced compatibility failure justifies it.
