@@ -88,7 +88,7 @@ state-and-packet verifier before any future execution optimization.
 | Devil Kings parallel runner | Not imported | Complete register/flag/memory dependencies, ordered commit, stale reruns and measured player-route benefit |
 | RAC / Metropolismania function oracle | Not imported wholesale | Original-execution backend and deterministic device/memory environment integrated with our runtime; hooks/masks and shared-helper blind spots qualified |
 | Waffle native IOP interface | Not substituted for our IOP | Version-guarded implementation plus register/memory/callback-order tests; an interface alone does not improve behavior |
-| Web runtime target feedback | Not imported as a parser-only feature | Actual unresolved-target producer in our runtime, overlay identity and alignment/executable-boundary controls |
+| Web runtime target feedback | [Bounded main-ELF hint workflow added](RUNTIME-FEEDBACK.md), using existing native/Web missing-target producers | Live code identity and overlay-generation capture remain unqualified; candidates require explicit translation consumption |
 
 These deferred items remain worthwhile candidates. Source inspection alone is not
 proof that inserting them into this engine is a safe improvement. No FPS gain,

@@ -46,6 +46,7 @@ SOURCE_FILES = ('pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTRO
                 '.github/workflows/both-targets.yml', '.github/PULL_REQUEST_TEMPLATE.md',
                 'source_freeze.py', 'tests/test_source_freeze.py', 'requirements.txt', 'platform_adapter.py', 'tests/test_platform_adapter.py', 'PLATFORMS.md', 'run.py', 'tests/test_entrypoint.py', 'tests/test_engine_fixes.py',
                 'mmi.py', 'tests/test_mmi.py', 'texture_seams.py', 'tests/test_texture_seams.py',
+                'feedback.py', 'tests/test_feedback.py', 'RUNTIME-FEEDBACK.md',
                 'vu_dependencies.py', 'vu_dependency_core.py', 'tests/test_vu_dependencies.py', 'VU-DEPENDENCIES.md',
                 'conformance.py', 'fpu.py', 'tests/test_fpu.py', 'tests/test_conformance.py',
                 'tests/fixtures/fpu-hardware.json', 'tools/ps2_scalar_fpu.h',
@@ -484,10 +485,14 @@ def correct_generated_sqrt(directory):
     return apply_translation(directory, only={'ee-sqrt-ft'})['totals']
 
 
-def translate(profile, private):
+def translate(profile, private, feedback=None):
     config = private / 'analysis/recomp.toml'
     if not config.exists():
         raise ValueError('Run analyze first')
+    feedback_receipt = None
+    if feedback is not None:
+        from feedback import consume
+        config, feedback_receipt = consume(profile, private, feedback)
     (private / 'analysis/translation-stage.json').unlink(missing_ok=True)
     (private / 'analysis/native-syntax-stage.json').unlink(missing_ok=True)
     (private / 'analysis/native-build-stage.json').unlink(missing_ok=True)
@@ -512,6 +517,7 @@ def translate(profile, private):
          'cpp_files': len(files), 'cpp_bytes': sum(p.stat().st_size for p in files),
          'tool_revision': LOCK['ps2recomp']['revision'],
          'native_build_verified': False, 'runtime_verified': False,
+         'runtime_target_feedback': feedback_receipt,
          'knowledge_bank_revision': learned['bank_revision'], 'knowledge_bank_sha256': learned['bank_sha256']})
     counts = acceptance['counts']
     print(f'Translation emitted {len(files)} C++ files; {counts.get("stubs", "unknown")} stub and '
@@ -568,8 +574,13 @@ def main(target=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile', help='Explicit per-game profile JSON (required for game processing)')
     sub = parser.add_subparsers(dest='command', required=True)
-    for cmd in ['doctor', 'bootstrap', 'bootstrap-runtime', 'build-native', 'test-runtime', 'boot-probe', 'diagnose', 'package-local', 'verify', 'inspect', 'analyze', 'translate', 'check-generated', 'prepare', 'status']:
+    for cmd in ['doctor', 'bootstrap', 'bootstrap-runtime', 'build-native', 'test-runtime', 'boot-probe', 'diagnose', 'package-local', 'verify', 'inspect', 'analyze', 'check-generated', 'prepare', 'status']:
         sub.add_parser(cmd)
+    translation = sub.add_parser('translate')
+    translation.add_argument('--feedback', help='Explicit private runtime-feedback run name; revalidates fingerprints')
+    feedback = sub.add_parser('collect-runtime-targets', help='Turn local missing-target logs into bounded main-ELF compilation hints')
+    feedback.add_argument('--log', required=True, help='Path relative to private game storage')
+    feedback.add_argument('--name', required=True)
     sub.add_parser('import').add_argument('source')
     sub.add_parser('source-package')
     check = sub.add_parser('instruction-check', help='Compile scalar FPU result checks against published hardware vectors')
@@ -730,7 +741,11 @@ def main(target=None):
         raise RuntimeError('Unhandled profile-free command: ' + args.command)
     profile, private = load_profile(args.profile)
     private.mkdir(parents=True, exist_ok=True)
-    if args.command == 'freeze-source':
+    if args.command == 'collect-runtime-targets':
+        from feedback import prepare
+        report = prepare(profile, private, args.log, args.name)
+        print(json.dumps(report, indent=2))
+    elif args.command == 'freeze-source':
         from source_freeze import freeze
         report=freeze(profile,private,args.compile_db,args.unit,args.source,args.reference,args.name)
         print(json.dumps({'status':report['status'],'text_matches':report.get('text_matches'),
@@ -801,6 +816,8 @@ def main(target=None):
         report=compare_scenarios(private, args.baseline, args.candidate, args.name)
         if not report['eligible_for_timing_comparison']:
             sys.exit(2)
+    elif args.command == 'translate':
+        translate(profile, private, args.feedback)
     elif args.command == 'prepare':
         verify(profile, private)
         inspect(profile, private)

@@ -454,3 +454,8 @@ prioritizes instruction accuracy, VU coverage, shared runtime behavior and autom
 failure diagnosis. It records planned work and acceptance gates separately from
 implemented features. Incremental build speed is supporting work; loaded-code
 handling is prioritized when a reproduced compatibility failure justifies it.
+
+The shared compiler now supports [private runtime-target feedback](RUNTIME-FEEDBACK.md):
+existing missing-target logs produce bounded main-ELF entry candidates and an
+explicit `translate --feedback` configuration. This does not certify functions,
+live code identity, overlay generations or gameplay.

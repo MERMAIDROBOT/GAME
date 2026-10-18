@@ -217,3 +217,8 @@ Both C++ export and optional macOS workflows use the same shared fixes and PR
 stream. Keep the known-good application available. Adopt code selectively only
 after license, dependency, edge-case and regression review; source inspection or
 another title's reported FPS does not meet these gates.
+
+The shared compiler now supports [private runtime-target feedback](RUNTIME-FEEDBACK.md):
+existing missing-target logs produce bounded main-ELF entry candidates and an
+explicit `translate --feedback` configuration. This does not certify functions,
+live code identity, overlay generations or gameplay.
