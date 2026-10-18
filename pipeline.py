@@ -47,6 +47,7 @@ SOURCE_FILES = ('pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTRO
                 'source_freeze.py', 'tests/test_source_freeze.py', 'requirements.txt', 'platform_adapter.py', 'tests/test_platform_adapter.py', 'PLATFORMS.md', 'run.py', 'tests/test_entrypoint.py', 'tests/test_engine_fixes.py',
                 'mmi.py', 'tests/test_mmi.py', 'texture_seams.py', 'tests/test_texture_seams.py',
                 'feedback.py', 'tests/test_feedback.py', 'RUNTIME-FEEDBACK.md',
+                'recovery.py', 'tests/test_recovery.py', 'tests/fixtures/integer-oracle.json', 'tools/recovery_runner.hpp', 'FUNCTION-RECOVERY.md', 'recovery_core/__init__.py', 'recovery_core/emu.py', 'recovery_core/vu0.py', 'recovery_core/layout.py', 'recovery_core/r5900.py', 'recovery_core/symexec.py', 'recovery_core/LICENSE', 'recovery_core/ORIGIN.json',
                 'vu_dependencies.py', 'vu_dependency_core.py', 'tests/test_vu_dependencies.py', 'VU-DEPENDENCIES.md',
                 'conformance.py', 'fpu.py', 'tests/test_fpu.py', 'tests/test_conformance.py',
                 'tests/fixtures/fpu-hardware.json', 'tools/ps2_scalar_fpu.h',
@@ -102,7 +103,7 @@ def safe_relative(value):
 
 PRIVATE_ROOT = ROOT / '.private'
 PROFILE_COMMANDS_WITHOUT_PROFILE = {'doctor', 'bootstrap', 'bootstrap-runtime', 'source-package',
-                                    'knowledge-add', 'package-accepted-app', 'new-profile', 'instruction-check'}
+                                    'knowledge-add', 'package-accepted-app', 'new-profile', 'instruction-check', 'oracle-check'}
 
 
 def private_directory(profile, root=ROOT):
@@ -583,6 +584,16 @@ def main(target=None):
     feedback.add_argument('--name', required=True)
     sub.add_parser('import').add_argument('source')
     sub.add_parser('source-package')
+    oracle = sub.add_parser('oracle-check', help='Run fixed expected integer/RAM original-execution regressions')
+    recovery = sub.add_parser('recover-function', help='Recover, compile and compare a bounded integer leaf against original instructions')
+    recovery.add_argument('--spec', required=True, help='Private recovery specification relative to game storage')
+    recovery.add_argument('--name', required=True)
+    recovery.add_argument('--bank', help='Private relative bank path, or @shared for the local cross-title bank')
+    recovery.add_argument('--reuse', help='Explicit content-hashed bank candidate; always reverified against target')
+    recovery.add_argument('--bindings', help='Private JSON of explicit old/new complete address constants')
+    find_recovery = sub.add_parser('find-recovery-candidates', help='Find exact/masked private code candidates without accepting reuse')
+    find_recovery.add_argument('--spec', required=True)
+    find_recovery.add_argument('--bank', required=True)
     check = sub.add_parser('instruction-check', help='Compile scalar FPU result checks against published hardware vectors')
     check.add_argument('--backend', choices=['scalar','reference','legacy'], default='scalar')
     check.add_argument('--allow-known-rounding', action='store_true', help='Explicitly qualify documented one-step rounding differences')
@@ -663,6 +674,10 @@ def main(target=None):
     if args.command == 'source-package':
         package_source()
         return
+    if args.command == 'oracle-check':
+        from recovery import qualify_oracle, implementation
+        print(json.dumps(dict(qualification=qualify_oracle(), implementation=implementation()), indent=2))
+        return
     if args.command == 'instruction-check':
         from conformance import run
         path = Path(args.report) if args.report else None
@@ -741,7 +756,16 @@ def main(target=None):
         raise RuntimeError('Unhandled profile-free command: ' + args.command)
     profile, private = load_profile(args.profile)
     private.mkdir(parents=True, exist_ok=True)
-    if args.command == 'collect-runtime-targets':
+    if args.command == 'recover-function':
+        from recovery import run
+        report = run(profile, private, args.spec, args.name, args.bank, args.reuse, args.bindings)
+        print(json.dumps({k:report[k] for k in ('status','cases','matched','accepted_on_cases','universal_equivalence','promoted_to_runtime')}, indent=2))
+        if not report['accepted_on_cases']: sys.exit(2)
+    elif args.command == 'find-recovery-candidates':
+        from recovery import load_spec, matches
+        code, _, _, _ = load_spec(profile, private, args.spec)
+        print(json.dumps(dict(candidates=matches(private, code, args.bank), accepted_for_target=False), indent=2))
+    elif args.command == 'collect-runtime-targets':
         from feedback import prepare
         report = prepare(profile, private, args.log, args.name)
         print(json.dumps(report, indent=2))

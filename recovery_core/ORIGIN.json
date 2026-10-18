@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/danielgomesvieira2000/ps2-port-engine",
+  "revision": "01a93a35cf6653802970c292feaa11c707a04754",
+  "license": "MIT",
+  "modifications": "None to upstream Python modules. Separate adapter restricts instructions, memory and promotion.",
+  "files": {
+    "emu.py": "c974d23dbc490ffa9e9c88ccadbf24316ab246884b9ad5541e281ad78c398c40",
+    "vu0.py": "c138f42413211ae1e55e4b604402721b82f54ebe87df08ed971711a7c51b8f29",
+    "layout.py": "f86a788759842e1f673fcf80761d5773051aecc9510d5e948a5bb799bc53d37f",
+    "r5900.py": "26c8edf5f603201c41dd462af0e5ba525d70e7bcbcfbc22c48f6c0bb138c28fa",
+    "symexec.py": "94172372a0d11b070377cce8ddb956467ced335a570d4d47ef0b34627051841d"
+  }
+}

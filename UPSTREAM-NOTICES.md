@@ -58,3 +58,19 @@ port: wrapped inference, consistent baseline/alpha borders, animation families
 and avoiding internal model-tile joins. No retail texture or trained model is
 included. External GPU renderer candidates remain reference-only and are not
 licensed or bundled by this source export.
+
+## Bounded function recovery and original execution
+
+`recovery_core/{emu,vu0,layout,r5900,symexec}.py` are unmodified MIT source from
+Daniel Gomes Vieira's `ps2-port-engine` at
+`01a93a35cf6653802970c292feaa11c707a04754`. `recovery_core/LICENSE` preserves the
+notice and `ORIGIN.json` pins each source. `recovery.py` restricts the public
+integer/RAM envelope and supplies an original checked C++ runner and private
+reuse adapter. The VU/float code imported by the upstream module is not admitted
+by this workflow. See FUNCTION-RECOVERY.md for qualifications and limits.
+
+The private cross-title candidate normalization is an original implementation
+informed by GT4 decomp's `tools/dedup.py` and `tools/crossgame.py` at
+`ec4261f8572d377f13de6f37d3825a95051075af`. No GT4 source recovery, game code,
+asset or compiler binary is bundled. A candidate hash does not prove equivalence;
+target original/native comparisons remain mandatory.

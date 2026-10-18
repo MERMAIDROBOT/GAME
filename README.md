@@ -459,3 +459,8 @@ The shared compiler now supports [private runtime-target feedback](RUNTIME-FEEDB
 existing missing-target logs produce bounded main-ELF entry candidates and an
 explicit `translate --feedback` configuration. This does not certify functions,
 live code identity, overlay generations or gameplay.
+
+[Function recovery and private cross-title reuse](FUNCTION-RECOVERY.md) now connect
+a qualified integer-subset interpreter, actual compiled readable C++ comparisons
+and content-addressed private recipes. Every target is compared anew. This is a
+bounded leaf-function workflow and does not activate replacements in a game.
