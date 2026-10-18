@@ -18,3 +18,16 @@ attribution/license terms when incorporated. Model files are not included here.
 Only explicitly whitelisted reusable source enters the source ZIP or a future
 GitHub publication. Disc assets, retail-derived generated C++, binaries, captures,
 logs and private title manifests are excluded.
+
+
+PMULTH investigation credit: the God of War ports by Waffle565 and KIexster
+identified the eight-product/HI-LO defect. The guarded correction here is an
+independent implementation, checked against PCSX2 MMI.cpp. The recognized legacy
+emission is from the pinned GPL-3.0 PS2Recomp compiler already credited above.
+No God of War functions, disc bytes or generated game sources are included.
+
+Periodic texture-context handling carries the seam lessons from the first local
+port: wrapped inference, consistent baseline/alpha borders, animation families
+and avoiding internal model-tile joins. No retail texture or trained model is
+included. External GPU renderer candidates remain reference-only and are not
+licensed or bundled by this source export.

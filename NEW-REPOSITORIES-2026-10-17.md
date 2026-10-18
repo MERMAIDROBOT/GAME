@@ -86,3 +86,67 @@ A future isolated adapter must:
 Upstream reports Metal/Vulkan comparisons across seven scenes, but those are not
 our Kelly Slater results. The installed game and its seam-corrected texture pack
 are unchanged by this research update.
+
+## Deeper discovery and God of War follow-up
+
+A second pass read all three pages of the date-filtered PS2 search, language-based
+recomp searches (which find repositories with no PS2 description), project
+metadata, README upstream links, runtime branches and the
+[recomp.board directory](https://recomp.fyi/). Directory status is owner-supplied;
+last-commit date is not repository creation or proof of playability. The findings
+below use repository metadata and selected primary source files, not directory
+labels as acceptance evidence.
+
+Additional newly created projects:
+
+| Repository | Created, Denver date | Finding / adoption decision |
+| --- | --- | --- |
+| [SirBraga/silent-hill-origins-recomp](https://github.com/SirBraga/silent-hill-origins-recomp) | Oct 16 | A directly relevant Mac-native release: v1.0 published Oct 16; Windows release also published that local date. Default branch is `macos`. Uses the separately published Metal/Vulkan renderer already pinned above. README claims playable; not independently played here. Repository license not detected, so no port code copied. |
+| [Jeffsteelflex/nightfire-port](https://github.com/Jeffsteelflex/nightfire-port) | Oct 12 | PS2 reconstruction with Windows and a Mac CI build. Explicitly says the Mac build has not been played on real Mac hardware. Fixed-step simulation with interpolated rendering is a useful design reference, not native higher-rate gameplay proof. No repository license detected; no code copied. |
+| [matthewperiut/night100](https://github.com/matthewperiut/night100) | Oct 16 | Scooby-Doo PS2 native project with Switch and a Mac development target. Claims 50–60 fps in early areas, later levels untested. GPL-3.0. Candidate for VU commit guards and zone regression methodology; no game-specific overrides or encrypted executables imported. |
+| [danielgomesvieira2000/mister-mosquito-pc](https://github.com/danielgomesvieira2000/mister-mosquito-pc) | Oct 13 | Source/pipeline project with original-game comparison and per-title findings. README reviewed; work in progress. License needs further review before copying. No adoption based on screenshot checksums alone. |
+| [ZackLucas/PS2Recomp-GOW2](https://github.com/ZackLucas/PS2Recomp-GOW2) | Oct 14 | A new GitHub fork of PS2Recomp, not evidence of a new completed God of War II port. Did not find a reason to replace our pinned compiler from its generic README. |
+| [NabilPervez/def-jam-vendetta-recomp](https://github.com/NabilPervez/def-jam-vendetta-recomp) | Oct 15 | A new fork pointing to jcsix694's older upstream (created Oct 6), not an independent new engine. Follow upstream for changes; do not count the fork as a second success. |
+
+Additional inspected pins: Silent Hill `81f6e906615a746a6467ffc88c262f53e41672aa`;
+Nightfire `91b365001da726fd912274acc4873a9c8dd3f873`;
+Scooby-Doo `d97ba7780e5d46f70136087009948a1050f3d9e0`;
+Mister Mosquito `7260b46e153036318dc22bd3d1a42eced8121476`;
+GOW2 fork `eb8688b2fd191129f103a39543002c005b33409c`.
+
+### God of War: explicitly requested exception to the creation-date filter
+
+[Waffle565/God-Of-War-Native-Port](https://github.com/Waffle565/God-Of-War-Native-Port)
+was created October 11 and [KIexster/god-of-war-recomp](https://github.com/KIexster/god-of-war-recomp)
+October 4 in Denver. Neither had a GitHub release when checked. They are reviewed
+here because the user specifically requested them, not labeled newly created this
+week. Waffle's runtime is a separate branch, not a second unrelated tool.
+
+The useful verified lesson is **PMULTH correctness**. KIexster's preserved patch
+shows its former translation collapsed independent signed products into one sum.
+Our pinned `2c5fbb9` compiler has the same defect. The reference lane layout in
+[PCSX2 MMI.cpp](https://github.com/PCSX2/pcsx2/blob/master/pcsx2/MMI.cpp)
+independently confirms the intended HI/LO and destination behavior. Our compiled
+synthetic controls reproduce the old failure and cover the corrected behavior,
+including aliases, zero registers and signed extremes.
+
+The shared executable knowledge bank now corrects only the recognized emission
+under the actual PMULTH opcode. Unknown forms fail closed; original disc files
+and installed game code are untouched. Local validation also generated a synthetic
+ELF through our real pinned compiler, matched/corrected its output, and compiled
+and ran the correction with the actual runtime context. No title binary was used.
+
+Pinned God of War references: KIexster `cd1377ed9ff64600b771d170bdbe0955ef01752e`,
+Waffle `34f30d5e432751369177af115104f4d19af6d080`.
+Other ideas—native IOP/VU execution, zone sweeps, fixed-step interpolation, shader
+caching, render-target reuse—need per-service or scene comparisons. They were not
+copied wholesale or enabled on the assumption that another game's FPS generalizes.
+
+### Seam handling is an engine stage
+
+The enhancement graph now requires `texture-repeat-and-uv-seams` before alpha,
+mip/coverage and runtime-loader qualification. `sr_batch.run` implements periodic
+inference/baseline/alpha context, explicit animation families and post-processing
+checks for repeated edges and declared cross-texture adjacency. Failed seams block
+completion. Undeclared UV seams and mipmaps remain explicitly unverified.
+See [TEXTURES.md](TEXTURES.md#seam-preserving-classified-ai-batches).

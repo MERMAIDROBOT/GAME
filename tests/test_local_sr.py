@@ -8,6 +8,11 @@ import local_sr
 
 
 class LocalSRTests(unittest.TestCase):
+    def test_model_tile_must_be_bounded_before_any_launch(self):
+        for tile in [True,0,31,1025,'512']:
+            with self.assertRaises(ValueError):
+                local_sr.infer_directory('missing','missing','missing','missing',tile=tile)
+
     def test_selected_blend_and_endpoints_preserve_alpha(self):
         base = Image.new('RGBA', (2, 2), (100, 100, 100, 127))
         inferred = Image.new('RGBA', (2, 2), (200, 0, 100, 127))

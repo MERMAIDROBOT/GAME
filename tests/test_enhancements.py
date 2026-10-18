@@ -10,8 +10,10 @@ class EnhancementEngineTests(unittest.TestCase):
     def test_graph_includes_every_requested_graphics_and_completion_stage(self):
         spec=e.load();ids={s['id'] for s in spec['stages']}
         self.assertTrue({'surfers-boards-and-skin-variants','fsr1-easu-presentation',
-            'adaptive-supersampling','local-ai-and-detail-blending',
+            'adaptive-supersampling','local-ai-and-detail-blending','texture-repeat-and-uv-seams',
             'source-and-rebuild-preservation','approved-duplicate-cleanup'}.issubset(ids))
+        alpha=next(s for s in spec['stages'] if s['id']=='texture-alpha-mips-and-coverage')
+        self.assertIn('texture-repeat-and-uv-seams',alpha['requires'])
         self.assertEqual(spec['policy']['simulation_speed_multiplier'],1.0)
         self.assertFalse(spec['policy']['frame_generation'])
     def test_old_artifact_is_not_a_pass_and_changed_input_invalidates_receipt(self):

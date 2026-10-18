@@ -76,3 +76,22 @@ implementation_required; dependencies remain blocked. Existing artifact presence
 or setting `UPSCALE=3` alone cannot certify FSR quality or preserved game speed.
 
 Source recovery now has an executable `freeze-source` command; see [COMPILER.md](COMPILER.md). Unit recovery passes do not satisfy the full clean-build or gameplay evidence gates.
+
+
+The revision-2 bank also corrects the pinned recompiler's **PMULTH** emission.
+The original emitted adjacent multiply-adds and then summed all four lanes;
+PMULTH instead retains eight independent signed 16×16 products in both HI/LO
+banks and selects the even products for `rd`. The built-in handler in `mmi.py`
+checks the exact opcode and known legacy emission shape before rewriting. It
+snapshots both operands, preserves alias and register-zero semantics, and is
+idempotent. Unknown emission shapes stop translation rather than receive a guess.
+
+This lesson comes from the God of War port investigation, checked independently
+against PCSX2's instruction implementation. Compiled synthetic tests cover signed
+extremes, distinct lanes, aliases, zero registers and a failing original-emission
+control. A local probe also passed the actual pinned recompiler output through
+the correction and compiled/ran it with the actual runtime context. CI runs the
+asset-free portable semantic tests, not a full God of War or Kelly Slater game.
+The existing installed game and its generated source are not patched in place.
+Changing the knowledge-bank revision invalidates downstream receipts by design;
+future builds must retranslate and requalify rather than reuse an old acceptance.

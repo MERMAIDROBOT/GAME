@@ -57,7 +57,7 @@ class KnowledgeTests(unittest.TestCase):
             candidate=copy.deepcopy(k.load()['rules'][0]);candidate.update(id='future-rule',status='proposed')
             path=Path(tmp)/'candidate.json';path.write_text(json.dumps(candidate))
             before=bankpath.read_bytes();result=k.add_rule(bankpath,path)
-            self.assertEqual(result['revision'],2)
+            self.assertEqual(result['revision'],k.load()['revision']+1)
             self.assertEqual(next((Path(tmp)/'knowledge-history').iterdir()).read_bytes(),before)
             with self.assertRaisesRegex(ValueError,'already exists'): k.add_rule(bankpath,path)
     def test_import_contract_bounds_and_ordinal(self):

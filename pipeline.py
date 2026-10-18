@@ -45,6 +45,7 @@ SOURCE_FILES = ('pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTRO
                 'CONTRIBUTING.md', 'LICENSE', 'UPSTREAM-NOTICES.md',
                 '.github/workflows/both-targets.yml', '.github/PULL_REQUEST_TEMPLATE.md',
                 'source_freeze.py', 'tests/test_source_freeze.py', 'requirements.txt', 'platform_adapter.py', 'tests/test_platform_adapter.py', 'PLATFORMS.md', 'run.py', 'tests/test_entrypoint.py', 'tests/test_engine_fixes.py',
+                'mmi.py', 'tests/test_mmi.py', 'texture_seams.py', 'tests/test_texture_seams.py',
                 'cadence.py', 'tests/test_cadence.py', 'NEW-REPOSITORIES-2026-10-17.md', 'CADENCE.md',
                 'platforms/macos/adapter.json', 'platforms/macos/macos_adapter.py')
 

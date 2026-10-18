@@ -62,8 +62,14 @@ def blend_upscale(base, inferred, ai_weight=0.30):
     return Image.blend(base, inferred, ai_weight)
 
 
-def infer_directory(lock_path, inputs, outputs, log_path, timeout=600, reserve_bytes=1024**3):
-    """One pinned local model process for a bounded prepared-PNG directory."""
+def infer_directory(lock_path, inputs, outputs, log_path, timeout=600, reserve_bytes=1024**3, tile=128):
+    """One pinned local model process for a bounded prepared-PNG directory.
+
+    `tile` is the model's internal tile size in input pixels. Inputs larger than one tile are
+    processed in pieces whose joins can show; wrap-padded seamless inputs pass a larger tile.
+    """
+    if type(tile) is not int or not 32 <= tile <= 1024:
+        raise ValueError('Tile size must be 32..1024 input pixels')
     lock_path = Path(lock_path).resolve()
     lock = json.loads(lock_path.read_text())
     if lock.get('schema') != 1 or lock.get('model') != 'realesrgan-x4plus':
@@ -77,7 +83,7 @@ def infer_directory(lock_path, inputs, outputs, log_path, timeout=600, reserve_b
         raise ValueError('Inference directory must contain 1..16 prepared PNGs')
     command = ['/usr/bin/sandbox-exec', '-p', '(version 1)(allow default)(deny network*)',
                str(executable), '-i', str(inputs), '-o', str(outputs), '-m', str(models[0].parent),
-               '-n', lock['model'], '-s', '4', '-t', '128', '-j', '1:1:1', '-f', 'png']
+               '-n', lock['model'], '-s', '4', '-t', str(tile), '-j', '1:1:1', '-f', 'png']
     with Path(log_path).open('xb') as log:
         process = subprocess.Popen(command, cwd=executable.parent, stdout=log, stderr=subprocess.STDOUT)
         started = time.monotonic()

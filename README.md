@@ -430,3 +430,9 @@ The compiler consolidation workbench is described in [COMPILER.md](COMPILER.md).
 
 See [this week’s repository review](NEW-REPOSITORIES-2026-10-17.md) for dated source pins, adoption decisions and the isolated Metal/Vulkan evaluation gate.
 [Portable cadence analysis](CADENCE.md) separates presentation rate, emulated speed, simulation updates and image changes using private telemetry; available on both targets.
+
+The shared knowledge bank now includes an opcode-checked PMULTH lane correction
+with compiled synthetic regression controls. Classified SR batches support
+[periodic texture context, animation-family treatment and explicit seam gates](TEXTURES.md#seam-preserving-classified-ai-batches).
+These additions do not change an already installed game, activate an untested
+renderer or certify that a generated texture pack is loaded in-game.

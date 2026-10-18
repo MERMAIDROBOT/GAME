@@ -10,7 +10,7 @@ import re
 import struct
 import pipeline as lab
 
-KINDS = {'fpu_operand', 'memory_disjoint', 'iop_import_audit'}
+KINDS = {'mmi_pmulth', 'fpu_operand', 'memory_disjoint', 'iop_import_audit'}
 FIELDS = {'ft':16, 'fs':11}
 
 
@@ -77,6 +77,21 @@ def validate(bank):
                     if rule['helper']==other['helper'] and ((value ^ int(other['opcode_value'],16)) & common)==0:
                         raise ValueError('Overlapping active rewrite rules')
                 rewrites.append(rule)
+        if rule['kind']=='mmi_pmulth':
+            from mmi import rewrite, legacy, emit
+            if any(r.get('kind')=='mmi_pmulth' and r is not rule and r.get('status')=='active'
+                   for r in bank['rules']) and rule['status']=='active':
+                raise ValueError('Overlapping PMULTH rules')
+            if rule['status']=='active':
+                fixtures=rule.get('fixtures',[])
+                if {f.get('emission') for f in fixtures} != {'legacy','corrected'}:
+                    raise ValueError('PMULTH fixtures need correction and idempotence')
+                for fixture in fixtures:
+                    word=int(fixture['word'],16)
+                    before=legacy(word) if fixture['emission']=='legacy' else emit(word)
+                    result,count,changed=rewrite(f'// 0x1000: 0x{word:08x} instruction\n'+before)
+                    if count!=1 or changed!=int(fixture['emission']=='legacy') or emit(word) not in result:
+                        raise ValueError('PMULTH regression fixture failed')
         if rule['kind']=='memory_disjoint' and rule['status']=='active':
             from memory import collisions
             fixtures=rule.get('fixtures',[])
@@ -117,13 +132,19 @@ def add_rule(bank_path,candidate_path):
 def apply_translation(directory, identity=None, bank=None, only=None, write=True):
     bank=validate(bank) if bank is not None else load()
     directory=Path(directory).resolve(); pending=[]; records=[]
-    selected=[r for r in bank['rules'] if r['kind']=='fpu_operand' and eligible(r,identity) and (only is None or r['id'] in only)]
+    selected=[r for r in bank['rules'] if r['kind'] in {'fpu_operand','mmi_pmulth'} and eligible(r,identity) and (only is None or r['id'] in only)]
     totals=dict(instructions=0,corrected=0,files_changed=0)
     # Shared inventory: nested generated C++ fails closed rather than escaping the rules.
     for path in lab.generated_sources(directory):
         if path.is_symlink() or not path.resolve().is_relative_to(directory): raise ValueError('Unsafe generated source')
         raw=path.read_bytes(); original=raw.decode(); updated=original; applied=[]
         for rule in selected:
+            if rule['kind']=='mmi_pmulth':
+                from mmi import rewrite
+                updated,count,changed=rewrite(updated)
+                totals['instructions']+=count; totals['corrected']+=changed
+                if count: applied.append(dict(id=rule['id'],matched=count,changed=changed))
+                continue
             pattern=re.compile(r'(// 0x[0-9a-fA-F]+: 0x([0-9a-fA-F]+)[^\n]*\n(?:[ \t]*ctx->pc[^\n]*\n)?[ \t]*)'
                 r'(ctx->f\[\d+\] = '+re.escape(rule['helper'])+r'\(ctx->f\[\d+\]\);)')
             count=changed=0
