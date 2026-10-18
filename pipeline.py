@@ -45,6 +45,7 @@ SOURCE_FILES = ('pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTRO
                 'CONTRIBUTING.md', 'LICENSE', 'UPSTREAM-NOTICES.md',
                 '.github/workflows/both-targets.yml', '.github/PULL_REQUEST_TEMPLATE.md',
                 'source_freeze.py', 'tests/test_source_freeze.py', 'requirements.txt', 'platform_adapter.py', 'tests/test_platform_adapter.py', 'PLATFORMS.md', 'run.py', 'tests/test_entrypoint.py', 'tests/test_engine_fixes.py',
+                'cadence.py', 'tests/test_cadence.py', 'NEW-REPOSITORIES-2026-10-17.md', 'CADENCE.md',
                 'platforms/macos/adapter.json', 'platforms/macos/macos_adapter.py')
 
 
@@ -214,7 +215,13 @@ def elf_info(path):
                        if re.search(rb'gcc2_compiled|Metrowerks|CodeWarrior|SN Systems|ProDG|/sce/ee/gcc', m.group(), re.I)))
     return {'entry': hex(h[3]), 'sha256': digest(path), 'bytes': len(data), 'sections': sections,
             'defined_function_count': len(functions), 'functions': functions,
-            'compiler_evidence': clues, 'exact_compiler_version': None}
+            'compiler_evidence': clues, 'exact_compiler_version': None,
+            'architecture': {'machine': 'mips', 'elf_class': 32, 'byte_order': 'little',
+                'elf_flags': hex(h[6]),
+                'r5900_machine_flag': (h[6] & 0x00ff0000) == 0x00920000,
+                'ghidra_language_candidate': 'r5900:LE:32:default' if (h[6] & 0x00ff0000) == 0x00920000 else None,
+                'scope': 'ELF header evidence only; not instruction validation or automatic REA activation. '
+                         'Unmarked MIPS executables require independent ISA/ABI confirmation.'}}
 
 
 def import_disc(source, profile, private):
@@ -598,6 +605,10 @@ def main(target=None):
     replay.add_argument('--name', required=True, help='Unique local run name')
     replay.add_argument('--batch', choices=('on', 'off'), default='on')
     replay.add_argument('--timeout', type=int, default=300)
+    cadence = sub.add_parser('analyze-cadence', help='Separate host presentation, emulated speed and fresh-image cadence')
+    cadence.add_argument('capture', help='Telemetry CSV inside private game storage')
+    cadence.add_argument('--name', required=True)
+    cadence.add_argument('--expected-field-hz', type=float, default=60000/1001)
     scenario = sub.add_parser('scenario')
     scenario.add_argument('definition', help='JSON definition inside the private game directory')
     scenario.add_argument('--name', required=True, help='Unique local run name')
@@ -741,6 +752,10 @@ def main(target=None):
                           'report': str(private / 'logs/replays' / args.name / 'report.json')}))
         if report['status'] != 'observed':
             sys.exit(2)
+    elif args.command == 'analyze-cadence':
+        from cadence import analyze_capture
+        report = analyze_capture(profile, private, args.capture, args.name, args.expected_field_hz)
+        print(json.dumps(report))
     elif args.command == 'compile-vu':
         from vectors import compile_vu
         compile_vu(profile,private,args.capture)

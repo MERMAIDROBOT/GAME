@@ -39,6 +39,14 @@
       "branch": "sotc-port",
       "revision": "ac9efa070638ad3b3accd284de6f898d5ab271d1",
       "role": "reference_only_not_active_runtime"
+    },
+    "ps2-native-gs": {
+      "url": "https://github.com/SirBraga/ps2-native-gs.git",
+      "revision": "063e1d3c7b15110d5ff905b51ee59c2c7edde935",
+      "role": "reference_only_not_active_runtime",
+      "license": "GPL-3.0",
+      "api": "black_parallel_gs_api_v6",
+      "gameplay_qualified": false
     }
   }
 }

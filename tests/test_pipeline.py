@@ -20,6 +20,19 @@ def minimal_elf(entry=0x100008):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_architecture_evidence_distinguishes_r5900_from_generic_mips(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'synthetic.elf'
+            for flags,marked in [(0x20924000,True),(0,False),(0x70001000,False)]:
+                raw = bytearray(minimal_elf())
+                struct.pack_into('<I',raw,36,flags)
+                path.write_bytes(raw)
+                arch = pipeline.elf_info(path)['architecture']
+                self.assertEqual(arch['r5900_machine_flag'],marked)
+                self.assertEqual(arch['ghidra_language_candidate'],
+                                 'r5900:LE:32:default' if marked else None)
+                self.assertEqual(arch['elf_flags'],hex(flags))
+
     def test_r5900_sqrt_uses_ft_and_migration_is_idempotent(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'synthetic.cpp'

@@ -425,3 +425,8 @@ This is an explicit audit command, not an automatic build/package gate. A passin
 
 
 The compiler consolidation workbench is described in [COMPILER.md](COMPILER.md). `compiler-plan` validates a pinned private component inventory; `compiler-stage` freezes its listed sources in a new private directory. They expose clean-source blockers and do not execute a native build or replace the game.
+
+## New-project research and cadence diagnostics
+
+See [this week’s repository review](NEW-REPOSITORIES-2026-10-17.md) for dated source pins, adoption decisions and the isolated Metal/Vulkan evaluation gate.
+[Portable cadence analysis](CADENCE.md) separates presentation rate, emulated speed, simulation updates and image changes using private telemetry; available on both targets.
