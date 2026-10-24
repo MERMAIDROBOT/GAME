@@ -3,7 +3,7 @@ import platform
 import sys
 import pipeline
 
-CORE_COMMANDS = {'oracle-check','recover-function','find-recovery-candidates','collect-runtime-targets','analyze-vu-dependencies','instruction-check','analyze-cadence','doctor','bootstrap','import','verify','inspect','analyze','translate',
+CORE_COMMANDS = {'convert-disc','qualify-port','review-upstreams','oracle-check','recover-function','find-recovery-candidates','collect-runtime-targets','analyze-vu-dependencies','instruction-check','analyze-cadence','doctor','bootstrap','import','verify','inspect','analyze','translate',
                  'check-generated','prepare','status','new-profile','next-game','knowledge-plan',
                  'knowledge-add','enhancement-plan','source-package','freeze-source'}
 

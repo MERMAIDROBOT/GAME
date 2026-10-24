@@ -1,4 +1,5 @@
 """Public runtime provisioning and local per-game builds for PS2 Port Lab."""
+import contextlib
 from pathlib import Path
 import json
 import os
@@ -126,15 +127,17 @@ def build_native(profile, private):
         '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=16']
     record = private / 'analysis/native-build-stage.json'
     record.unlink(missing_ok=True)
-    logged(command, private / 'logs/native-configure.log')
-    logged([lab.ENV / 'bin/cmake', '--build', build, '--target', 'ps2EntryRunner', 'ps2PortVuRecompiler', '-j', '2'], private / 'logs/native-build.log')
+    with private_patches_applied(profile, private) as title_patches:
+        logged(command, private / 'logs/native-configure.log')
+        logged([lab.ENV / 'bin/cmake', '--build', build, '--target', 'ps2EntryRunner', 'ps2PortVuRecompiler', '-j', '2'], private / 'logs/native-build.log')
     binary = build / 'ps2xRuntime/ps2EntryRunner'
     if not binary.exists():
         raise RuntimeError('Native build reported success without the runner binary')
     lab.save(record, {'success': True, 'binary': str(binary), 'sha256': lab.digest(binary),
                      'runtime_verified': False, 'built_at': time.time(),
-                     'runtime_patches': {name: lab.digest(lab.ROOT/name) for name in RUNTIME_PATCHES},
-                     'vu_execution_supported':True,'compiled_vu':vu_record})
+                     'vu_execution_supported':True,'compiled_vu':vu_record,
+                     'runtime_patches': {name: lab.digest(lab.ROOT / name) for name in RUNTIME_PATCHES},
+                     'private_source_patches': {p.name: lab.digest(p) for p in title_patches}})
     print('Native runner linked locally. Gameplay remains unverified.')
 
 
@@ -144,7 +147,7 @@ def test_runtime(profile, private):
     build = private / 'native-build'
     if not (build / 'build.ninja').exists():
         raise ValueError('Run build-native to configure the local runtime first')
-    logged([lab.ENV / 'bin/cmake', '--build', build, '--target', 'ps2PortRuntimeTests', 'ps2PortVuTests', 'ps2PortHostPadTests', 'ps2PortPresentationTests', 'ps2PortIopImportTests', '-j', '2'],
+    logged([lab.ENV / 'bin/cmake', '--build', build, '--target', 'ps2PortRuntimeTests', 'ps2PortVuTests', 'ps2PortHostPadTests', 'ps2PortPresentationTests', 'ps2PortIopImportTests', 'ps2PortLazyTimerTests', 'ps2PortVifUnpackTests', '-j', '2'],
            private / 'logs/runtime-test-build.log')
     for worker, name in [('0', 'runtime-test.log'), ('1', 'runtime-worker-test.log')]:
         outcome = logged([build / 'ps2PortRuntimeTests'], private / 'logs' / name, timeout=10,
@@ -159,6 +162,15 @@ def test_runtime(profile, private):
         raise RuntimeError('Synthetic IOP imports failed; inspect the local log')
     if logged([build / 'ps2PortVuTests'], private / 'logs/vu-test.log', timeout=60) != 'success':
         raise RuntimeError('Synthetic VU suite timed out; inspect the local log')
+    # Test the carried host implementations, not merely upstream stubs.
+    import sys
+    for component in ('test_native_audio.py', 'test_gpu_components.py', 'test_frame_ownership.py'):
+        if logged([sys.executable, '-m', 'unittest', 'discover', '-s', str(lab.ROOT/'tests'), '-p', component],
+                  private/'logs'/('component-'+component+'.log'), cwd=lab.ROOT, timeout=90) != 'success':
+            raise RuntimeError('Native component regression failed: '+component)
+    from runtime_hotpaths import verify as verify_hotpaths
+    verify_hotpaths(build, private / "logs/hotpaths")
+    test_iop(private)
     gs_build = lab.WORK / 'build/gs-cache-check'
     command = [lab.ENV / 'bin/cmake', '-S', lab.SOURCE / 'ps2xTest/gs_cache',
                '-B', gs_build, '-G', 'Ninja',
@@ -170,23 +182,145 @@ def test_runtime(profile, private):
     if logged([lab.ENV / 'bin/ctest', '--test-dir', gs_build, '--output-on-failure'],
               private / 'logs/graphics-test.log', timeout=60) != 'success':
         raise RuntimeError('Synthetic graphics suite timed out; inspect the local log')
+    lab.save(private/'analysis/runtime-tests-stage.json',dict(success=True,gameplay_verified=False,logs={str(f.relative_to(private)):lab.digest(f) for f in sorted((private/'logs').rglob('*')) if f.is_file() and ('test' in f.name or 'hotpath' in str(f))}))
     print('Synthetic runtime in synchronous/worker modes, IOP imports, host input/presentation, 43 VU and 45 texture, palette and VRAM checks passed; no retail code executed.')
 
 
-RUNTIME_PATCHES = ('patches/runtime-diagnostics.patch', 'patches/scalar-fpu.patch')
+# Applied in order over the pinned PS2Recomp revision. The IOP patch carries the SPU2 device,
+# scheduler conformance (RPC servers honour thread priority, blocking RPC, alarms), AutoDMA and
+# their CTest suites; it stacks on the diagnostics patch. Title conformance carries the generic
+# kernel/IOP/CD/GS/MPEG behaviour a second title needed (see ENGINE.md "Runtime title conformance").
+RUNTIME_PATCHES = ('patches/runtime-diagnostics.patch', 'patches/ps2xIOP-port-lab.patch', 'patches/scalar-fpu.patch',
+                   'patches/runtime-title-conformance.patch', 'patches/scalar-fpu-compare.patch',
+                   'patches/runtime-hotpaths.patch', 'patches/native-pcm.patch','patches/host-input.patch')
+
+
+def private_source_patches(profile, private):
+    """Title-specific source patches named by a private profile, resolved inside its private directory.
+
+    Title patches (for example a driver workaround matched by instruction signature) stay private:
+    they encode retail code and must record the emulator behaviour they compensate for."""
+    patches = []
+    for item in (profile or {}).get('private_source_patches', []):
+        if not isinstance(item, dict) or not item.get('file') or not item.get('reason') or not item.get('sha256'):
+            raise ValueError('Each private source patch needs file, sha256 and the emulator behaviour it compensates for (reason)')
+        path = Path(private) / lab.safe_relative(item['file'])
+        if not path.resolve().is_relative_to(Path(private).resolve()) or not path.is_file():
+            raise ValueError(f'Private source patch must be a file inside the private directory: {item["file"]}')
+        if lab.digest(path) != item['sha256']:
+            raise ValueError(f'Private source patch changed: {item["file"]}')
+        patches.append(path)
+    return patches
+
+
+def _git_apply(patch, *flags):
+    return subprocess.run(['git', '-C', str(lab.SOURCE), 'apply', *flags, str(patch)], capture_output=True, text=True)
+
+
+def _patch_paths(patch):
+    return [line[6:].strip() for line in Path(patch).read_text(errors='replace').splitlines()
+            if line.startswith('+++ b/')]
+
+
+def _stack_already_applied(patches):
+    """True when the checkout's patched files equal HEAD plus the whole stack, applied in order.
+
+    Computed in a throwaway index, so an up-to-date checkout is left untouched (no rebuild churn).
+    Later patches edit lines earlier ones touched, so patches cannot be checked one at a time."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / 'index'))
+        git = ['git', '-C', str(lab.SOURCE)]
+        if subprocess.run([*git, 'read-tree', 'HEAD'], env=env, capture_output=True).returncode:
+            return False
+        for patch in patches:
+            if subprocess.run([*git, 'apply', '--cached', str(patch)], env=env, capture_output=True).returncode:
+                return False
+        paths = sorted({path for patch in patches for path in _patch_paths(patch)})
+        return subprocess.run([*git, 'diff', '--quiet', '--', *paths], env=env, capture_output=True).returncode == 0
 
 
 def apply_runtime_patch():
-    """Ordered public patches; missing or incompatible patches fail explicitly."""
+    """Bring the shared tool checkout to pinned revision + the public patch stack (idempotent).
+
+    If the stack is not exactly applied, peel applied patches off from the top, then apply the
+    whole stack in order. Unknown edits fail explicitly."""
+    patches = []
     for name in RUNTIME_PATCHES:
         patch = lab.ROOT / name
-        if not patch.is_file():
-            raise ValueError('Required runtime source patch missing: '+name)
-        command = ['git', '-C', str(lab.SOURCE), 'apply']
-        if subprocess.run([*command, '--reverse', '--check', str(patch)], capture_output=True).returncode == 0:
-            continue
-        subprocess.run([*command, '--check', str(patch)], check=True)
-        subprocess.run([*command, str(patch)], check=True)
+        if not patch.exists():
+            raise FileNotFoundError(f'Runtime source patch missing: {patch}')
+        patches.append(patch)
+    record = _applied_stack_dir()
+    if _stack_already_applied(patches):
+        if not record.exists():
+            _record_applied_stack(patches)
+        return
+    # Peel what was actually applied last time: a patch file edited in place (a folded fix)
+    # no longer reverses from its new content, so the recorded copies are used first.
+    recorded = sorted(record.glob('*.patch')) if record.exists() else []
+    for patch in reversed(recorded):
+        if _git_apply(patch, '--reverse', '--check').returncode == 0:
+            subprocess.run(['git', '-C', str(lab.SOURCE), 'apply', '--reverse', str(patch)], check=True)
+    if record.exists():
+        shutil.rmtree(record)
+    for patch in reversed(patches):
+        if _git_apply(patch, '--reverse', '--check').returncode == 0:
+            subprocess.run(['git', '-C', str(lab.SOURCE), 'apply', '--reverse', str(patch)], check=True)
+    for patch in patches:
+        check = _git_apply(patch, '--check')
+        if check.returncode:
+            raise RuntimeError(f'{patch.name} does not apply to the tool source; it must be the pinned revision '
+                               f'with the earlier patches applied and no other edits.\n{check.stderr.strip()}')
+        subprocess.run(['git', '-C', str(lab.SOURCE), 'apply', str(patch)], check=True)
+    _record_applied_stack(patches)
+
+
+def _applied_stack_dir():
+    """Untracked copy of the patch contents last applied to the shared checkout (inside .git)."""
+    return lab.SOURCE / '.git' / 'port-lab-applied-stack'
+
+
+def _record_applied_stack(patches):
+    record = _applied_stack_dir()
+    temp = record.with_name(record.name + '.tmp')
+    if temp.exists():
+        shutil.rmtree(temp)
+    temp.mkdir(parents=True)
+    for index, patch in enumerate(patches):
+        shutil.copyfile(patch, temp / f'{index:02d}-{Path(patch).name}')
+    if record.exists():
+        shutil.rmtree(record)
+    temp.rename(record)
+
+
+@contextlib.contextmanager
+def private_patches_applied(profile, private):
+    """Apply a title's private source patches for one build, then restore the public source."""
+    applied = []
+    try:
+        for patch in private_source_patches(profile, private):
+            check = _git_apply(patch, '--check')
+            if check.returncode:
+                raise RuntimeError(f'Private source patch does not apply over the public source: {patch.name}\n{check.stderr.strip()}')
+            subprocess.run(['git', '-C', str(lab.SOURCE), 'apply', str(patch)], check=True)
+            applied.append(patch)
+        yield applied
+    finally:
+        for patch in reversed(applied):
+            subprocess.run(['git', '-C', str(lab.SOURCE), 'apply', '--reverse', str(patch)], check=True)
+
+
+def test_iop(private):
+    """Build the patched IOP alone and run its conformance suites (CTest); no game code involved."""
+    build = Path(private) / 'iop-conformance-build'
+    logged([lab.ENV / 'bin/cmake', '-S', lab.SOURCE / 'ps2xIOP', '-B', build, '-G', 'Ninja',
+            f'-DCMAKE_MAKE_PROGRAM={lab.ENV / "bin/ninja"}', '-DCMAKE_BUILD_TYPE=Release', '-DPS2X_IOP_BUILD_TESTS=ON'],
+           Path(private) / 'logs/iop-conformance-configure.log')
+    logged([lab.ENV / 'bin/cmake', '--build', build, '-j', '2'], Path(private) / 'logs/iop-conformance-build.log')
+    if logged([lab.ENV / 'bin/ctest', '--test-dir', build, '--output-on-failure'],
+              Path(private) / 'logs/iop-conformance.log', timeout=120) != 'success':
+        raise RuntimeError('IOP conformance suite failed or timed out; inspect the local log')
 
 
 def boot_probe(profile, private, headless=False):
@@ -208,15 +342,24 @@ def boot_probe(profile, private, headless=False):
     if headless:
         frame.unlink(missing_ok=True)
     environment = {'PS2_PORT_IO_ROOT': str((private / 'disc-root').resolve())}
+    image = cd_image(private)
+    if image:
+        environment['PS2_PORT_CD_IMAGE'] = str(image)
     if headless:
         environment.update(PS2_PORT_HEADLESS='1', PS2_PORT_MPEG_TRACE='1',
                            PS2_PORT_FRAME=str(private / 'logs/headless-frame.ppm'),
                            PS2_PORT_GS_HISTORY=str(private / 'logs/graphics-history.jsonl'))
     outcome = logged([binary, elf], log, cwd=private / 'disc-root', timeout=30, allow_failure=True,
                      env_patch=environment)
-    lab.save(private / f'analysis/{name}-stage.json', {'outcome': outcome, 'duration_limit_seconds': 30,
+    lab.save(private / f'analysis/{name}-stage.json', {'outcome': outcome, 'duration_limit_seconds': 30, 'cd_image': str(image) if image else None,
              'gameplay_verified': False, 'log': str(log), 'headless': headless, 'frame_capture': str(frame) if headless and frame.exists() else None})
     print(f'First boot probe: {outcome}. Inspect local diagnostics; no gameplay claim.')
+
+
+def cd_image(private):
+    """Verified sector image from import-image, passed to the runtime as PS2_PORT_CD_IMAGE."""
+    from cdimage import verified_image
+    return verified_image(private)
 
 
 def stage_runtime_disc(private, destination):
@@ -306,6 +449,9 @@ def package_local(profile, private):
               'BuildIdentifier': stage['sha256'][:16], 'LocalDiagnostics': True,
               'RendererWorker': renderer_worker, 'AsyncPresentation': async_presentation, 'GraphicsHistoryEnabled': graphics_history,
               'GraphicsHistory': str(private / 'logs/window-graphics-history.jsonl')}
+    image = cd_image(private)
+    if image:
+        config['CdImage'] = str(image)
     (resources / 'RunConfiguration.plist').write_bytes(plistlib.dumps(config))
     info = {'CFBundleName': profile['title'] + ' (Debug)', 'CFBundleDisplayName': profile['title'] + ' (Debug)',
             'CFBundleIdentifier': 'local.ps2portlab.' + profile['id'], 'CFBundleExecutable': 'LocalLauncher',
@@ -317,6 +463,7 @@ def package_local(profile, private):
     logged(['/usr/bin/codesign', '--force', '--deep', '--sign', '-', app], private / 'logs/local-signing.log')
     lab.save(private / 'analysis/local-package-stage.json', {'app': str(app), 'local_only': True,
              'gameplay_verified': False, 'renderer_worker': renderer_worker, 'graphics_history': graphics_history,
-             'build_sha256': stage['sha256'], 'requires_private_disc_directory': str(runtime_disc)})
+             'build_sha256': stage['sha256'], 'requires_private_disc_directory': str(runtime_disc),
+             'requires_private_cd_image': str(image) if image else None})
     print(f'Local debug app: {app}')
     print('Contains generated game code. Keep local; do not publish or include in the source ZIP.')

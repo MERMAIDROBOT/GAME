@@ -18,11 +18,14 @@ def package(source, destination, title, version, bundle_id, icon, log):
         raise ValueError('A local .icns icon is required')
     config = plistlib.loads((source/'Contents/Resources/RunConfiguration.plist').read_bytes())
     info = plistlib.loads((source/'Contents/Info.plist').read_bytes())
-    settings = info.get('LSEnvironment', {})
+    settings = dict(config.get('Environment', {}))
+    settings.update(info.get('LSEnvironment', {}))
     # Deliberately only copy normal, declared settings; no inherited shell flags.
-    allowed_private = {'PS2_PORT_PRIVATE_IOP_IMPORT_CYCLES', 'PS2_PORT_PRIVATE_SDR_GUEST_ONLY'}
+    allowed_private = {'PS2_PORT_PRIVATE_IOP_IMPORT_CYCLES', 'PS2_PORT_PRIVATE_SDR_GUEST_ONLY', 'PS2_PORT_PRIVATE_SS_TEXTURES'}
+    for key in ('PS2_PORT_PAD_TRACE','PS2_PORT_RESIDENCY_TRACE'):
+        settings.pop(key,None)
     for key, value in settings.items():
-        if not isinstance(value, str) or not (key.startswith('PS2_PORT_ENHANCE_') or key == 'PS2_PORT_TEX_PACK' or key in allowed_private):
+        if not isinstance(value, str) or not (key.startswith('PS2_PORT_ENHANCE_') or key in {'PS2_PORT_TEX_PACK','PS2_PORT_CAMERA_STEP_FIX','PS2_PORT_NATIVE_PCM','PS2_PORT_AUDIO_LEGACY','PS2_PORT_PIER_FIX','PS2_PORT_HW_GS_RESIDENCY_CACHE','PS2_PORT_HW_GS_RUNTIME_MIPS','PS2_PORT_KEY_EVENTS'} or key in {'PS2_PORT_HW_GS_SCALE','PS2_PORT_HW_GS_PIPELINE_CACHE_DIR','PS2_PORT_HW_GS_BLOB_PREFETCH'} or key in allowed_private):
             raise ValueError('Unexpected diagnostic or unknown release setting: '+key)
     for key in ['Executable', 'DiscDirectory']:
         if not Path(config[key]).is_absolute() or not Path(config[key]).exists():
@@ -31,6 +34,11 @@ def package(source, destination, title, version, bundle_id, icon, log):
         raise ValueError('Missing local texture pack')
     pinned = ['Contents/MacOS/ps2EntryRunner', 'Contents/Frameworks/liblocal-parallel-gs-plugin.dylib',
               'Contents/Frameworks/libMoltenVK.dylib']
+    if (source/'Contents/Frameworks/libclaude-hwgs.dylib').is_file():
+        pinned.append('Contents/Frameworks/libclaude-hwgs.dylib')
+    from port_checks import inspect_app
+    blockers=[f for f in inspect_app(source) if f['severity']=='error' and f['code']!='diagnostic_release_setting']
+    if blockers: raise ValueError('App preflight failed: '+json.dumps(blockers))
     original = {name: lab.digest(source/name) for name in pinned}
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, destination)

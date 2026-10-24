@@ -1,0 +1,615 @@
+#include "runtime/ps2_audio.h"
+#include "runtime/ps2_memory.h"
+#include "raylib.h"
+#include <algorithm>
+#include <cmath>
+#include <array>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+
+namespace
+{
+    std::vector<uint8_t> buildWavFromPcm(const int16_t *pcm, size_t sampleCount, uint32_t sampleRate)
+    {
+        const uint32_t dataSize = static_cast<uint32_t>(sampleCount * 2);
+        const uint32_t fileSize = 36 + dataSize;
+        std::vector<uint8_t> wav(8 + fileSize);
+
+        uint8_t *p = wav.data();
+        p[0] = 'R';
+        p[1] = 'I';
+        p[2] = 'F';
+        p[3] = 'F';
+        p[4] = static_cast<uint8_t>(fileSize);
+        p[5] = static_cast<uint8_t>(fileSize >> 8);
+        p[6] = static_cast<uint8_t>(fileSize >> 16);
+        p[7] = static_cast<uint8_t>(fileSize >> 24);
+        p[8] = 'W';
+        p[9] = 'A';
+        p[10] = 'V';
+        p[11] = 'E';
+        p[12] = 'f';
+        p[13] = 'm';
+        p[14] = 't';
+        p[15] = ' ';
+        p[16] = 16;
+        p[17] = 0;
+        p[18] = 0;
+        p[19] = 0;
+        p[20] = 1;
+        p[21] = 0;
+        p[22] = 1;
+        p[23] = 0;
+        p[24] = static_cast<uint8_t>(sampleRate);
+        p[25] = static_cast<uint8_t>(sampleRate >> 8);
+        p[26] = static_cast<uint8_t>(sampleRate >> 16);
+        p[27] = static_cast<uint8_t>(sampleRate >> 24);
+        const uint32_t byteRate = sampleRate * 2;
+        p[28] = static_cast<uint8_t>(byteRate);
+        p[29] = static_cast<uint8_t>(byteRate >> 8);
+        p[30] = static_cast<uint8_t>(byteRate >> 16);
+        p[31] = static_cast<uint8_t>(byteRate >> 24);
+        p[32] = 2;
+        p[33] = 0;
+        p[34] = 16;
+        p[35] = 0;
+        p[36] = 'd';
+        p[37] = 'a';
+        p[38] = 't';
+        p[39] = 'a';
+        p[40] = static_cast<uint8_t>(dataSize);
+        p[41] = static_cast<uint8_t>(dataSize >> 8);
+        p[42] = static_cast<uint8_t>(dataSize >> 16);
+        p[43] = static_cast<uint8_t>(dataSize >> 24);
+        if (dataSize != 0u)
+            std::memcpy(p + 44, pcm, dataSize);
+        return wav;
+    }
+}
+
+namespace ps2_vag
+{
+    bool decode(const uint8_t *data, uint32_t sizeBytes,
+                std::vector<int16_t> &outPcm, uint32_t &outSampleRate);
+}
+
+struct PS2AudioBackend::Impl
+{
+    struct TrackedSound
+    {
+        Sound snd;
+        uint32_t sampleKey;
+    };
+    std::vector<TrackedSound> activeSounds;
+    // Claude 2026-10-21: 680 ms of ring (was 170 ms) so a catch-up burst after a hitch is absorbed, not dropped;
+    // the callback holds the queue near kTargetSamples by playing up to 2% faster or slower (drift control,
+    // PS2_PORT_AUDIO_DRIFT=0 off).
+    static constexpr size_t kRingSamples = 65536u;
+    static constexpr size_t kTargetSamples = 7680u;     // 80 ms, stereo
+    double readPhase = 0.0;                              // fraction of a frame between read and read + 1
+    // Claude 2026-10-21: integral trim learns the producer's steady rate offset, so the queue returns to target instead
+    // of settling below it (proportional alone holds a 1%-slow producer at half the target, too little for a stall).
+    // PS2_PORT_AUDIO_DRIFT_PI=0 restores proportional-only.
+    double driftTrim = 0.0;
+    std::array<int16_t, kRingSamples> ring{};
+    size_t read = 0u;
+    size_t queued = 0u;
+    static constexpr size_t kPrimeSamples = 7680u;
+    static constexpr int32_t kFadeFrames = 128;
+    bool primed = false;
+    int32_t fadePosition = 0;
+    int32_t gapRemaining = 0;
+    std::array<int16_t, 2> lastOutput{};
+    std::array<int16_t, 2> fadeSource{};
+    std::array<int16_t, 2> gapSource{};
+    std::mutex pcmMutex;
+    AudioStream stream{};
+    bool streamReady = false;
+    std::FILE *dump = nullptr;
+    uint32_t dumpBytes = 0u;
+    bool statsEnabled = false;
+    bool everPrimed = false;
+    uint64_t producedFrames = 0u;
+    uint64_t requestedFrames = 0u;
+    uint64_t missingFrames = 0u;
+    uint64_t underruns = 0u;
+    uint64_t droppedFrames = 0u;
+    std::chrono::steady_clock::time_point statsStart = std::chrono::steady_clock::now();
+    static Impl *streamOwner;
+
+    static void audioCallback(void *buffer, unsigned int frames)
+    {
+        auto *output = static_cast<int16_t *>(buffer);
+        const size_t requested = static_cast<size_t>(frames) * 2u;
+        std::fill_n(output, requested, int16_t{0});
+        Impl *owner = streamOwner;
+        if (!owner)
+            return;
+        std::lock_guard<std::mutex> lock(owner->pcmMutex);
+        owner->requestedFrames += frames;
+        static const bool drift = [] { const char *e = std::getenv("PS2_PORT_AUDIO_DRIFT"); return !(e && e[0] == '0'); }();
+        static const bool driftPi = [] { const char *e = std::getenv("PS2_PORT_AUDIO_DRIFT_PI"); return !(e && e[0] == '0'); }();
+        if (!owner->primed && owner->queued >= kPrimeSamples)
+        {
+            owner->primed = true;
+            owner->everPrimed = true;
+            owner->fadePosition = 0;
+            owner->fadeSource = owner->lastOutput;
+        }
+        for (size_t frame = 0u; frame < frames; ++frame)
+        {
+            if (owner->primed && owner->queued < 2u)
+            {
+                owner->primed = false;
+                ++owner->underruns;
+                owner->gapRemaining = kFadeFrames;
+                owner->gapSource = owner->lastOutput;
+            }
+            if (owner->primed && drift && owner->queued >= 4u)
+            {
+                // Linear interpolation between the frame at read and the next, advancing by step frames: step > 1
+                // drains a queue above target, < 1 lets one below refill (at most 2%, gradual).
+                const double error = (double(owner->queued) - double(kTargetSamples)) / double(kTargetSamples);
+                const double proportional = std::clamp(error, -1.0, 1.0) * 0.02;
+                const double correction = proportional + owner->driftTrim;
+                const double step = 1.0 + std::clamp(correction, -0.02, 0.02);
+                // integrate over ~4 s of output; hold the trim while the total is saturated (anti-windup)
+                if (driftPi && std::fabs(correction) < 0.02)
+                    owner->driftTrim = std::clamp(owner->driftTrim + proportional / (4.0 * 48000.0), -0.02, 0.02);
+                owner->fadePosition = std::min(owner->fadePosition + 1, kFadeFrames);
+                const int32_t fade = owner->fadePosition;
+                const double t = owner->readPhase;
+                for (size_t channel = 0u; channel < 2u; ++channel)
+                {
+                    const double a = owner->ring[(owner->read + channel) % kRingSamples];
+                    const double b = owner->ring[(owner->read + 2u + channel) % kRingSamples];
+                    const int32_t sample = static_cast<int32_t>(std::lround(a + (b - a) * t));
+                    owner->lastOutput[channel] = static_cast<int16_t>((sample * fade + owner->fadeSource[channel] * (kFadeFrames - fade)) / kFadeFrames);
+                }
+                owner->readPhase += step;
+                while (owner->readPhase >= 1.0 && owner->queued >= 4u)
+                {
+                    owner->readPhase -= 1.0;
+                    owner->read = (owner->read + 2u) % kRingSamples;
+                    owner->queued -= 2u;
+                }
+            }
+            else if (owner->primed)
+            {
+                owner->fadePosition = std::min(owner->fadePosition + 1, kFadeFrames);
+                const int32_t fade = owner->fadePosition;
+                for (size_t channel = 0u; channel < 2u; ++channel)
+                {
+                    const int32_t sample = owner->ring[(owner->read + channel) % kRingSamples];
+                    owner->lastOutput[channel] = static_cast<int16_t>((sample * fade + owner->fadeSource[channel] * (kFadeFrames - fade)) / kFadeFrames);
+                }
+                owner->read = (owner->read + 2u) % kRingSamples;
+                owner->queued -= 2u;
+            }
+            else
+            {
+                owner->missingFrames += owner->everPrimed ? 1u : 0u;
+                owner->gapRemaining = std::max(owner->gapRemaining - 1, 0);
+                for (size_t channel = 0u; channel < 2u; ++channel)
+                    owner->lastOutput[channel] = static_cast<int16_t>(owner->gapSource[channel] * owner->gapRemaining / kFadeFrames);
+            }
+            output[frame * 2u] = owner->lastOutput[0];
+            output[frame * 2u + 1u] = owner->lastOutput[1];
+        }
+    }
+
+    void finishDump()
+    {
+        if (!dump)
+            return;
+        auto header = buildWavFromPcm(nullptr, 0u, 48000u);
+        header[22] = 2;
+        header[28] = 0;
+        header[29] = 0xEE;
+        header[30] = 2;
+        header[32] = 4;
+        const uint32_t length = dumpBytes + 36u;
+        for (uint32_t byte = 0u; byte < 4u; ++byte)
+        {
+            header[4u + byte] = static_cast<uint8_t>(length >> (byte * 8u));
+            header[40u + byte] = static_cast<uint8_t>(dumpBytes >> (byte * 8u));
+        }
+        std::fseek(dump, 0, SEEK_SET);
+        std::fwrite(header.data(), 1u, header.size(), dump);
+        std::fclose(dump);
+        dump = nullptr;
+    }
+};
+
+PS2AudioBackend::Impl *PS2AudioBackend::Impl::streamOwner = nullptr;
+
+PS2AudioBackend::PS2AudioBackend() : m_impl(std::make_unique<Impl>())
+{
+}
+
+PS2AudioBackend::~PS2AudioBackend()
+{
+    if (m_impl)
+    {
+        stopAll();
+        setAudioReady(false);
+    }
+}
+
+void PS2AudioBackend::setAudioReady(bool ready)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    // Native host PCM is the default. PS2_PORT_NATIVE_PCM=0 retains the
+    // old bool-only readiness route for controlled differential diagnosis.
+    static const bool nativePcm = [] {
+        const char *flag = std::getenv("PS2_PORT_NATIVE_PCM");
+        return !flag || *flag != '0';
+    }();
+    if (!nativePcm) {
+        m_audioReady = ready;
+        return;
+    }
+    if (ready == m_audioReady)
+        return;
+    m_audioReady = ready;
+#if !defined(PLATFORM_VITA)
+    if (ready)
+    {
+        const char *audioStats = std::getenv("PS2X_AUDIO_STATS");
+        m_impl->statsEnabled = audioStats && *audioStats && *audioStats != '0';
+        m_impl->statsStart = std::chrono::steady_clock::now();
+        const char *audioMute = std::getenv("PS2X_AUDIO_MUTE");
+        if (audioMute && *audioMute && *audioMute != '0')
+            SetMasterVolume(0.0f);
+        SetAudioStreamBufferSizeDefault(512);
+        m_impl->stream = LoadAudioStream(48000, 16, 2);
+        m_impl->streamReady = m_impl->stream.buffer != nullptr;
+        if (m_impl->streamReady)
+        {
+            Impl::streamOwner = m_impl.get();
+            SetAudioStreamCallback(m_impl->stream, &Impl::audioCallback);
+            PlayAudioStream(m_impl->stream);
+        }
+        const char *path = std::getenv("PS2X_AUDIO_DUMP");
+        if (path && *path)
+        {
+            m_impl->dump = std::fopen(path, "wb");
+            if (m_impl->dump)
+            {
+                std::array<uint8_t, 44> header{};
+                std::fwrite(header.data(), 1u, header.size(), m_impl->dump);
+                m_impl->dumpBytes = 0u;
+            }
+        }
+    }
+    else
+    {
+        if (m_impl->streamReady)
+        {
+            StopAudioStream(m_impl->stream);
+            UnloadAudioStream(m_impl->stream);
+            m_impl->streamReady = false;
+            Impl::streamOwner = nullptr;
+        }
+        m_impl->finishDump();
+        resetPcm();
+    }
+#endif
+}
+
+void PS2AudioBackend::resetPcm()
+{
+    std::lock_guard<std::mutex> lock(m_impl->pcmMutex);
+    m_impl->read = 0u;
+    m_impl->queued = 0u;
+    m_impl->primed = false;
+    m_impl->fadePosition = 0;
+    m_impl->gapRemaining = 0;
+    m_impl->lastOutput = {};
+    m_impl->fadeSource = {};
+    m_impl->gapSource = {};
+    m_impl->everPrimed = false;
+    m_impl->producedFrames = 0u;
+    m_impl->requestedFrames = 0u;
+    m_impl->missingFrames = 0u;
+    m_impl->underruns = 0u;
+    m_impl->droppedFrames = 0u;
+    m_impl->statsStart = std::chrono::steady_clock::now();
+}
+
+void PS2AudioBackend::submitPcm(std::span<const int16_t> samples)
+{
+    std::lock_guard<std::mutex> lock(m_impl->pcmMutex);
+    if (m_impl->dump && samples.size_bytes() <= 0xFFFFFF00u - m_impl->dumpBytes)
+    {
+        const size_t written = std::fwrite(samples.data(), sizeof(int16_t), samples.size(), m_impl->dump);
+        m_impl->dumpBytes += static_cast<uint32_t>(written * sizeof(int16_t));
+    }
+    if (!m_impl->streamReady)
+        return;
+    m_impl->producedFrames += samples.size() / 2u;
+    if (samples.size() > Impl::kRingSamples)
+        samples = samples.last(Impl::kRingSamples);
+    if (m_impl->queued + samples.size() > Impl::kRingSamples)
+    {
+        const size_t drop = std::min(m_impl->queued, std::max(m_impl->queued + samples.size() - Impl::kRingSamples,
+                                                          m_impl->queued > Impl::kTargetSamples ? m_impl->queued - Impl::kTargetSamples : 0u));
+        m_impl->read = (m_impl->read + drop) % Impl::kRingSamples;
+        m_impl->queued -= drop;
+        m_impl->droppedFrames += drop / 2u;
+        m_impl->fadePosition = 0;
+        m_impl->fadeSource = m_impl->lastOutput;
+    }
+    const size_t write = (m_impl->read + m_impl->queued) % Impl::kRingSamples;
+    for (size_t i = 0u; i < samples.size(); ++i)
+        m_impl->ring[(write + i) % Impl::kRingSamples] = samples[i];
+    m_impl->queued += samples.size();
+    if (m_impl->statsEnabled)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - m_impl->statsStart).count();
+        if (elapsed >= 2.0)
+        {
+            std::fprintf(stderr, "[audio] %.0f produced/s, %.0f requested/s, %.2f ms queued, %llu missing frames, %llu underruns, %llu dropped frames\n",
+                         m_impl->producedFrames / elapsed, m_impl->requestedFrames / elapsed,
+                         m_impl->queued / 96.0, static_cast<unsigned long long>(m_impl->missingFrames),
+                         static_cast<unsigned long long>(m_impl->underruns), static_cast<unsigned long long>(m_impl->droppedFrames));
+            m_impl->producedFrames = 0u;
+            m_impl->requestedFrames = 0u;
+            m_impl->missingFrames = 0u;
+            m_impl->underruns = 0u;
+            m_impl->droppedFrames = 0u;
+            m_impl->statsStart = now;
+        }
+    }
+}
+
+void PS2AudioBackend::onVagTransfer(const uint8_t *rdram, uint32_t srcAddr, uint32_t sizeBytes)
+{
+    if (!rdram || sizeBytes < 48)
+        return;
+
+    const uint32_t physAddr = srcAddr & PS2_RAM_MASK;
+    if (physAddr + sizeBytes > PS2_RAM_SIZE)
+        return;
+
+    std::vector<int16_t> pcm;
+    uint32_t sampleRate = 44100;
+    if (!ps2_vag::decode(rdram + physAddr, sizeBytes, pcm, sampleRate))
+        return;
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    DecodedSample sample;
+    sample.pcm = std::move(pcm);
+    sample.sampleRate = sampleRate;
+    m_sampleBank[physAddr] = std::move(sample);
+    m_mostRecentSampleKey = physAddr;
+}
+
+void PS2AudioBackend::onVagTransferFromBuffer(const uint8_t *data, uint32_t sizeBytes, uint32_t keyAddr)
+{
+    if (!data || sizeBytes < 48)
+        return;
+
+    std::vector<int16_t> pcm;
+    uint32_t sampleRate = 44100;
+    if (!ps2_vag::decode(data, sizeBytes, pcm, sampleRate))
+        return;
+
+    const uint32_t physAddr = keyAddr & PS2_RAM_MASK;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    DecodedSample sample;
+    sample.pcm = std::move(pcm);
+    sample.sampleRate = sampleRate;
+    m_sampleBank[physAddr] = sample;
+    m_mostRecentSampleKey = physAddr;
+    m_loadOrderSamples.push_back(std::move(sample));
+    m_loadOrderSampleKeys.push_back(physAddr);
+    constexpr size_t kMaxLoadOrderSamples = 32;
+    if (m_loadOrderSamples.size() > kMaxLoadOrderSamples)
+    {
+        m_loadOrderSamples.erase(m_loadOrderSamples.begin());
+        m_loadOrderSampleKeys.erase(m_loadOrderSampleKeys.begin());
+    }
+}
+
+namespace
+{
+    constexpr uint32_t LIBSD_CMD_SET_VOICE = 0x8010u;
+}
+
+void PS2AudioBackend::onSoundCommand(uint32_t sid, uint32_t rpcNum,
+                                     const uint8_t *sendBuf, uint32_t sendSize,
+                                     uint8_t *recvBuf, uint32_t recvSize)
+{
+    if (sid != 0x80000701u)
+        return;
+
+    if ((rpcNum == LIBSD_CMD_SET_VOICE || (rpcNum & 0xFF00u) == 0x8100u) &&
+        sendBuf && sendSize >= 20)
+    {
+        uint32_t sampleAddr = 0;
+        uint32_t voiceIndex = 0xFFFFFFFFu;
+        for (int vo = 4; vo >= 0 && voiceIndex == 0xFFFFFFFFu; vo -= 4)
+        {
+            if (vo < static_cast<int>(sendSize))
+            {
+                uint32_t v = 0;
+                std::memcpy(&v, sendBuf + vo, sizeof(v));
+                if (v < 24u)
+                    voiceIndex = v;
+            }
+        }
+
+        constexpr uint32_t kMinPlausibleAddr = 0x1000u;
+        for (int off = 12; off <= 24 && sampleAddr == 0; off += 4)
+        {
+            if (sendSize >= static_cast<uint32_t>(off + 4))
+            {
+                uint32_t cand = 0;
+                std::memcpy(&cand, sendBuf + off, sizeof(cand));
+                if (cand >= kMinPlausibleAddr && (cand <= PS2_RAM_MASK || (cand & ~PS2_RAM_MASK) == 0))
+                    sampleAddr = cand;
+            }
+        }
+        if (sampleAddr == 0)
+            sampleAddr = m_mostRecentSampleKey;
+
+        float pitch = 1.0f;
+        if (sendSize >= 12)
+        {
+            uint16_t pitchHalf = 0;
+            std::memcpy(&pitchHalf, sendBuf + 8, sizeof(pitchHalf));
+            if (pitchHalf != 0)
+                pitch = 4096.0f / static_cast<float>(pitchHalf);
+        }
+        play(sampleAddr, pitch, 1.0f, voiceIndex);
+    }
+}
+
+void PS2AudioBackend::play(uint32_t sampleAddr, float pitch, float volume, uint32_t voiceIndex)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    DecodedSample *sampleToPlay = nullptr;
+    uint32_t sampleKey = 0;
+
+    auto it = m_sampleBank.find(sampleAddr & PS2_RAM_MASK);
+    if (it != m_sampleBank.end())
+    {
+        sampleToPlay = &it->second;
+        sampleKey = it->first;
+    }
+    else if (voiceIndex != 0xFFFFFFFFu &&
+             voiceIndex < m_loadOrderSamples.size() &&
+             voiceIndex < m_loadOrderSampleKeys.size())
+    {
+        sampleToPlay = &m_loadOrderSamples[voiceIndex];
+        sampleKey = m_loadOrderSampleKeys[voiceIndex];
+    }
+    else
+    {
+        it = m_sampleBank.find(m_mostRecentSampleKey);
+        if (it == m_sampleBank.end())
+            return;
+        sampleToPlay = &it->second;
+        sampleKey = it->first;
+    }
+    if (!sampleToPlay || sampleToPlay->pcm.empty())
+        return;
+
+    const bool isBgm = (sampleToPlay->pcm.size() > static_cast<size_t>(sampleToPlay->sampleRate * 5));
+    playDecodedSample(sampleKey, *sampleToPlay, pitch, volume, isBgm);
+}
+
+void PS2AudioBackend::pruneFinishedSounds()
+{
+#if defined(PLATFORM_VITA)
+    return;
+#else
+    auto &sounds = m_impl->activeSounds;
+    auto it = sounds.begin();
+    while (it != sounds.end())
+    {
+        if (!IsSoundPlaying(it->snd))
+        {
+            UnloadSound(it->snd);
+            it = sounds.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+#endif
+}
+
+void PS2AudioBackend::playDecodedSample(uint32_t sampleKey, DecodedSample &sample, float pitch, float volume,
+                                        bool isBgm)
+{
+#if defined(PLATFORM_VITA)
+    (void)sampleKey;
+    (void)sample;
+    (void)pitch;
+    (void)volume;
+    (void)isBgm;
+    return;
+#else
+    // Mixed PCM owns output by default. Disabling that route restores legacy
+    // clips unless the caller explicitly chooses a legacy setting as well.
+    static const bool legacyClips = [] {
+        const char *flag = std::getenv("PS2_PORT_AUDIO_LEGACY");
+        if (flag) return *flag && *flag != '0';
+        const char *pcm = std::getenv("PS2_PORT_NATIVE_PCM");
+        return pcm && *pcm == '0';
+    }();
+    if (!legacyClips) return;
+    if (!m_audioReady || sample.pcm.empty())
+        return;
+
+    pruneFinishedSounds();
+
+    for (const auto &t : m_impl->activeSounds)
+    {
+        if (t.sampleKey == sampleKey && IsSoundPlaying(t.snd))
+            return;
+    }
+
+    auto &sounds = m_impl->activeSounds;
+    if (isBgm)
+    {
+        for (auto it = sounds.begin(); it != sounds.end();)
+        {
+            if (IsSoundPlaying(it->snd))
+            {
+                StopSound(it->snd);
+                UnloadSound(it->snd);
+                it = sounds.erase(it);
+            }
+            else
+                ++it;
+        }
+    }
+
+    constexpr int kMaxConcurrentSounds = 4;
+    while (static_cast<int>(sounds.size()) >= kMaxConcurrentSounds)
+    {
+        StopSound(sounds.front().snd);
+        UnloadSound(sounds.front().snd);
+        sounds.erase(sounds.begin());
+    }
+
+    std::vector<uint8_t> wav = buildWavFromPcm(sample.pcm.data(), sample.pcm.size(), sample.sampleRate);
+    Wave wave = LoadWaveFromMemory(".wav", wav.data(), static_cast<int>(wav.size()));
+    if (wave.frameCount <= 0)
+        return;
+    Sound snd = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+    SetSoundPitch(snd, pitch);
+    SetSoundVolume(snd, volume);
+    m_impl->activeSounds.push_back({snd, sampleKey});
+    PlaySound(snd);
+#endif
+}
+
+void PS2AudioBackend::stop(uint32_t voiceId)
+{
+    (void)voiceId;
+}
+
+void PS2AudioBackend::stopAll()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+#if defined(PLATFORM_VITA)
+    return;
+#else
+    for (auto &t : m_impl->activeSounds)
+    {
+        StopSound(t.snd);
+        UnloadSound(t.snd);
+    }
+    m_impl->activeSounds.clear();
+#endif
+}

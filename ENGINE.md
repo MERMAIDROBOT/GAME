@@ -179,6 +179,28 @@ successful host file write. Correct menu audio does not qualify gameplay or movi
 Keep title addresses, library variants and exceptional behavior in fingerprinted
 profiles. Generalize a fix only when its underlying contract is established.
 
+#### Runtime title conformance (`patches/runtime-title-conformance.patch`)
+
+Generic runtime behavior that the second title needed and Kelly Slater never used.
+Each item was proven on a retail title before promotion; tests are in
+`tests/test_title_conformance.py`.
+
+| Area | Pinned runtime | Shared behavior |
+|---|---|---|
+| Runtime pools | RPC/TLS/BootMode pools at 0x1F00000, inside a "rest of RAM" heap | EE kernel space 0x40000-0x71000 |
+| CD image | no way to configure one | optional absolute `PS2_PORT_CD_IMAGE` |
+| GS CSR | FIFO bits never read empty | FIFO reads empty (GIF is consumed synchronously) |
+| `sceCdCallback` | no-op | stored; raised in interrupt context after each completed read |
+| `CreateSema` | max_count 0 rejected | non-positive max treated as unbounded |
+| LOADFILE (0x80000006) | no server; search/stop bind-retry forever | fallback service (version, stop, search by `.iopmod` name/address) when no IRX serves the SID |
+| SIF commands | EE `sceSifSendCmd` not delivered; IOP sreg/handlers no-ops; IOP->EE SET_SREG dropped | two-way delivery, IOP sreg table, `sceSifAddCmdHandler`/`RemoveCmdHandler` |
+| Runtime heap | `guestMalloc` over the title's own heap | capped at the main stack, top 1 MiB reserved, `EndOfHeap` reports the reserve |
+| MPEG | `sceMpegCbNodata` never invoked; `IsEnd` only knew CD-stream EOF | nodata runs on the calling thread inside GetPicture; end-only feeds paced per vsync (accepted after 60); AddBs-fed streams end on accepted end codes |
+
+Partial library replacement must cover every accessor of the state it owns: if the
+runtime replaces part of libmpeg or sifcmd, also route the title's own accessors
+(`sceMpegIsEnd`, `sceSifGetSreg`/`SetSreg`, ...) or keep the whole library in guest code.
+
 References:
 [native IOP module/service interface](https://github.com/Waffle565/God-Of-War-Native-Port/blob/49ca62c1d20b4659c61df6286c54e86edf411012/ps2xIOP/src/native/iop_native.h),
 [PCSX2 memory-card implementation](https://github.com/PCSX2/pcsx2/blob/091ab68708a555198d80a7216965481c7ddd0d98/pcsx2/SIO/Memcard/MemoryCardFile.cpp).
@@ -217,6 +239,28 @@ Both C++ export and optional macOS workflows use the same shared fixes and PR
 stream. Keep the known-good application available. Adopt code selectively only
 after license, dependency, edge-case and regression review; source inspection or
 another title's reported FPS does not meet these gates.
+
+#### Cross-title A/B gate (`ab-check`)
+
+A fix folded from one title can break another silently: the SSX 3 heap-reserve fold made
+Kelly print "out of memory" and exit at boot. Before a change to `patches/*.patch`
+(`native.RUNTIME_PATCHES`) or `knowledge.json` lands, run each title that already boots:
+
+    python3 run.py --target macos --profile <title.json> ab-check --name <run> \
+        --baseline-patches <dir with the old patches>        # or --baseline-lab / --baseline-knowledge
+
+Each side gets its own lab copy (stack under test), work root (PS2Recomp cloned at that lab's
+pinned revision; recompiler rebuilt) and private dir: a real disc-root with the boot ELF and
+`mc0`/`mc1` copied (the runtime keeps saves next to the ELF) and only other game data symlinked,
+and a recomp.toml rewritten so translation never writes into the title's `generated/`. A recorded
+applied stack (`<work>/dependencies/PS2Recomp/.git/port-lab-applied-stack`) works as a patch overlay.
+Checks per side: translate, build, the synthetic suites, a headless boot gate (alive after
+`--boot-seconds`, a drawn image, no "out of memory"-style marker) and optionally `--scenario`.
+Output (default `<work>/ab-checks/<run>/report.md`) marks a check that passes on baseline and fails
+on candidate as a regression; the command exits 2 unless the result is `no_regression`.
+`--reuse-generated` copies the title translation for runtime-only changes. It refuses to start
+while a `ps2EntryRunner` is running (someone may be benchmarking) unless `--allow-busy`.
+A verified CD image is not carried into the sides. A pass is regression evidence, not gameplay acceptance.
 
 The shared compiler now supports [private runtime-target feedback](RUNTIME-FEEDBACK.md):
 existing missing-target logs produce bounded main-ELF entry candidates and an

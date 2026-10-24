@@ -113,6 +113,40 @@ int main() {
         presses.push_back(KEY_F1); read();
         require(ps2PortConsumeControlsToggle(),"Guide event was lost");
         require(!ps2PortConsumeControlsToggle(),"Guide event was delivered twice");
+        // Preserve a chord's direction at the press, even if the whole
+        // chord is released before the game next polls its controller.
+        auto consume=[] { std::array<uint8_t,32> s{}; require(pad.readState(0,0,s.data(),s.size()),"Pad read failed"); return s; };
+        for(int face:{KEY_C,KEY_Z}) {
+            const uint16_t direction=face==KEY_C?0x80:0x90, action=face==KEY_C?0x2000:0x8000;
+            down[KEY_LEFT]=true;down[KEY_UP]=face==KEY_Z;
+            presses.push_back(KEY_LEFT);if(face==KEY_Z)presses.push_back(KEY_UP);
+            require(buttons(read())==direction,"Direction setup failed");
+            down[face]=true;presses.push_back(face);ps2PortPollHostInput();
+            down.fill(false);ps2PortPollHostInput();
+            require(buttons(consume())==(direction|action),"Quick face press lost its held direction");
+            require(buttons(consume())==0,"Chord release was lost");
+        }
+        // Host presses can accumulate between two game polls. Deliver a
+        // growing arrow/action chord on the first read, without artificial
+        // frame-by-frame Left -> Up+Left -> Up+Left+Square latency.
+        down[KEY_LEFT]=true;presses.push_back(KEY_LEFT);ps2PortPollHostInput();
+        down[KEY_UP]=true;presses.push_back(KEY_UP);ps2PortPollHostInput();
+        down[KEY_Z]=true;presses.push_back(KEY_Z);ps2PortPollHostInput();
+        require(buttons(consume())==0x8090,"Expanding chord delayed across guest polls");
+        down.fill(false);ps2PortPollHostInput();
+        require(buttons(consume())==0,"Expanding chord did not release");
+        // Distinct action taps must not merge into a synthetic combination.
+        down[KEY_C]=true;presses.push_back(KEY_C);ps2PortPollHostInput();
+        down[KEY_C]=false;ps2PortPollHostInput();
+        down[KEY_Z]=true;presses.push_back(KEY_Z);ps2PortPollHostInput();
+        down[KEY_Z]=false;ps2PortPollHostInput();
+        for(auto expected:{0x2000,0,0x8000,0})require(buttons(consume())==expected,"Distinct taps merged or reordered");
+        // Analog steering belongs to the same event snapshot too.
+        down[KEY_W]=down[KEY_A]=down[KEY_Z]=true;presses.push_back(KEY_Z);ps2PortPollHostInput();
+        down.fill(false);ps2PortPollHostInput();auto chord=consume();
+        require(buttons(chord)==0x8000 && chord[6]==1 && chord[7]==1,"Analog chord lost its steering");
+        require(buttons(consume())==0 && consume()[6]==128,"Analog chord did not release");
+        std::cout<<"PASS: quick keyboard chords retain digital/analog directions and separate action ordering\n";
         testConcurrentCommandAcknowledgments();
         std::cout << "PASS: arrow directions, single tap/hold/release, independent WASD stick and guide events\n";
     } catch(const std::exception& e) { std::cerr<<e.what()<<'\n';return 1; }

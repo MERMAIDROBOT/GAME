@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "implementation": "Vulkan/MoltenVK native host rasterization; GS compatibility state remains",
+  "license": "MIT upstream, modifications distributed under repository GPL-3.0",
+  "upstream": "https://github.com/danielgomesvieira2000/ps2-port-engine",
+  "sources": {
+    "runtime/gpu/src/gs_renderer.cpp": "8cfdffbdf8be52348978c293ce4ada6c47bb6fe6a10b3387c89ca30b03dec96c",
+    "runtime/gpu/src/threaded_renderer.cpp": "e23e0811ca1774761e487bc0d50ce300cecab82429056f6c6206aed4cf7309da",
+    "runtime/gpu/include/ps2gpu/gs_renderer.h": "f3ff593d16e92efdb627fd86d3abec12475bc43aa56ea551cae22fc78497101d",
+    "runtime/gpu/shaders/gs.frag": "56933a95fe69b096f70ef70e20a1d3fb5a14143bea064c9abaab5802bc7e0dd7"
+  },
+  "coverage": "v7 fixes preserved; buffer/rendering semantics still require title regression. CMake builds GPU module; host-adapter source requires compatible ps2host GS/pack API. No blobs, game code or assets.",
+  "excluded": [
+    "Astra hypotheses",
+    "Antigravity unfinished v8 edits",
+    "unused depth-clear skip",
+    "Blender integration"
+  ]
+}
