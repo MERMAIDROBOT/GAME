@@ -39,7 +39,7 @@ adapter. See [PLATFORMS.md](PLATFORMS.md) for the extension contract.
 - Resumable local disc-file import with checksums, BOOT2 discovery, revision-pinned
   profiles, ELF inspection, PS2Recomp analysis/translation and representative
   generated-source syntax checks.
-- An executable knowledge bank with three audited handlers: opcode-guarded EE
+- An executable knowledge bank with audited handlers, including signed 64-bit EE branches, VU0 macro dispatch, opcode-guarded EE
   SQRT operand correction, declared runtime-memory ownership checks, and bounded
   IOP import-table discovery. New rules require provenance and regression fixtures.
 - A 28-stage dependency/evidence scheduler covering runtime, graphics, textures,
@@ -52,6 +52,40 @@ adapter. See [PLATFORMS.md](PLATFORMS.md) for the extension contract.
   Offline output is separate from verified runtime replacement loading.
 - Private scenario, input acknowledgement, visual postcondition and graphics
   replay tooling, plus asset-free regression tests.
+
+## Automated conversion and carried native components
+
+```sh
+# Mounted disc directory; no game files are uploaded.
+python3 run.py convert-disc /Volumes/YourDisc --id your-game --title "Your Game" --plan
+python3 run.py convert-disc /Volumes/YourDisc --id your-game --title "Your Game"
+# macOS target continues through native build, runtime tests and local packaging.
+python3 run.py --target macos convert-disc /Volumes/YourDisc --id your-game --title "Your Game" --plan
+python3 run.py qualify-port --help
+python3 run.py review-upstreams --help
+```
+
+`convert-disc` discovers and pins BOOT2, executes the existing checked stages,
+applies instruction-matched corrections, and stops on unsupported contracts.
+`--resume` rejects changed inputs rather than trusting stale artifacts. A package
+is still marked gameplay-unverified until player acceptance is recorded.
+
+The runtime patch stack carries IOP/SPU/CD services, corrected scalar FPU and VU0
+semantics, lazy timers, VIF fast paths, a native host PCM backend and keyboard
+input. Native PCM output does not remove its IOP/SPU producer. Disable PCM with
+`PS2_PORT_NATIVE_PCM=0` to restore legacy clips; explicit legacy settings override
+that fallback. Unsupported audio producers require title qualification.
+
+`runtime/gpu` carries the native Vulkan/MoltenVK renderer source, pipeline cache
+synchronization, sprite/alpha fixes, photo/readback bridge, runtime mip generation
+and worker residency cache. The GPU CMake module and host bridge have different
+integration requirements; this release does not automatically replace every
+title's presentation adapter. Actual worker and host audio/input implementations
+are compiled by asset-free tests and the native runtime qualification command.
+
+See [port qualification](PORT-QUALIFICATION.md), [runtime hot paths](RUNTIME-HOTPATHS.md)
+and [recent upstream review](UPSTREAM-REVIEW-2026-10-24.md). Unfinished Antigravity
+v8 experiments and Blender asset work are not promoted into shared defaults.
 
 ## Try the interface
 

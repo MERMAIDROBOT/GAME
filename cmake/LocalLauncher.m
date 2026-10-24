@@ -17,6 +17,10 @@ int main(void) {
         if (!elf || !directory || !log) return 2;
         if (![directory isAbsolutePath]) return 2;
         setenv("PS2_PORT_IO_ROOT", [directory fileSystemRepresentation], 1);
+        NSString *image = config[@"CdImage"];
+        if (image && ![image isAbsolutePath]) return 2;
+        if (image) setenv("PS2_PORT_CD_IMAGE", [image fileSystemRepresentation], 1);
+        else unsetenv("PS2_PORT_CD_IMAGE");
         int fd = open([log fileSystemRepresentation], O_CREAT | O_WRONLY | O_TRUNC, 0600);
         if (fd < 0) return 3;
         dup2(fd, STDOUT_FILENO);

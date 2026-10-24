@@ -126,3 +126,21 @@ class NextGameTests(unittest.TestCase):
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             with self.assertRaisesRegex(RuntimeError,'pipeline slot'):
                 self.run_workflow(execute=True)
+
+    def test_automatic_qualification_blocks_old_signed_branch_even_after_translation_success(self):
+        def obsolete(command,private):
+            self.fake(command,private)
+            if command=='translate':
+                (private/'generated/a.cpp').write_text('// 0x1000: 0x1d000001 bgtz\nif(GPR_S32(ctx, 8)>0){}\n')
+        with patch.object(lab,'WORK',self.root/'work'):
+            report=next_game.run(self.profile,'obsolete',through='translate',execute=True,runner=obsolete)
+        self.assertEqual(report['status'],'blocked')
+        self.assertEqual(report['ticket']['subsystem'],'translate')
+        self.assertFalse(report['playable_certified'])
+
+    def test_mac_package_plan_orders_tests_before_packaging(self):
+        r=self.run_workflow(through='package')
+        self.assertEqual([x['command'] for x in r['plan']][-3:],
+                         ['build-native','test-runtime','package-local'])
+        self.assertFalse(r['playable_certified'])
+        self.assertEqual(self.called,[])

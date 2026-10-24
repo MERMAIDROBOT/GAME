@@ -13,6 +13,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 namespace ps2_port_fpu {
 #if defined(_MSC_VER)
 #define PS2_FLOAT_NOINLINE __declspec(noinline)
@@ -174,6 +175,13 @@ inline float ps2_frsqrt(float a, float b)
     const float r = a / std::sqrt(b);
     return ps2_fall_normal(a, b, r) ? r : ps2_frsqrt_slow(a, b);
 }
+
+// EE exponent-255 encodings are finite extended values, not IEEE NaNs.
+// Comparisons must use the same representation as arithmetic or clamps fail.
+inline bool ps2_compare_extended() { static const bool on=[] { const char *v=std::getenv("PS2_PORT_FPU_COMPARE"); return !(v && v[0]=='0'); }(); return on; }
+inline bool ps2_flt(float a, float b) { return ps2_compare_extended() ? ps2_to_double(a) < ps2_to_double(b) : a < b; }
+inline bool ps2_fle(float a, float b) { return ps2_compare_extended() ? ps2_to_double(a) <= ps2_to_double(b) : a <= b; }
+inline bool ps2_feq(float a, float b) { return ps2_compare_extended() ? ps2_to_double(a) == ps2_to_double(b) : a == b; }
 
 } // namespace ps2_port_fpu
 #undef PS2_FLOAT_NOINLINE

@@ -1,0 +1,253 @@
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1,3 +1,4 @@
++#include "ps2_env_flags.h"
+ #include <cstdio>
+ #include <cstdlib>
+ #include "runtime/ps2_memory.h"
+@@ -418,13 +419,25 @@
+ void PS2Memory::resetEeTimers() noexcept
+ {
+     m_eeTimers = {};
++    auto &lazy = m_lazyEeTimers;
++    lazy.pending = 0; lazy.budget = 0; lazy.carried = 0;
+ }
+ 
+ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
+ {
++    auto &lazy = m_lazyEeTimers;
++    if (ps2_port_env::lazyTimers())
++    {
++        lazy.pending += eeCycles;
++        if (lazy.pending < lazy.budget)
++            return 0u;                       // provably no timer event inside the accumulated cycles
++        eeCycles = lazy.pending;
++        lazy.pending = 0;
++    }
+     if (eeCycles == 0u)
+     {
+-        return 0u;
++        const uint32_t c = lazy.carried; lazy.carried = 0;
++        return c;
+     }
+ 
+     constexpr uint32_t kGifStat = 0x10003020u;
+@@ -493,11 +506,49 @@
+             interruptMask |= 1u << index;
+         }
+     }
++    if (ps2_port_env::lazyTimers())
++    {   // Exact budget: the fewest EE cycles after which any timer could raise an interrupt.
++        uint64_t budget = 1ull << 20;        // bounded so long idle stretches still flush regularly
++        for (size_t index = 0; index < m_eeTimers.size(); ++index)
++        {
++            const EeTimer &timer = m_eeTimers[index];
++            if ((timer.mode & kEeTimerModeCue) == 0u)
++                continue;
++            const uint64_t clockHz = kEeTimerClockHz[timer.mode & kEeTimerModeClksMask];
++            if (clockHz == 0u)
++                continue;
++            const uint32_t count = timer.count & 0xFFFFu, compare = timer.compare & 0xFFFFu;
++            uint64_t ticksNeeded = UINT64_MAX;
++            if ((timer.mode & kEeTimerModeCmpe) != 0u && (timer.mode & kEeTimerModeEquf) == 0u)
++                ticksNeeded = std::min<uint64_t>(ticksNeeded, ticksUntilMatch(count, compare));
++            if ((timer.mode & kEeTimerModeOvfe) != 0u && (timer.mode & kEeTimerModeOvff) == 0u)
++                ticksNeeded = std::min<uint64_t>(ticksNeeded, 0x10000ull - count);
++            if (ticksNeeded == UINT64_MAX)
++                continue;
++            // smallest C with floor((C*clockHz + rem)/kEeClockHz) >= ticksNeeded
++            const uint64_t need = ticksNeeded * kEeClockHz;
++            const uint64_t rem = timer.clockRemainder;
++            const uint64_t c = need <= rem ? 0u : (need - rem + clockHz - 1u) / clockHz;
++            budget = std::min<uint64_t>(budget, c);
++        }
++        lazy.budget = budget;
++        interruptMask |= lazy.carried; lazy.carried = 0;
++    }
+     return interruptMask;
+ }
+ 
++void PS2Memory::flushLazyEeTimers() noexcept
++{
++    auto &lazy = m_lazyEeTimers;
++    if (!ps2_port_env::lazyTimers() || lazy.pending == 0u)
++        return;
++    lazy.budget = 0;                         // force the next call to advance now
++    lazy.carried |= advanceEeTimers(0);   // 0 if the budget was exact; never lost otherwise
++}
++
+ uint64_t PS2Memory::cyclesUntilNextEeTimerInterrupt() const noexcept
+ {
++    const_cast<PS2Memory *>(this)->flushLazyEeTimers();
+     uint64_t nearest = std::numeric_limits<uint64_t>::max();
+     for (const EeTimer &timer : m_eeTimers)
+     {
+@@ -1140,6 +1191,9 @@
+ 
+ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+ {
++    flushLazyEeTimers();
++    size_t changedTimer = 0; uint32_t changedOffset = 0;
++    if (decodeEeTimerRegister(address, changedTimer, changedOffset)) m_lazyEeTimers.budget = 0;
+     size_t timerIndex = 0u;
+     uint32_t timerOffset = 0u;
+     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
+@@ -1463,7 +1517,7 @@
+                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
+                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
+                         ++tagsProcessed;
+-                        if (std::getenv("PS2_PORT_VU_TRACE") && channelBase==0x10009000u) {
++                        if (ps2_port_env::vuTrace() && channelBase==0x10009000u) {
+                             static unsigned traceTags=0;
+                             if (traceTags++<32u) std::fprintf(stderr,"[port-lab dma-tag] at=0x%x id=%u qwc=%u addr=0x%x chcr=0x%x\n",currentTagAddr,id,tagQwc,addr,chcr);
+                         }
+@@ -1640,7 +1694,7 @@
+         return false;
+ 
+     const bool fromScratchpad = channelBase == kSprFromChannel;
+-    if (std::getenv("PS2_PORT_VU_TRACE")) {
++    if (ps2_port_env::vuTrace()) {
+         static unsigned traceSpr=0;
+         uint64_t first=0; std::memcpy(&first,m_scratchpad+originalSadr,8);
+         if (traceSpr++<16u) std::fprintf(stderr,"[port-lab spr] from=%d main=0x%x bytes=%u first=0x%llx\n",fromScratchpad,mainOffset,byteCount,static_cast<unsigned long long>(first));
+@@ -2386,6 +2440,7 @@
+ 
+ uint32_t PS2Memory::readIORegister(uint32_t address)
+ {
++    flushLazyEeTimers();
+     if (address == 0x10003C00u) return vif1_regs.stat;
+     if (address == 0x10003C20u) return vif1_regs.err;
+     size_t timerIndex = 0u;
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -452,6 +452,10 @@
+     };
+ 
+     std::array<EeTimer, 4> m_eeTimers{};
++    // Per-memory ownership: independent instances never lose deferred cycles.
++    struct LazyEeTimers { uint64_t pending = 0, budget = 0; uint32_t carried = 0; };
++    LazyEeTimers m_lazyEeTimers{};
++    void flushLazyEeTimers() noexcept;
+     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
+     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
+     void queueCompletedDmacCause(uint32_t cause);
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -1,3 +1,4 @@
++#include "ps2_env_flags.h"
+ #include <cstdio>
+ #include <cstdlib>
+ // Based on Blackline Interactive implementation
+@@ -375,7 +376,7 @@
+         vif1_regs.num = num;
+         if (irq && !(vif1_regs.err & 1u)) {
+             vif1_regs.stat |= (1u << 11) | (1u << 10); // INT and VIS
+-            if (std::getenv("PS2_PORT_VU_TRACE")) {
++            if (ps2_port_env::vuTrace()) {
+                 static unsigned reports = 0;
+                 if (reports++ < 32u) std::fprintf(stderr,"[port-lab vif-irq] code=0x%x remaining=%u\n",cmd,sizeBytes-pos);
+             }
+@@ -451,7 +452,7 @@
+             // FLUSHA is an ordering barrier for every GIF path.
+             if (opcode == VIF_FLUSHA && m_gifArbiter)
+                 m_gifArbiter->drain();
+-            if (std::getenv("PS2_PORT_VU_TRACE")) {
++            if (ps2_port_env::vuTrace()) {
+                 static uint32_t flushCounts[4]{};
+                 const uint32_t count = ++flushCounts[opcode - VIF_FLUSHE];
+                 if (count == 1u || (count <= 65536u && count % 4096u == 0u))
+@@ -528,7 +529,7 @@
+             uint32_t destAddr = (uint32_t)imm * 8u;
+             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
+             const uint32_t mpgBytes = instructionCount * 8u;
+-            if (std::getenv("PS2_PORT_VU_TRACE")) {
++            if (ps2_port_env::vuTrace()) {
+                 static unsigned traces=0;
+                 if (traces++<64u) std::fprintf(stderr,"[port-lab mpg] dest=0x%x bytes=%u available=%u bound=%d\n",destAddr,mpgBytes,sizeBytes-pos,m_vu1Code!=nullptr);
+             }
+@@ -605,7 +606,7 @@
+             }
+             int bitsPerVector = (vl == 3 && vn == 3) ? 16 : (components * bitsPerComponent);
+             uint32_t bytesPerVector = (bitsPerVector + 7) / 8;
+-            if (std::getenv("PS2_PORT_VU_TRACE")) {
++            if (ps2_port_env::vuTrace()) {
+                 static uint32_t counts[32]{};
+                 const uint32_t count = ++counts[opcode & 31u];
+                 if (count == 1u || (count <= 65536u && count % 4096u == 0u))
+@@ -642,7 +643,60 @@
+ 
+             const bool zeroExtend = (imm & 0x4000u) != 0u;
+ 
+-            if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
++            // Port Lab (adapted from verified Claude WORKLOG 128): fast path for the common UNPACK case (no mask, MODE 0, CL == WL,
++            // destination inside VU1 memory without wrap, formats with a defined decode). Same results as the
++            // general loop below (differential test vif_unpack_test); opt out with PS2_PORT_VIF_FASTPATH=0.
++            bool fastDone = false;
++            if (ps2_port_env::vifFast() && m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes && !maskEnable &&
++                (vif1_regs.mode & 3u) == 0u && cl == wl && vuAddr + writeVectorCount <= 0x400u &&
++                (vl != 3u || vn == 3u))
++            {
++                const uint8_t *src = data + pos;
++                uint8_t *dst = m_vu1Data + vuAddr * 16u;
++                const uint32_t n = writeVectorCount;
++                auto ext16 = [&](const uint8_t *q) -> uint32_t { uint16_t r; std::memcpy(&r, q, 2); return zeroExtend ? uint32_t(r) : uint32_t(int32_t(int16_t(r))); };
++                auto ext8 = [&](uint8_t r) -> uint32_t { return zeroExtend ? uint32_t(r) : uint32_t(int32_t(int8_t(r))); };
++                if (vl == 0u && components == 4)
++                    std::memcpy(dst, src, size_t(n) * 16u);
++                else
++                    for (uint32_t i = 0; i < n; ++i)
++                    {
++                        uint32_t lanes[4];
++                        std::memcpy(lanes, dst + i * 16u, 16u);
++                        const uint8_t *v = src + size_t(i) * bytesPerVector;
++                        if (vl == 0u)
++                        {
++                            if (components == 1) { uint32_t a; std::memcpy(&a, v, 4); lanes[0] = lanes[1] = lanes[2] = lanes[3] = a; }
++                            else if (components == 2) { std::memcpy(lanes, v, 8); lanes[2] = lanes[0]; lanes[3] = lanes[1]; }
++                            else
++                            {   // V3-32 reads four words (see the general path); keep lane 3 without lookahead
++                                std::memcpy(lanes, v, 12);
++                                if (static_cast<size_t>(v - data) + 16u <= sizeBytes) std::memcpy(&lanes[3], v + 12, 4);
++                            }
++                        }
++                        else if (vl == 1u)
++                        {
++                            if (components == 1) { lanes[0] = lanes[1] = lanes[2] = lanes[3] = ext16(v); }
++                            else if (components == 2) { lanes[0] = ext16(v); lanes[1] = ext16(v + 2); lanes[2] = lanes[0]; lanes[3] = lanes[1]; }
++                            else { for (int c = 0; c < components; ++c) lanes[c] = ext16(v + 2 * c); }
++                        }
++                        else if (vl == 2u)
++                        {
++                            if (components == 1) { lanes[0] = lanes[1] = lanes[2] = lanes[3] = ext8(v[0]); }
++                            else if (components == 2) { lanes[0] = ext8(v[0]); lanes[1] = ext8(v[1]); lanes[2] = lanes[0]; lanes[3] = lanes[1]; }
++                            else { for (int c = 0; c < components; ++c) lanes[c] = ext8(v[c]); }
++                        }
++                        else
++                        {   // V4-5
++                            uint16_t packed; std::memcpy(&packed, v, 2);
++                            lanes[0] = (packed & 0x1Fu) << 3u; lanes[1] = ((packed >> 5u) & 0x1Fu) << 3u;
++                            lanes[2] = ((packed >> 10u) & 0x1Fu) << 3u; lanes[3] = ((packed >> 15u) & 0x01u) << 7u;
++                        }
++                        std::memcpy(dst + i * 16u, lanes, 16u);
++                    }
++                fastDone = true;
++            }
++            if (!fastDone && m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
+             {
+                 const uint8_t *srcBase = data + pos;
+                 uint32_t srcIndex = 0u;
+--- /dev/null
++++ b/ps2xRuntime/include/ps2_env_flags.h
+@@ -0,0 +1,12 @@
++// SPDX-License-Identifier: GPL-3.0-only
++// Process-lifetime flags. Set environment before runtime startup. Cache opt-out
++// restores dynamic diagnostic lookup; correctness-path gates remain start-only.
++#pragma once
++#include <cstdlib>
++namespace ps2_port_env {
++inline bool enabled(const char *key) { const char *v=std::getenv(key); return !(v && v[0]=='0'); }
++inline bool cacheEnabled() { static const bool on=enabled("PS2_PORT_ENV_CACHE"); return on; }
++inline bool vuTrace() { static const bool on=std::getenv("PS2_PORT_VU_TRACE")!=nullptr; return cacheEnabled() ? on : std::getenv("PS2_PORT_VU_TRACE")!=nullptr; }
++inline bool vifFast() { static const bool on=enabled("PS2_PORT_VIF_FASTPATH"); return on; }
++inline bool lazyTimers() { static const bool on=enabled("PS2_PORT_LAZY_EE_TIMERS"); return on; }
++} // namespace ps2_port_env

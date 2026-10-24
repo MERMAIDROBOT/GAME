@@ -55,13 +55,15 @@ def outputs(private, command, artifact):
     if command == 'translate':
         if (Path(private)/'analysis/knowledge-translation.json').exists():
             paths.append(Path(private)/'analysis/knowledge-translation.json')
+        if (Path(private)/'analysis/port-qualification.json').is_file():
+            paths.append(Path(private)/'analysis/port-qualification.json')
         paths.extend(sorted((Path(private)/'generated').rglob('*')))
     return {str(p.relative_to(private)):lab.digest(p) for p in paths if p.is_file()}
 
 
-def run(profile_path, name, source=None, through='intake', execute=False, resume=False, runner=None, process_audit=True):
+def run(profile_path, name, source=None, through='intake', execute=False, resume=False, runner=None, process_audit=True, image=None):
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', name): raise ValueError('Invalid run name')
-    if through not in {'intake', 'translate'}: raise ValueError('Unknown automation target')
+    if through not in {'intake', 'translate','native','package'}: raise ValueError('Unknown automation target')
     profile, private = lab.load_profile(profile_path)
     private.mkdir(parents=True, exist_ok=True)
     target = private/'next-game-runs'/name
@@ -78,9 +80,17 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
              [lab.BUILD/'ps2xAnalyzer/ps2_analyzer', lab.BUILD/'ps2xRecomp/ps2_recomp']}
     contract = dict(profile_sha256=lab.digest(profile_path), executable_sha256=identity,
                     implementation=engine, tools=tools, work=str(lab.WORK), source=str(disc.resolve()), through=through)
+    if image:
+        contract['image'] = str(Path(image).resolve())
     if previous and previous['contract'] != contract:
         raise ValueError('Resume input/profile/tooling changed; start a new run')
-    stages = ([('import', 'disc-manifest.json')] if source else []) + STAGES[:3 if through == 'intake' else 6]
+    # Titles that read ISO9660 by LBN need a sector image as well as the file tree.
+    stages = (([('import', 'disc-manifest.json')] if source else []) +
+              ([('import-image', 'analysis/cd-image-stage.json')] if image else []) + STAGES[:3 if through == 'intake' else 6])
+    if through in {'native','package'}:
+        stages += [('build-native','analysis/native-build-stage.json'),('test-runtime','analysis/runtime-tests-stage.json')]
+    if through=='package':
+        stages += [('package-local','analysis/local-package-stage.json')]
     plan = [{'command':cmd, 'artifact':artifact} for cmd, artifact in stages]
     report = dict(schema=1, local_only=True, title_id=profile['id'], contract=contract,
         plan=plan, stages=(previous or {}).get('stages', []), status='planned',
@@ -123,6 +133,7 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
             try:
                 arguments = [sys.executable, str(lab.ROOT/'pipeline.py'), '--profile', str(Path(profile_path).resolve()), command]
                 if command == 'import': arguments.append(str(Path(source).resolve()))
+                if command == 'import-image': arguments.append(str(Path(image).resolve()))
                 log = target/(command+'.log')
                 if runner:
                     runner(command, private)
@@ -142,12 +153,19 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
                         raise RuntimeError('Translation reports errors/decode failures; resolve instruction coverage before proceeding')
                     if stage.get('accepted') is not True:
                         raise RuntimeError('Translation not accepted: ' + '; '.join(stage.get('blockers') or ['missing acceptance record']))
+                if command == 'translate':
+                    from port_checks import audit
+                    qualification=audit(generated=private/'generated')
+                    lab.save(private/'analysis/port-qualification.json',qualification)
+                    if not qualification['structural_checks_passed']:
+                        raise RuntimeError('Generated code failed automatic port qualification; see analysis/port-qualification.json')
                 if command in mapped:
                     from enhancements import record_stage
                     record_stage(profile,private,mapped[command],artifact)
                 step.update(status='passed', outputs=outputs(private, command, artifact), finished=time.time())
                 # Repeating identical verify/import should not invalidate the expensive translator output.
-                if command != 'verify' and (not valid or step['outputs'] != old.get('outputs')):
+                # The sector image does not feed translation.
+                if command not in {'verify', 'import-image'} and (not valid or step['outputs'] != old.get('outputs')):
                     upstream_changed = True
             except Exception as error:
                 step.update(status='failed', error=str(error), finished=time.time())
@@ -163,7 +181,7 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
         graph=schedule(profile,private)
         report['enhancement_stages']={'qualified':graph['completed'],'total':graph['total'],
                                      'report':str(private/'analysis/enhancement-engine-plan.json')}
-        report['status'] = 'intake_complete_integration_required' if through == 'intake' else 'translation_complete_integration_required'
-        report['translation_counts'] = json.loads((private/'analysis/translation-stage.json').read_text()).get('counts', {}) if through == 'translate' else None
+        report['status'] = {'intake':'intake_complete_integration_required','translate':'translation_complete_integration_required','native':'native_complete_gameplay_unverified','package':'package_complete_gameplay_unverified'}[through]
+        report['translation_counts'] = json.loads((private/'analysis/translation-stage.json').read_text()).get('counts', {}) if through != 'intake' else None
         lab.save(report_path, report)
     return report

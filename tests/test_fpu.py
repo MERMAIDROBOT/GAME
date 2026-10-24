@@ -78,6 +78,40 @@ using namespace ps2_port_fpu;
             ran=subprocess.run([str(exe)],capture_output=True,timeout=10)
             self.assertEqual(ran.returncode,0,ran.stderr)
 
+    def test_special_meter_clamp_and_divisor_signs(self):
+        compiler=shutil.which('clang++') or shutil.which('g++')
+        self.assertTrue(compiler)
+        code=r'''#include "ps2_scalar_fpu.h"
+#include <limits>
+using namespace ps2_port_fpu;
+float meter(float x) { if(FPU_C_LT_S(x,0.f)) return 0.f; if(FPU_C_LT_S(1.f,x)) return 1.f; return x; }
+float old_meter(float x) { if(x<0.f)return 0.f;if(1.f<x)return 1.f;return x; }
+int main(){
+ if(!ps2_compare_extended()) return ps2_flt(1.f,std::bit_cast<float>(0x7fffffffu)) ? 99 : 0;
+ const float nan=std::numeric_limits<float>::quiet_NaN();
+ if(!std::isnan(old_meter(nan)))return 1; // failing IEEE clamp control
+ for(unsigned a=0;a<2;++a)for(unsigned b=0;b<2;++b){
+  float n=a?-1.f:1.f,z=b?-0.f:0.f;
+  float x=ps2_fdiv(n,z);unsigned expected=((a^b)?0x80000000u:0)|0x7fffffffu;
+  if(std::bit_cast<unsigned>(x)!=expected)return 2;
+  if(meter(x)!=((a^b)?0.f:1.f))return 3;
+  if(ps2_fmul(x,0.f)!=0.f)return 4;
+ }
+ if(!ps2_feq(-0.f,0.f)||!ps2_fle(-0.f,0.f))return 5;
+ if(ps2_fsqrt(-16.f)!=4.f)return 6;
+ // An extended finite encoding must compare above every ordinary host float.
+ if(!ps2_flt(std::numeric_limits<float>::max(),std::bit_cast<float>(0x7fffffffu)))return 7;
+ return 0;}
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            macros='\n'.join(l[1:] for l in (pipeline.ROOT/'patches/scalar-fpu-compare.patch').read_text().splitlines() if l.startswith('+#define'))
+            code=code.replace('using namespace ps2_port_fpu;',macros+'\nusing namespace ps2_port_fpu;')
+            src=Path(tmp)/'meter.cpp';exe=Path(tmp)/'meter';src.write_text(code)
+            subprocess.run([compiler,'-std=c++20','-O2','-ffp-contract=off','-I',str(pipeline.ROOT/'tools'),str(src),'-o',str(exe)],check=True,capture_output=True)
+            self.assertEqual(subprocess.run([str(exe)],capture_output=True).returncode,0)
+            import os
+            self.assertEqual(subprocess.run([str(exe)],env={**os.environ,"PS2_PORT_FPU_COMPARE":"0"},capture_output=True).returncode,0)
+
     def test_runtime_patch_matches_tested_helper_and_export_whitelist(self):
         if not shutil.which('git'):self.fail('git required')
         # Minimal pinned header context sufficient for the actual unified-diff hunk.

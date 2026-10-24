@@ -10,7 +10,7 @@ import re
 import struct
 import pipeline as lab
 
-KINDS = {'fpu_scalar', 'mmi_pmulth', 'fpu_operand', 'memory_disjoint', 'iop_import_audit'}
+KINDS = {'ee_signed_branch', 'fpu_scalar', 'mmi_pmulth', 'vu0_vcallmsr', 'vu0_vu_memory', 'fpu_operand', 'memory_disjoint', 'iop_import_audit'}
 FIELDS = {'ft':16, 'fs':11}
 
 
@@ -107,6 +107,48 @@ def validate(bank):
                     result,count,changed=rewrite(f'// 0x1000: 0x{word:08x} instruction\n'+before)
                     if count!=1 or changed!=int(fixture['emission']=='legacy') or emit(word) not in result:
                         raise ValueError('PMULTH regression fixture failed')
+        if rule['kind']=='ee_signed_branch' and rule['status']=='active':
+            from branches import rewrite
+            if sum(r.get('kind')=='ee_signed_branch' and r.get('status')=='active' for r in bank['rules'])!=1:
+                raise ValueError('Overlapping signed branch rules')
+            observed=set()
+            for fixture in rule.get('fixtures',[]):
+                result,count,changed=rewrite(fixture['before'])
+                if result!=fixture['after'] or count!=1:
+                    raise ValueError('Signed branch fixture failed')
+                observed.add(bool(changed))
+            if observed!={False,True}:
+                raise ValueError('Signed branches need correction and idempotence fixtures')
+        if rule['kind']=='vu0_vcallmsr':
+            from vu0_macro import rewrite, legacy, emit
+            if any(r.get('kind')=='vu0_vcallmsr' and r is not rule and r.get('status')=='active'
+                   for r in bank['rules']) and rule['status']=='active':
+                raise ValueError('Overlapping VCALLMSR rules')
+            if rule['status']=='active':
+                fixtures=rule.get('fixtures',[])
+                if {f.get('emission') for f in fixtures} != {'legacy','corrected'}:
+                    raise ValueError('VCALLMSR fixtures need correction and idempotence')
+                for fixture in fixtures:
+                    word=int(fixture['word'],16)
+                    before=legacy(word) if fixture['emission']=='legacy' else emit(word)
+                    result,count,changed=rewrite(f'// 0x1000: 0x{word:08x} instruction\n'+before)
+                    if count!=1 or changed!=int(fixture['emission']=='legacy') or emit(word) not in result:
+                        raise ValueError('VCALLMSR regression fixture failed')
+        if rule['kind']=='vu0_vu_memory':
+            from vu0_macro import mem_rewrite, mem_legacy, mem_emit
+            if any(r.get('kind')=='vu0_vu_memory' and r is not rule and r.get('status')=='active'
+                   for r in bank['rules']) and rule['status']=='active':
+                raise ValueError('Overlapping VU0 memory rules')
+            if rule['status']=='active':
+                fixtures=rule.get('fixtures',[])
+                if {f.get('emission') for f in fixtures} != {'legacy','corrected'}:
+                    raise ValueError('VU0 memory fixtures need correction and idempotence')
+                for fixture in fixtures:
+                    word=int(fixture['word'],16)
+                    before=mem_legacy(word) if fixture['emission']=='legacy' else mem_emit(word)
+                    result,count,changed=mem_rewrite(f'// 0x1000: 0x{word:08x} instruction\n'+before)
+                    if count!=1 or changed!=int(fixture['emission']=='legacy') or mem_emit(word) not in result:
+                        raise ValueError('VU0 memory regression fixture failed')
         if rule['kind']=='memory_disjoint' and rule['status']=='active':
             from memory import collisions
             fixtures=rule.get('fixtures',[])
@@ -147,16 +189,22 @@ def add_rule(bank_path,candidate_path):
 def apply_translation(directory, identity=None, bank=None, only=None, write=True):
     bank=validate(bank) if bank is not None else load()
     directory=Path(directory).resolve(); pending=[]; records=[]
-    selected=[r for r in bank['rules'] if r['kind'] in {'fpu_operand','mmi_pmulth','fpu_scalar'} and eligible(r,identity) and (only is None or r['id'] in only)]
+    selected=[r for r in bank['rules'] if r['kind'] in {'ee_signed_branch','fpu_operand','mmi_pmulth','fpu_scalar','vu0_vcallmsr','vu0_vu_memory'} and eligible(r,identity) and (only is None or r['id'] in only)]
     totals=dict(instructions=0,corrected=0,files_changed=0)
     # Shared inventory: nested generated C++ fails closed rather than escaping the rules.
     for path in lab.generated_sources(directory):
         if path.is_symlink() or not path.resolve().is_relative_to(directory): raise ValueError('Unsafe generated source')
         raw=path.read_bytes(); original=raw.decode(); updated=original; applied=[]
         for rule in selected:
-            if rule['kind'] in {'mmi_pmulth','fpu_scalar'}:
+            if rule['kind'] in {'ee_signed_branch','mmi_pmulth','fpu_scalar','vu0_vcallmsr','vu0_vu_memory'}:
                 if rule['kind']=='mmi_pmulth':
                     from mmi import rewrite
+                elif rule['kind']=='vu0_vcallmsr':
+                    from vu0_macro import rewrite
+                elif rule['kind']=='vu0_vu_memory':
+                    from vu0_macro import mem_rewrite as rewrite
+                elif rule['kind']=='ee_signed_branch':
+                    from branches import rewrite
                 else:
                     from fpu import rewrite
                 updated,count,changed=rewrite(updated)
@@ -180,6 +228,11 @@ def apply_translation(directory, identity=None, bank=None, only=None, write=True
                 raise ValueError('FPU helper without a recognized instruction record: '+path.name)
             totals['instructions']+=count; totals['corrected']+=changed
             if count: applied.append(dict(id=rule['id'],matched=count,changed=changed))
+        # Lint (always on): ctx->vi has VI0-VI15 only; a larger index is an out-of-bounds access.
+        from vu0_macro import vi_index_violations
+        violations=vi_index_violations(updated)
+        if violations:
+            raise ValueError(f'Generated code indexes ctx->vi past VI15 {violations}: '+path.name)
         if applied:
             records.append(dict(file=path.name,before_sha256=sha(raw),after_sha256=sha(updated.encode()),rules=applied))
         if updated!=original: pending.append((path,raw,updated.encode()))

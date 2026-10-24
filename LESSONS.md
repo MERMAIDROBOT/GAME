@@ -39,6 +39,33 @@ before/after route, performance cost, rollback and remaining unknowns. A propose
 rule becomes shared only when its implementation and tests travel with the build.
 Cross-title reuse remains provisional until another game exercises it.
 
+## Second-title promotions (SSX 3, 2026-10-18)
+
+These were found on SSX 3 and promoted as shared, asset-free fixes. Private details are in
+the title's worklog and ENGINE-LESSONS.md. Kelly was A/B-checked (isolated builds, Oct 18): synthetic suites pass
+on both stacks and boot/intro output matches; scripted gameplay was not reached (reference frames
+are from another renderer).
+That check is now `run.py --target macos ... ab-check` (ENGINE.md, "Cross-title A/B gate"): run it on
+every title that boots before a shared patch or knowledge-bank change lands.
+
+| Fix | Where | Symptom → cause | Test |
+| --- | --- | --- | --- |
+| VCALLMSR reads CMSAR0 | knowledge bank rev 4, rule `vu0-vcallmsr-cmsar0` (`vu0_macro.py`) | Rider fell through the course and the course was culled → translator emitted `ctx->vi[27]` (vi holds VI0–VI15); CTC2 vi27 stores `ctx->vu0_cmsar0` | `tests/test_vu0_macro.py` |
+| Macro VU0 memory ops address VU0 data memory | knowledge bank rev 5, rule `vu0-macro-vu-memory` (`vu0_macro.py`) | SSX 3 side terrain culled: macro VSQI matrix uploads went to main RAM (fields swapped too), so the VU0 patch classifier read stale data | `tests/test_vu0_macro.py` |
+| `ctx->vi[N≥16]` lint | `knowledge.apply_translation`, always on, fails closed | Catches any out-of-bounds VI access in generated code | `tests/test_vu0_macro.py` |
+| VU MAX/MINI on raw bits, raw I immediate | `runtime-title-conformance.patch` | Integer vertex colours flushed to 0 → operands normalized before compare | `tests/test_title_conformance.py` |
+| VU branch VI backup rules (PCSX2 `_vuBackupVI`) | same patch | JR/JALR used the backup (PCSX2 interpreter and microVU read the current VI; upstream test corrected); repeated writes kept the newest value. Stalls keep the backup (interpreter; microVU's opposite is a stated assumption) | same |
+| PATH3: one GIF packet per MSKPATH3 pulse | same patch | Textures under the wrong CLUT (noise, wrong menu images, corrupt movie columns) → unmask flushed the whole frame's texture chain | same |
+| Runtime heap reserve only for titles that own their stack layout | same patch | Kelly printed "out of memory" and exited on the shared stack → the SSX 3 heap-reserve fold took 1 MB from every title's "rest of RAM" heap; stack -1/heap -1 titles now keep the previous layout | same |
+| Started threads inherit VU0 state; VF0 stays (0,0,0,1) | `runtime-title-conformance.patch` (`EeScheduler::startThread`) | SSX 3's player rider was invisible: its model was set up on a fresh thread whose zeroed context had VF0 = 0, so macro code building 1.0 from VF0.w produced zero inverse-bind matrices and the mesh collapsed | `tests/test_title_conformance.py` |
+| Alarm syscalls 0xFD / -0xFE | same patch | ReleaseAlarm/iSetAlarm unhandled in ps2sdk numbering | same |
+| Patch stack follows in-place edits | `native.apply_runtime_patch` records the applied stack in `.git/port-lab-applied-stack` | Editing a public patch broke build-native for every title (old content couldn't be peeled) | `tests/test_runtime_patch_stack.py` |
+
+Open translator gaps (not fixed):
+- Macro VMAX/VMINI use host `_mm_max_ps`.
+- VDIV/VRSQRT ignore the numerator and return 0 on divide-by-zero.
+- EE `C.cond.S` are host float compares.
+
 ## Remaining automation work, in dependency order
 
 1. Freeze v56's full source/flags/dependency closure and reproduce its link in an
