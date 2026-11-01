@@ -68,6 +68,7 @@ class PipelineTests(unittest.TestCase):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text('synthetic public source')
         (root / 'private-game.bin').write_bytes(b'synthetic excluded data')
+        bank=root/'private-source-corrections';bank.mkdir();(bank/('a'*64+'.json')).write_text('{"private_replacement_source":"excluded"}')
         with contextlib.redirect_stdout(io.StringIO()):
             archive = pipeline.package_source(root)
         with zipfile.ZipFile(archive) as z:
@@ -85,15 +86,15 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unsafe source package member'):
             pipeline.package_source(root)
 
-    def test_import_verify_and_resume_without_rereading_assets(self):
+    def test_import_verify_and_resume_rehashes_without_recopying_unchanged_assets(self):
         with contextlib.redirect_stdout(io.StringIO()):
             pipeline.import_disc(self.source, self.profile, self.private)
             pipeline.verify(self.profile, self.private)
         original = Path.open
 
         def guard(path, *args, **kwargs):
-            if path == self.source / 'asset.dat':
-                raise AssertionError('Resumed import unnecessarily reread asset')
+            if path == self.private / 'disc-root/asset.dat.partial' and args and args[0] == 'wb':
+                raise AssertionError('Resumed import unnecessarily recopied unchanged asset')
             return original(path, *args, **kwargs)
 
         with patch.object(Path, 'open', guard), contextlib.redirect_stdout(io.StringIO()):
@@ -101,6 +102,15 @@ class PipelineTests(unittest.TestCase):
         m = json.loads((self.private / 'disc-manifest.json').read_text())
         self.assertTrue(m['complete'])
         self.assertEqual(len(m['files']), 3)
+
+    def test_resumed_import_detects_same_size_source_asset_changes(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            pipeline.import_disc(self.source,self.profile,self.private)
+            replacement=bytes(reversed(range(256)))
+            (self.source/'asset.dat').write_bytes(replacement)
+            pipeline.import_disc(self.source,self.profile,self.private)
+            pipeline.verify(self.profile,self.private)
+        self.assertEqual((self.private/'disc-root/asset.dat').read_bytes(),replacement)
 
     def test_tampering_is_detected(self):
         with contextlib.redirect_stdout(io.StringIO()):

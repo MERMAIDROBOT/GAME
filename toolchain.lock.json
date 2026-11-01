@@ -48,5 +48,19 @@
       "api": "black_parallel_gs_api_v6",
       "gameplay_qualified": false
     }
+  },
+  "native_graphics_sources": {
+    "volk": {
+      "url": "https://github.com/zeux/volk.git",
+      "revision": "47cddf7ed97b94118a08aacb548a411188e016cc"
+    },
+    "vulkan_headers": {
+      "url": "https://github.com/KhronosGroup/Vulkan-Headers.git",
+      "revision": "11d6898377797e07dbd543aaaa367e4465074597"
+    },
+    "glslang": {
+      "url": "https://github.com/KhronosGroup/glslang.git",
+      "revision": "e1b562a8bed273a02f30b59b66a5d499793cede5"
+    }
   }
 }

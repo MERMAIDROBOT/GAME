@@ -54,6 +54,16 @@ class RuntimePatchStack(unittest.TestCase):
         text = self.apply()
         self.assertIn('line 10 v2', text); self.assertIn('line 15 v2', text); self.assertIn('line 2 first', text)
         self.assertNotIn('v1', text)
+    def test_unknown_edits_are_not_stripped_during_failed_upgrade(self):
+        self.apply();path=self.source/'f.txt';path.write_text(path.read_text().replace('line 19\n','line 19 user edit\n'));before=path.read_bytes()
+        (self.lab/'patches/two.patch').write_text(diff(self.one,self.one.replace('line 10\n','line 10 v2\n')))
+        with self.assertRaisesRegex(RuntimeError,'Unknown tool source edits'):self.apply()
+        self.assertEqual(path.read_bytes(),before);self.assertEqual(len(list((self.source/'.git/port-lab-applied-stack').glob('*.patch'))),2)
+    def test_invalid_new_stack_is_rejected_before_removing_old_fixes(self):
+        self.apply();before=(self.source/'f.txt').read_bytes()
+        (self.lab/'patches/two.patch').write_text(diff('missing context\n','replacement\n'))
+        with self.assertRaisesRegex(RuntimeError,'stack does not apply'):self.apply()
+        self.assertEqual((self.source/'f.txt').read_bytes(),before)
 
 
 if __name__ == '__main__':

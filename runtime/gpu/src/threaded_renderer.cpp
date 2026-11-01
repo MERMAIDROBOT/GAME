@@ -291,6 +291,27 @@ public:
         Drain(12);
         return inner_->ReadTargetFull(fbp, fbw, psm, pixels, width, height);
     }
+    bool ReadTargetRect(std::uint32_t fbp,std::uint32_t fbw,std::uint32_t psm,
+        std::uint32_t maxW,std::uint32_t maxH,std::vector<std::uint32_t>* pixels,
+        std::uint32_t* width,std::uint32_t* height) override {
+        Drain(12);
+        return inner_->ReadTargetRect(fbp,fbw,psm,maxW,maxH,pixels,width,height);
+    }
+    bool ReadTargetRectAsync(std::uint32_t fbp,std::uint32_t fbw,std::uint32_t psm,std::uint32_t maxW,
+        std::uint32_t maxH,std::uint64_t serial,std::vector<std::uint32_t>* pixels,std::uint32_t* width,
+        std::uint32_t* height,std::uint64_t* done_serial) override {
+        Drain(12);      // the copy is recorded after every queued draw (CPU recording only - no GPU wait)
+        return inner_->ReadTargetRectAsync(fbp,fbw,psm,maxW,maxH,serial,pixels,width,height,done_serial);
+    }
+
+
+    bool BlitTargetToSurface(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm,
+        std::uint32_t sx, std::uint32_t sy, std::uint32_t dw, std::uint32_t dh,
+        std::uint32_t ow, std::uint32_t oh, std::uint64_t* serial) override {
+        Drain(12); // All prior draws must precede the surface submission.
+        return inner_->BlitTargetToSurface(fbp,fbw,psm,sx,sy,dw,dh,ow,oh,serial);
+    }
+
 
 private:
     enum : std::uint32_t {

@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "origin": "Recovered event-ordered keyboard input, with private capture dependencies removed",
+  "source": "work/research/engine-source-closure-2026-10-25/archive-source-graph-v4/sources/root_14/ps2_pad.cpp",
+  "source_sha256": "4c0edacee4b7fc2a393a4b9c2eede42c8d440305c3607ad6a58b0368cc5b12d4",
+  "sha256": "1034d58a0230bef10d5d75e58e8e69cc67536917a5ecdc93dfdd697fd712795f",
+  "license": "GPL-3.0 repository license",
+  "gameplay_verified": false,
+  "direction_recovery": {
+    "default": "disabled",
+    "enable": "PS2_PORT_TOUCH_ASSIST=1",
+    "scope": "event-ordered remote keyboard/touch controls only",
+    "origin": "reviewed local Console direction-dropout behavior, with independent direction deadlines and explicit reset; L2 untouched",
+    "gameplay_verified": false
+  }
+}

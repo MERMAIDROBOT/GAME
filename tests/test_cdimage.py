@@ -145,10 +145,16 @@ class RuntimeReceivesImage(unittest.TestCase):
             (private / 'analysis/native-build-stage.json').write_text(json.dumps(
                 {'binary': str(binary), 'sha256': hashlib.sha256(b'runner').hexdigest()}))
             (private / 'disc-root').mkdir()
+            (private / 'disc-root/TEST.ELF').write_bytes(b'synthetic elf')
             seen = []
+
+            def fake_logged(command, log, **k):
+                # Like native.logged: the log exists before the runner starts (boot_probe audits it afterwards).
+                Path(log).parent.mkdir(parents=True, exist_ok=True); Path(log).write_text('')
+                seen.append(k['env_patch']); return 'timeout'
             with mock.patch.object(native.lab, 'SOURCE', private / 'no-source'), \
                     mock.patch.object(native.lab, 'boot_executable', return_value=private / 'disc-root/TEST.ELF'), \
-                    mock.patch.object(native, 'logged', side_effect=lambda *a, **k: seen.append(k['env_patch']) or 'timeout'):
+                    mock.patch.object(native, 'logged', side_effect=fake_logged):
                 native.boot_probe({'id': 'synthetic'}, private)
                 native.boot_probe({'id': 'synthetic'}, private, headless=True)
             for environment in seen:

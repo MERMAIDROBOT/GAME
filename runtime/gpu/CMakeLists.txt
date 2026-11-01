@@ -10,6 +10,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 project(ps2gpu CXX C)
+option(PS2GPU_BUILD_DISPLAY "Build the SDL window presenter" ON)
 
 include(FetchContent)
 set(FETCHCONTENT_QUIET ON)
@@ -35,7 +36,10 @@ set(VOLK_PULL_IN_VULKAN ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(vulkan_headers)
 set(VOLK_HEADERS_ONLY OFF CACHE BOOL "" FORCE)
 set(VULKAN_HEADERS_INSTALL_DIR "${vulkan_headers_SOURCE_DIR}" CACHE PATH "" FORCE)
-FetchContent_MakeAvailable(volk sdl3)
+FetchContent_MakeAvailable(volk)
+if(PS2GPU_BUILD_DISPLAY)
+    FetchContent_MakeAvailable(sdl3)
+endif()
 
 # Shaders: GLSL compiled to SPIR-V at build time by glslang, from its release
 # like the others, and embedded as arrays (glslang --vn).
@@ -115,20 +119,28 @@ list(APPEND PS2GPU_SHADER_HEADERS ${out})
 add_custom_target(ps2gpu_shaders DEPENDS ${PS2GPU_SHADER_HEADERS})
 
 add_library(ps2gpu STATIC
-    ${CMAKE_CURRENT_LIST_DIR}/src/vulkan_display.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/gpu.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/gs_renderer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/threaded_renderer.cpp)
+if(PS2GPU_BUILD_DISPLAY)
+    target_sources(ps2gpu PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/vulkan_display.cpp)
+    target_link_libraries(ps2gpu PUBLIC SDL3::SDL3-static)
+endif()
 add_dependencies(ps2gpu ps2gpu_shaders)
 target_include_directories(ps2gpu PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include PRIVATE ${PS2GPU_SHADER_DIR}
                            ${CMAKE_CURRENT_LIST_DIR}/third_party/smaa)
 target_compile_features(ps2gpu PUBLIC cxx_std_17)
-target_link_libraries(ps2gpu PUBLIC SDL3::SDL3-static PRIVATE volk::volk Vulkan::Headers)
+target_link_libraries(ps2gpu PRIVATE volk::volk Vulkan::Headers)
+if(APPLE)
+    target_link_libraries(ps2gpu PRIVATE "-framework IOSurface" "-framework CoreFoundation")
+endif()
 if(MSVC)
     target_compile_options(ps2gpu PRIVATE /W3 /Z7)        # symbols for --sample, as ps2host has
 endif()
 
-add_executable(ps2gpu_smoke ${CMAKE_CURRENT_LIST_DIR}/tests/display_smoke.cpp)
-target_link_libraries(ps2gpu_smoke PRIVATE ps2gpu)
+if(PS2GPU_BUILD_DISPLAY)
+    add_executable(ps2gpu_smoke ${CMAKE_CURRENT_LIST_DIR}/tests/display_smoke.cpp)
+    target_link_libraries(ps2gpu_smoke PRIVATE ps2gpu)
+endif()
 add_executable(ps2gpu_tests ${CMAKE_CURRENT_LIST_DIR}/tests/renderer_tests.cpp)
 target_link_libraries(ps2gpu_tests PRIVATE ps2gpu)

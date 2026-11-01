@@ -151,7 +151,7 @@ def prepare(profile, private, log_relative, name):
     return report
 
 
-def consume(profile, private, name):
+def consume(profile, private, name, *, allow_empty=False):
     """Revalidate all inputs and regenerate candidates before translating."""
     import pipeline as lab
     from compiler import identifier
@@ -177,10 +177,79 @@ def consume(profile, private, name):
     accepted, rejected = candidates(elf.read_bytes(), log.read_text(errors='replace'))
     hints = [f"feedback_{x['address']}@0x{x['address']}" for x in accepted]
     expected = config_with_hints(base.read_text(), hints)
-    if not accepted or accepted != r['candidates'] or rejected != r['rejected'] or hints != r['compiler_hints']:
+    if (not accepted and not allow_empty) or accepted != r['candidates'] or rejected != r['rejected'] or hints != r['compiler_hints']:
         raise ValueError('Feedback candidates missing or changed')
     if config_path.read_text() != expected:
         raise ValueError('Feedback configuration changed')
     return config_path, dict(name=name, report_sha256=lab.digest(report_path),
         candidate_config_sha256=lab.digest(config_path), candidates=len(accepted),
         runtime_verified=False)
+
+
+def plan_boot_recovery(profile,private,probe_relative):
+    """Prepare bounded compilation candidates from an artifact-bound failed probe.
+
+    Capturing a candidate is automatic. Consuming it still requires the explicit
+    translation command: a log alone cannot establish runtime overlay identity.
+    """
+    import pipeline as lab
+    private=Path(private).resolve()
+    stage_path=private_file(private,probe_relative,4<<20)
+    stage_raw=stage_path.read_bytes();stage=json.loads(stage_raw)
+    log_path=Path(stage.get('log',''))
+    try:log_relative=str(log_path.relative_to(private))
+    except ValueError:raise ValueError('Probe log is outside private storage') from None
+    log=private_file(private,log_relative,MAX_LOG)
+    log_raw=log.read_bytes()
+    if digest(log_raw)!=stage.get('log_sha256'):raise ValueError('Probe log changed')
+    build_path=private_file(private,'analysis/native-build-stage.json',4<<20)
+    build=json.loads(build_path.read_text())
+    if lab.digest(build_path)!=stage.get('build_stage_sha256'):raise ValueError('Probe build receipt changed')
+    binary=Path(build.get('binary',''))
+    if not binary.is_absolute() or binary.is_symlink() or not binary.is_file() or lab.digest(binary)!=stage.get('binary_sha256') or build.get('sha256')!=stage.get('binary_sha256'):
+        raise ValueError('Probe binary changed')
+    elf=lab.boot_executable(private/'disc-root',profile)
+    if lab.digest(elf)!=stage.get('executable_sha256'):raise ValueError('Probe executable changed')
+    if lab.digest(lab.ROOT/'toolchain.lock.json')!=stage.get('toolchain_lock_sha256'):raise ValueError('Probe toolchain lock changed')
+    from port_checks import audit
+    observed=audit(log=log)
+    if stage.get('probe_qualified') is not False or not any(f['code']=='guest_target_missing' for f in observed['findings']):
+        raise ValueError('Probe has no failed missing-target observation')
+    config=private_file(private,'analysis/recomp.toml',8<<20)
+    key=dict(title=profile['id'],log=lab.digest(log),binary=stage['binary_sha256'],
+             elf=stage['executable_sha256'],configuration=lab.digest(config),
+             implementation=digest(Path(__file__).read_bytes()),lock=stage['toolchain_lock_sha256'])
+    # A later boot overwrites its normal log. Preserve this probe before preparing
+    # feedback, so its compilation hints do not silently lose their evidence.
+    if lab.digest(stage_path)!=digest(stage_raw) or lab.digest(log)!=digest(log_raw):
+        raise ValueError('Probe evidence changed while preparing recovery')
+    evidence=private/'analysis/runtime-probe-evidence'/digest(stage_raw)
+    if any(p.is_symlink() for p in [evidence,*evidence.parents] if p.is_relative_to(private)):
+        raise ValueError('Unsafe probe evidence storage')
+    evidence.mkdir(parents=True,mode=0o700,exist_ok=True)
+    for name,raw in [('probe.json',stage_raw),('run.log',log_raw)]:
+        target=evidence/name
+        if target.is_symlink():raise ValueError('Unsafe probe evidence file')
+        try:
+            with target.open('xb') as stream:stream.write(raw)
+            target.chmod(0o600)
+        except FileExistsError:pass
+        if not target.is_file() or target.read_bytes()!=raw:raise ValueError('Archived probe evidence changed')
+    snapshot_relative=str((evidence/'run.log').relative_to(private))
+    name='boot-'+digest(json.dumps(key,sort_keys=True).encode())[:24]
+    directory=private/'analysis/runtime-feedback'/name
+    if directory.exists() or directory.is_symlink():
+        # consume rejects drift and unsafe paths; never overwrite old evidence.
+        consume(profile,private,name,allow_empty=True)
+        result=json.loads(private_file(private,str((directory/'report.json').relative_to(private)),4<<20).read_text())
+        reused=True
+    else:
+        result=prepare(profile,private,snapshot_relative,name);reused=False
+    return dict(schema=1,status='candidates_prepared' if result['candidates'] else 'no_safe_static_candidates',
+        probe_sha256=digest(stage_raw),probe_evidence=str(evidence.relative_to(private)),feedback_name=name,
+        feedback_report=str((directory/'report.json').relative_to(private)),
+        feedback_report_sha256=lab.digest(directory/'report.json'),
+        candidates=result['candidates'],rejected=result['rejected'],reused=reused,
+        automatic_translation_allowed=False,runtime_code_identity_verified=False,
+        gameplay_verified=False,
+        next_action='Verify runtime code identity before explicitly consuming static main-ELF hints; overlays require module-specific recovery')

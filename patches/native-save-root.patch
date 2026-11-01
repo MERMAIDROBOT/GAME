@@ -1,0 +1,49 @@
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1,4 +1,19 @@
+ #include "ps2_runtime.h"
++#include <cstdlib>
++#include <filesystem>
++#include <stdexcept>
++namespace ps2_port {
++// Read-only game assets and writable saves may live on different volumes.
++inline std::filesystem::path memory_card_root(const std::filesystem::path &disc_directory) {
++    if (const char *value = std::getenv("PS2_PORT_SAVE_ROOT")) {
++        const std::filesystem::path configured(value);
++        if (!configured.is_absolute()) throw std::runtime_error("PS2_PORT_SAVE_ROOT must be an absolute directory");
++        return configured.lexically_normal();
++    }
++    return disc_directory / "mc0";
++}
++}
++
+ #include "ps2_log.h"
+ #include "ps2_stubs.h"
+ #include "ps2_syscalls.h"
+@@ -355,7 +370,7 @@
+             }
+             defaults.hostRoot = defaults.elfDirectory;
+             defaults.cdRoot = defaults.elfDirectory;
+-            defaults.mcRoot = defaults.elfDirectory / "mc0";
++            defaults.mcRoot = ps2_port::memory_card_root(defaults.elfDirectory);
+             // Optional sector-addressed disc image for titles that read the filesystem by LBN.
+             if (const char *image = std::getenv("PS2_PORT_CD_IMAGE"))
+             {
+@@ -1108,7 +1123,7 @@
+     }
+     if (normalized.mcRoot.empty())
+     {
+-        normalized.mcRoot = normalized.elfDirectory / "mc0";
++        normalized.mcRoot = ps2_port::memory_card_root(normalized.elfDirectory);
+     }
+ 
+     runtimeIoPaths() = normalized;
+@@ -1127,7 +1142,7 @@
+     {
+         paths.hostRoot = paths.elfDirectory;
+         paths.cdRoot = paths.elfDirectory;
+-        paths.mcRoot = paths.elfDirectory / "mc0";
++        paths.mcRoot = ps2_port::memory_card_root(paths.elfDirectory);
+     }
+ 
+     setIoPaths(paths);

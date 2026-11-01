@@ -271,3 +271,10 @@ live code identity, overlay generations or gameplay.
 a qualified integer-subset interpreter, actual compiled readable C++ comparisons
 and content-addressed private recipes. Every target is compared anew. This is a
 bounded leaf-function workflow and does not activate replacements in a game.
+
+
+Host-paced native service clocks
+--------------------------------
+Display deadlines must advance the runtime cycle services through the same elapsed field, including native work that accounts for few translated instructions. The scheduler fills only a positive gap to a due VBlank deadline through the existing accountCycles service. It never rewinds or adds cycles when the runtime clock is already ahead. The host-vsync runtime fixture sleeps inside native work and verifies that display fields and cycle accounting both progress; the ordinary fixture still verifies exact guest Count writes. Live audio and gameplay acceptance remain separate requirements.
+
+Native callback dispatch retains thread identity, invocation depth and sequence rather than a context reference across guest execution. A native callback can grow the invocation vector or delete its thread; dispatch reacquires a surviving context before reading Count. The runtime fixture covers nested callback completion and parent Count writes. An isolated AddressSanitizer reproduction must fail on the prior scheduler and pass on the correction; this alone does not certify any title-specific menu transition.

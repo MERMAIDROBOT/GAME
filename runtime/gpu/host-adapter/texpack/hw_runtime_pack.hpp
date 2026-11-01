@@ -41,6 +41,7 @@
 #include "stb/stb_image_write.h"
 
 namespace hw_runtime_pack {
+inline bool clut_log_on() { static const bool on = std::getenv("PS2_PORT_TEX_PACK_CLUTLOG") != nullptr; return on; }   // read once
 namespace gs = ps2host::gs;
 using ClaudeTexPack::Footprint;
 
@@ -53,10 +54,11 @@ struct State {
     FILE* log = nullptr;
     std::unordered_set<std::string> logged, failed;
     std::unordered_map<std::string, std::uint64_t> ids;   // blob -> replacement id
+    std::unordered_set<std::uint64_t> context_built;
     std::uint64_t loads = 0, load_failures = 0;
     std::uint64_t prefetched = 0, synchronous_files = 0, decode_ready = 0, decode_claimed = 0, decode_joined = 0;
     // Content identity (the fallback below): the palette each CLUT load put in the buffer, hashed from memory then.
-    struct ClutId { bool valid = false; std::uint64_t hash = 0; std::uint32_t cpsm = 0; };
+    struct ClutId { bool valid = false; std::uint64_t hash = 0, hash16 = 0; std::uint32_t cpsm = 0; };
     ClutId t8, t4;
     std::uint64_t content_hits = 0, fb_gpu = 0, fb_clut = 0, fb_none = 0, fb_reject = 0;
     // The last target written (frame / depth buffer), so each change is noted once.
@@ -96,7 +98,7 @@ inline void Init() {
     }
     const size_t compound = s.on ? s.core.load_compound_cluts(s.dir + "/compound-cluts.txt") : 0;
     const char* t8c = std::getenv("PS2_PORT_TEX_PACK_T8_COMPOUND");
-    s.core.set_t8_compound(t8c && t8c[0] == '1' && !t8c[1]);
+    s.core.set_t8_compound(t8c ? (t8c[0] == '1' && !t8c[1]) : (compound != 0));
     std::fprintf(stderr, "[claude-hw-texpack] %zu entries (%zu rejected lines), %zu compound CLUTs from %s%s%s tint=%d\n", n,
                  s.core.bad_lines, compound, d, err.empty() ? "" : " error: ", err.c_str(), int(s.tint));
 }
@@ -155,6 +157,8 @@ inline void OnTransferDone(const gs::Gs& g) {
     g.TransferRegisters(&bitbltbuf, &trxpos, &trxreg, &trxdir);
     const std::uint32_t dir = std::uint32_t(trxdir & 3);
     if (dir != 0 && dir != 2) return;
+    s.core.on_render_pass_flushed();
+    s.last_frame_key = s.last_z_key = ~0ull;
     ClaudeTexPack::Upload u;
     u.dbp = std::uint32_t(bitbltbuf >> 32) & 0x3FFF;
     u.dbw = std::uint32_t(bitbltbuf >> 48) & 0x3F;
@@ -222,16 +226,24 @@ inline void OnClutLoad(gs::u64 tex0, bool memory_current) {
         if (s.on) {
             State::ClutId c;
             const bool t8 = psm == ClaudeTexPack::PSM_T8, t4 = psm == ClaudeTexPack::PSM_T4;
-            if ((t8 || t4) && csa == 0 && csm == 0 && memory_current) c.valid = RectHash(cbp, 1, cpsm, t8 ? 16 : 8, t8 ? 16 : 2, &c.hash);
+            if (t8 && csa == 0 && csm == 0 && memory_current) {
+                c.valid = RectHash(cbp, 1, cpsm, 16, 16, &c.hash);
+            } else if (t4 && csa == 0 && csm == 0 && memory_current) {
+                c.valid = RectHash(cbp, 1, cpsm, 8, 2, &c.hash);
+                RectHash(cbp, 1, cpsm, 16, 2, &c.hash16);
+            }
             c.cpsm = cpsm;
             static int shown = 0;
-            if (t4 && shown < 40 && std::getenv("PS2_PORT_TEX_PACK_CLUTLOG")) { ++shown; std::fprintf(stderr, "[claude-hw-texpack] T4 CLUT load cbp %u cpsm %u csa %u csm %u memory %d valid %d\n", cbp, cpsm, csa, csm, int(memory_current), int(c.valid)); }
+            if (t4 && shown < 40 && clut_log_on()) { ++shown; std::fprintf(stderr, "[claude-hw-texpack] T4 CLUT load cbp %u cpsm %u csa %u csm %u memory %d valid %d\n", cbp, cpsm, csa, csm, int(memory_current), int(c.valid)); }
             if (t8 && csa == 0) {
                 s.t8 = c;
-                // A T8 CSM1 load fills entries 0-15 from the 8x2 rectangle at CBP: what a T4 draw (CSA 0) reads next.
+                // A T8 CSM1 load fills entries 0-15 from the 8x2 rectangle at CBP (or 16x2 compound T8-loaded T4 CLUT): what a T4 draw (CSA 0) reads next.
                 State::ClutId v;
                 v.cpsm = cpsm;
-                if (csm == 0 && memory_current) v.valid = RectHash(cbp, 1, cpsm, 8, 2, &v.hash);
+                if (csm == 0 && memory_current) {
+                    v.valid = RectHash(cbp, 1, cpsm, 8, 2, &v.hash);
+                    RectHash(cbp, 1, cpsm, 16, 2, &v.hash16);
+                }
                 s.t4 = v;
             }
             else if (t4 && csa == 0) { s.t4 = c; s.t8 = {}; }
@@ -418,6 +430,10 @@ inline void LogDecision(const ClaudeTexPack::Query& q, const ClaudeTexPack::Deci
                  q.aem, q.tcc, ClaudeTexPack::reason_name(d.reason), d.entry ? " " : "", d.entry ? d.entry->blob.c_str() : "");
 }
 
+// Context-composed art already joins its neighbouring pieces; preserve its
+// baked edge alpha instead of applying the per-texture hard edge experiment.
+inline bool ContextBuilt(std::uint64_t id) {return S().context_built.count(id)!=0;}
+
 // The replacement for the texture a draw samples: its blob's pixels (and a stable id for them), or false.
 // `upload(id, w, h, pixels)` puts them on the GPU unless `resident(id)` says they are there.
 template <class Resident, class Upload>
@@ -467,8 +483,9 @@ bool Lookup(const gs::Context& c, gs::u64 texa, std::uint32_t levels, bool tcc_k
     // sprites): the palette hashed when its CLUT load happened, from current memory, stands in.
     const bool fb_reason = d.reason == ClaudeTexPack::R_UPLOAD_LAYOUT || d.reason == ClaudeTexPack::R_NO_UPLOAD ||
                            d.reason == ClaudeTexPack::R_CLUT_UNKNOWN;
-    if (content && fb_reason && !memory_ok) ++s.fb_gpu;
-    if (content && fb_reason && memory_ok && !q.rect_x) {
+    const bool mem_valid = memory_ok || d.reason == ClaudeTexPack::R_UPLOAD_LAYOUT || d.reason == ClaudeTexPack::R_CLUT_UNKNOWN;
+    if (content && fb_reason && !mem_valid) ++s.fb_gpu;
+    if (content && fb_reason && mem_valid && !q.rect_x) {
         const std::uint32_t w = 1u << std::min(q.tw, 10u), h = 1u << std::min(q.th, 10u);
         const bool palette = q.psm == ClaudeTexPack::PSM_T8 || q.psm == ClaudeTexPack::PSM_T4;
         const State::ClutId& cl = q.psm == ClaudeTexPack::PSM_T8 ? s.t8 : s.t4;
@@ -477,21 +494,31 @@ bool Lookup(const gs::Context& c, gs::u64 texa, std::uint32_t levels, bool tcc_k
         if (!clut_ok) {
             ++s.fb_clut;
             static int shown = 0;
-            if (q.psm == ClaudeTexPack::PSM_T4 && shown < 40 && std::getenv("PS2_PORT_TEX_PACK_CLUTLOG")) { ++shown; std::fprintf(stderr, "[claude-hw-texpack] T4 lookup tbp %u cbp %u cpsm %u csa %u csm %u slot valid %d cpsm %u\n", q.tbp0, g_dump_cbp, q.cpsm, q.csa, q.csm, int(cl.valid), cl.cpsm); }
+            if (q.psm == ClaudeTexPack::PSM_T4 && shown < 40 && clut_log_on()) { ++shown; std::fprintf(stderr, "[claude-hw-texpack] T4 lookup tbp %u cbp %u cpsm %u csa %u csm %u slot valid %d cpsm %u\n", q.tbp0, g_dump_cbp, q.cpsm, q.csa, q.csm, int(cl.valid), cl.cpsm); }
         }
-        if (clut_ok && RectHash(q.tbp0, q.tbw, q.psm, w, h, &raw)) {
-            const std::uint64_t want_clut = palette ? cl.hash : 0;
-            const std::vector<ClaudeTexPack::Entry>* entries = s.core.entries_for(raw);
+        if (clut_ok && (RectHash(q.tbp0, q.tbw, q.psm, w, h, &raw) || d.raw != 0)) {
+            std::uint64_t chosen_raw = raw;
+            const std::vector<ClaudeTexPack::Entry>* entries = raw ? s.core.entries_for(raw) : nullptr;
             const ClaudeTexPack::Entry* pick = nullptr;
             bool ambiguous = false;
-            if (entries)
-                for (const auto& e : *entries) {
-                    if (e.w != w || e.h != h || e.clut != want_clut) continue;
-                    if (!pick) pick = &e;
+            auto try_entries = [&](const std::vector<ClaudeTexPack::Entry>* list, std::uint64_t r_candidate) {
+                if (!list) return;
+                for (const auto& e : *list) {
+                    const bool clut_match = !palette ? (e.clut == 0)
+                                                     : (e.clut == cl.hash || (cl.hash16 && e.clut == cl.hash16));
+                    if (e.w != w || e.h != h || !clut_match) continue;
+                    if (!pick) { pick = &e; chosen_raw = r_candidate; }
                     else if (pick->blob != e.blob || pick->has_id != e.has_id ||
                              (pick->has_id && (pick->id.tex_psm != e.id.tex_psm || pick->id.color_psm != e.id.color_psm || pick->id.safe != e.id.safe)))
                         ambiguous = true;
                 }
+            };
+            try_entries(entries, raw);
+            if (!pick && d.raw && d.raw != raw) {
+                const auto* alt = s.core.entries_for(d.raw);
+                if (alt && !entries) entries = alt;
+                try_entries(alt, d.raw);
+            }
             const std::uint32_t color = palette ? q.cpsm : q.psm;
             bool ok = pick && !ambiguous && pick->has_id && !pick->id.conflict && pick->id.safe &&
                       pick->id.tex_psm == q.psm && pick->id.color_psm == color;
@@ -505,11 +532,11 @@ bool Lookup(const gs::Context& c, gs::u64 texa, std::uint32_t levels, bool tcc_k
                 ++s.content_hits;
                 d.reason = ClaudeTexPack::R_REPLACED;
                 d.entry = pick;
-                d.raw = raw;
-                d.clut = want_clut;
+                d.raw = chosen_raw;
+                d.clut = pick->clut;
             } else if (!entries) {
                 ++s.fb_none;
-                DumpMissing(q, raw);
+                DumpMissing(q, chosen_raw ? chosen_raw : raw);
             } else {
                 ++s.fb_reject;
             }
@@ -537,6 +564,7 @@ bool Lookup(const gs::Context& c, gs::u64 texa, std::uint32_t levels, bool tcc_k
             if (!upload(id, e.hw, e.hh, px)) { ++s.load_failures; Report(false); return false; }
             ++s.loads;
         }
+        if(e.blob.rfind("claude-ctx-",0)==0)s.context_built.insert(id);
         *id_out = id;
     }
     LogDecision(q, d);

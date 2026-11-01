@@ -22,3 +22,22 @@ class Upstreams(unittest.TestCase):
         def get(path):raise ValueError('unavailable')
         r=upstreams.collect(['o/r'],since='2026-10-17T00:00:00Z',until='2026-10-25T00:00:00Z',getter=get)
         self.assertEqual(r['repositories'][0]['status'],'unavailable')
+
+    def test_pages_follow_full_page_and_preserve_explicit_cap(self):
+        calls=[]
+        def get(path):
+            calls.append(path)
+            return list(range(100)) if path.endswith('page=1') else [100,101]
+        items,truncated,count=upstreams.pages('/commits?per_page=100',get,3)
+        self.assertEqual(items,list(range(102)))
+        self.assertFalse(truncated);self.assertEqual(count,2)
+        self.assertEqual(len(calls),2)
+        items,truncated,count=upstreams.pages('/commits?per_page=100',get,1)
+        self.assertTrue(truncated);self.assertEqual(count,1)
+
+    def test_repeated_or_invalid_pages_fail_closed(self):
+        for getter in (lambda p:list(range(100)),lambda p:{'message':'rate limited'},lambda p:list(range(101))):
+            with self.assertRaises(ValueError):upstreams.pages('/commits?per_page=100',getter,3)
+        for cap in (0,11,True,1.5):
+            with self.assertRaises(ValueError):
+                upstreams.collect([],since='2026-10-17T00:00:00Z',until='2026-10-25T00:00:00Z',max_pages=cap)

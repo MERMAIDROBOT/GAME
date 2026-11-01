@@ -4,7 +4,7 @@
 #include <cassert>
 #include <cstdio>
 using namespace ps2gpu;
-struct Mock final:GsRenderer {
+struct Mock:GsRenderer {
  mutable unsigned queries=0;std::unordered_set<std::uint64_t> resident;std::atomic<unsigned> draws{0};
  bool HasReplacement(std::uint64_t id)const override {++queries;return resident.count(id);}
  bool UploadReplacement(std::uint64_t id,std::uint32_t format,std::uint32_t,std::uint32_t,std::uint32_t,const std::uint8_t*,std::size_t)override {resident.erase(id);if(format==99)return false;resident.insert(id);return true;}
@@ -29,12 +29,26 @@ bool ReadDepth(std::uint32_t zbp, std::uint32_t width, std::uint32_t height, std
 bool ReadTexture(std::uint64_t key, std::vector<std::uint32_t>* pixels, std::uint32_t* width, std::uint32_t* height) override {return false;}
 bool ReadTarget(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::vector<std::uint32_t>* pixels, std::uint32_t* width, std::uint32_t* height) override {return false;}
 };
+struct SurfaceMock final:Mock {
+ unsigned surfaceCalls=0;
+ bool BlitTargetToSurface(std::uint32_t a,std::uint32_t b,std::uint32_t c,std::uint32_t sx,std::uint32_t sy,
+     std::uint32_t dw,std::uint32_t dh,std::uint32_t ow,std::uint32_t oh,std::uint64_t* serial) override {
+  assert(draws==1001);assert(a==11 && b==22 && c==33 && sx==1 && sy==2 && dw==3 && dh==4 && ow==5 && oh==6);
+  ++surfaceCalls;*serial=73;return true;
+ }
+};
 int main(){
- auto owned=std::make_unique<Mock>();auto* raw=owned.get();auto r=MakeThreadedGsRenderer(std::move(owned));std::uint8_t px[4]={};
+ auto owned=std::make_unique<SurfaceMock>();auto* raw=owned.get();auto r=MakeThreadedGsRenderer(std::move(owned));std::uint8_t px[4]={};
  assert(r->UploadReplacement(1,0,1,1,1,px,4));GsDrawState st{};GsVertex vs[3]{};
  for(int i=0;i<1000;i++){r->DrawTriangles(st,vs,3);assert(r->HasReplacement(1));}
  r->MemoryRead(0,0,px);assert(raw->draws==1000);unsigned repeated=raw->queries;
  printf("Repeated residency queries reached inner renderer: %u (1000 draws preserved)\n",repeated);
+ std::uint64_t serial=19;
+ r->DrawTriangles(st,vs,3);
+ assert(r->BlitTargetToSurface(11,22,33,1,2,3,4,5,6,&serial));
+ assert(serial==73 && raw->surfaceCalls==1);
+ Mock pixelOnly;serial=19;
+ assert(!pixelOnly.BlitTargetToSurface(11,22,33,1,2,3,4,5,6,&serial) && serial==19);
  r->Kick();assert(!r->HasReplacement(1));assert(!r->HasReplacement(2));
  assert(r->UploadReplacement(2,0,1,1,1,px,4));assert(r->HasReplacement(2));
  assert(!r->UploadReplacement(2,99,1,1,1,px,4));assert(!r->HasReplacement(2));

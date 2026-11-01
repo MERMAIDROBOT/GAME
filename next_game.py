@@ -5,6 +5,7 @@ Native clean-build consolidation is a separate, explicitly unfinished gate.
 """
 from pathlib import Path
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -49,8 +50,67 @@ def inventory(private):
                 import_coverage='not inferred from filenames; per-module audit required')
 
 
+def native_artifact_outputs(private,command):
+    """Resume verifies real products and inputs, not just a passed JSON receipt."""
+    private=Path(private).resolve();result={}
+    def pinned(path,expected,kind,inside=True,root=None):
+        p=Path(path)
+        boundary=Path(root).resolve() if root is not None else (private if inside else None)
+        if p.is_symlink() or (boundary is not None and not p.resolve().is_relative_to(boundary)) or not p.is_file():
+            raise ValueError('Missing/unsafe '+kind+' artifact')
+        digest=lab.digest(p)
+        if digest!=expected:raise ValueError('Changed '+kind+' artifact')
+        result[kind+':'+str(p.resolve())]=digest
+    if command=='build-native':
+        stage=json.loads((private/'analysis/native-build-stage.json').read_text())
+        pinned(stage['binary'],stage['sha256'],'native-runner')
+        for group in ['frameworks','graph_tests']:
+            for name,record in stage.get(group,{}).items():pinned(record['path'],record['sha256'],group+'-'+name)
+        abi=stage.get('abi_layouts_receipt')
+        if abi is not None:
+            pinned(abi.get('path',''),abi.get('sha256'),'source-abi-receipt')
+            pinned(abi.get('config',''),abi.get('config_sha256'),'source-abi-config')
+            if json.loads(Path(abi['path']).read_text()).get('status')!='abi_layouts_match':raise ValueError('Source ABI gate did not pass')
+        if stage.get('source_graph_recipe_sha256'):
+            pinned(stage.get('source_graph_recipe',''),stage['source_graph_recipe_sha256'],'source-recipe')
+            pinned(stage.get('source_graph_staging',''),stage.get('source_graph_staging_sha256'),'source-staging')
+            from clean_build import inspect
+            checked=inspect(stage['source_graph_recipe'])
+            result['source-inventory-sha256']=checked['recipe_sha256']
+        from native_graph import verify_source_chain
+        verify_source_chain(stage,private)
+        for key in ['source_corrections','translation_rebase']:
+            if stage.get(key) is not None:
+                entry=stage[key];pinned(private/entry['path'],entry['sha256'],key.replace('_','-'))
+    if command=='test-runtime':
+        record=private/'analysis/native-build-stage.json'
+        stage=json.loads(record.read_text()) if record.exists() else {}
+        if stage.get('source_graph_recipe_sha256'):
+            from native import verify_graph_conformance
+            verify_graph_conformance(stage,private)
+    if command=='package-local':
+        stage=json.loads((private/'analysis/local-package-stage.json').read_text())
+        app=Path(stage['app']).absolute()
+        if app.parent.resolve()!=lab.ROOT.parent.resolve() or app.suffix!='.app' or app.is_symlink():raise ValueError('Packaged app is outside the engine output directory')
+        for relative,key in [('Contents/MacOS/ps2EntryRunner','build_sha256'),('Contents/MacOS/LocalLauncher','launcher_sha256'),('Contents/Info.plist','info_sha256'),('Contents/Resources/RunConfiguration.plist','configuration_sha256')]:
+            pinned(app/relative,stage.get(key),'app-'+key,inside=False,root=app)
+        for name,digest in stage.get('frameworks',{}).items():
+            if Path(name).name!=name:raise ValueError('Unsafe packaged library name')
+            pinned(app/'Contents/Frameworks'/name,digest,'app-library-'+name,inside=False,root=app)
+        from launch_config import directory_pin
+        from clean_build import path_in
+        for key,record in stage.get('launch_assets',{}).items():
+            path=Path(record['path']).resolve()
+            if not path.is_relative_to(private):raise ValueError('Launch assets escaped private directory')
+            path=path_in(private,str(path.relative_to(private)))
+            current=directory_pin(path)
+            if current['sha256']!=record['sha256']:raise ValueError('Packaged launch assets changed')
+            result['launch-assets-'+key]=current['sha256']
+    return result
+
+
 def outputs(private, command, artifact):
-    paths = [Path(private)/artifact]
+    paths = [] if command=='build-native' else [Path(private)/artifact]
     if command == 'analyze': paths.append(Path(private)/'analysis/recomp.toml')
     if command == 'translate':
         if (Path(private)/'analysis/knowledge-translation.json').exists():
@@ -58,7 +118,15 @@ def outputs(private, command, artifact):
         if (Path(private)/'analysis/port-qualification.json').is_file():
             paths.append(Path(private)/'analysis/port-qualification.json')
         paths.extend(sorted((Path(private)/'generated').rglob('*')))
-    return {str(p.relative_to(private)):lab.digest(p) for p in paths if p.is_file()}
+    result={str(p.relative_to(private)):lab.digest(p) for p in paths if p.is_file()}
+    if command=='build-native':
+        # Runtime conformance owns these two mutable fields; it has its own
+        # pinned receipt and must not invalidate an unchanged source build.
+        stage=json.loads((Path(private)/artifact).read_text())
+        contract={k:v for k,v in stage.items() if k not in {'runtime_verified','conformance_receipt'}}
+        result['native-build-contract:'+artifact]=hashlib.sha256(json.dumps(contract,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    result.update(native_artifact_outputs(private,command))
+    return result
 
 
 def run(profile_path, name, source=None, through='intake', execute=False, resume=False, runner=None, process_audit=True, image=None):
@@ -71,6 +139,23 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
     target.mkdir(parents=True, exist_ok=True)
     report_path = target/'report.json'
     previous = json.loads(report_path.read_text()) if report_path.exists() else None
+    if execute and through!='intake' and runner is None:
+        # Refresh before pinning the parent run contract, but retain failures
+        # even when no translation contract could be established yet.
+        from tool_state import ensure
+        preflight = dict(schema=1,status='running',stage='compiler-refresh',
+                         work=str(lab.WORK),toolchain=str(lab.ENV),started=time.time(),
+                         playable_certified=False)
+        preflight_path=target/'compiler-preflight.json'
+        lab.save(preflight_path,preflight)
+        try:
+            ensure(lab)
+        except Exception as error:
+            preflight.update(status='blocked',error=str(error),finished=time.time())
+            lab.save(preflight_path,preflight)
+            raise
+        preflight.update(status='ready',finished=time.time())
+        lab.save(preflight_path,preflight)
     disc = Path(source).resolve() if source else private/'disc-root'
     elf = lab.boot_executable(disc, profile)
     identity = lab.digest(elf)
@@ -79,7 +164,7 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
     tools = {str(p): lab.digest(p) if p.is_file() else None for p in
              [lab.BUILD/'ps2xAnalyzer/ps2_analyzer', lab.BUILD/'ps2xRecomp/ps2_recomp']}
     contract = dict(profile_sha256=lab.digest(profile_path), executable_sha256=identity,
-                    implementation=engine, tools=tools, work=str(lab.WORK), source=str(disc.resolve()), through=through)
+                    implementation=engine, tools=tools, work=str(lab.WORK), toolchain=str(lab.ENV), source=str(disc.resolve()), through=through)
     if image:
         contract['image'] = str(Path(image).resolve())
     if previous and previous['contract'] != contract:
@@ -109,17 +194,18 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
         except BlockingIOError: raise RuntimeError('Another next-game run owns the pipeline slot')
         if runner is None and process_audit:
             # Fail closed if process visibility is unavailable. Never stop another worker.
-            active = subprocess.check_output(['/bin/ps', '-axo', 'comm='], text=True)
-            conflicts = [p for p in active.splitlines() if any(Path(p.strip()).name == n for n in
-                ['ps2EntryRunner', 'ninja', 'realesrgan-ncnn-vulkan', 'ps2_recomp', 'ps2_analyzer'])]
-            if conflicts: raise RuntimeError('Conflicting game/build/GPU task is active; retry when idle')
+            from compute_slot import assert_idle
+            assert_idle()
         upstream_changed = False
         done = {s['command']:s for s in report['stages']}
         mapped={'verify':'disc-integrity','inspect':'binary-inspection',
                 'knowledge-plan':'knowledge-contracts','translate':'ee-translation'}
         for command, artifact in stages:
             old = done.get(command)
-            valid = old and old['status'] == 'passed' and old.get('outputs') and outputs(private, command, artifact) == old['outputs']
+            try:
+                valid = old and old['status'] == 'passed' and old.get('outputs') and outputs(private, command, artifact) == old['outputs']
+            except (ValueError,KeyError,OSError):
+                valid = False # A stale binary/library/source pin forces the owning stage to rerun.
             # A fresh verification rehashes the actual disc tree on every resume.
             if valid and not upstream_changed and command not in {'import', 'verify'}:
                 if command in mapped:
@@ -142,6 +228,7 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
                     # child stages must use the same tools the resume contract recorded.
                     env = {k:v for k,v in os.environ.items() if not k.startswith(('PS2_PORT_', 'PS2X_'))}
                     env['PS2_PORT_LAB_WORK'] = env['PS2_PORT_LAB_EXPECTED_WORK'] = str(lab.WORK)
+                    env['PS2_PORT_LAB_TOOLCHAIN'] = str(lab.ENV)
                     # Download/setup commands are intentionally absent from this workflow.
                     with log.open('w') as stream:
                         subprocess.run(arguments, stdout=stream, stderr=subprocess.STDOUT, env=env, check=True)

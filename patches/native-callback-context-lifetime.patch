@@ -1,0 +1,36 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -300,6 +300,12 @@
+             continue;
+         }
+ 
++        // Guest calls can grow the invocation vector or delete their thread.
++        // Retain identities, then reacquire the dispatched context after return.
++        const int dispatchedThreadId = running->id;
++        const size_t dispatchedDepth = running->invocations.size();
++        const uint64_t dispatchedSequence = dispatchedDepth == 0u ? 0u : running->invocations.back().sequence;
++
+         try
+         {
+             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
+@@ -321,7 +327,18 @@
+             throw;
+         }
+ 
+-        m_cop0Count = context.cop0_count;
++        if (GuestThread *dispatched = thread(dispatchedThreadId))
++        {
++            if (dispatchedDepth == 0u)
++            {
++                m_cop0Count = dispatched->context.cop0_count;
++            }
++            else if (dispatched->invocations.size() >= dispatchedDepth &&
++                     dispatched->invocations[dispatchedDepth - 1u].sequence == dispatchedSequence)
++            {
++                m_cop0Count = dispatched->invocations[dispatchedDepth - 1u].context.cop0_count;
++            }
++        }
+         processPendingEvents();
+         if (m_rescheduleRequested && m_currentThreadId != 0)
+         {

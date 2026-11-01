@@ -186,6 +186,66 @@ def add_rule(bank_path,candidate_path):
     return dict(revision=new['revision'],added=candidate['id'],previous_sha256=sha(raw),sha256=lab.digest(bank_path))
 
 
+def translation_implementation():
+    return {name:sha(Path(__file__).with_name(name).read_bytes()) for name in
+            ['knowledge.py','branches.py','fpu.py','mmi.py','vu0_macro.py']}
+
+
+def _rewrite_source(original,selected,label):
+    updated=original;applied=[];totals=dict(instructions=0,corrected=0)
+    for rule in selected:
+        if rule['kind'] in {'ee_signed_branch','mmi_pmulth','fpu_scalar','vu0_vcallmsr','vu0_vu_memory'}:
+            if rule['kind']=='mmi_pmulth':
+                from mmi import rewrite
+            elif rule['kind']=='vu0_vcallmsr':
+                from vu0_macro import rewrite
+            elif rule['kind']=='vu0_vu_memory':
+                from vu0_macro import mem_rewrite as rewrite
+            elif rule['kind']=='ee_signed_branch':
+                from branches import rewrite
+            else:
+                from fpu import rewrite
+            try:
+                updated,count,changed=rewrite(updated)
+            except ValueError as error:
+                raise ValueError(f'{label} [{rule["id"]}]: {error}') from error
+            totals['instructions']+=count; totals['corrected']+=changed
+            if count: applied.append(dict(id=rule['id'],matched=count,changed=changed))
+            continue
+        pattern=re.compile(r'(// 0x[0-9a-fA-F]+: 0x([0-9a-fA-F]+)[^\n]*\n(?:[ \t]*ctx->pc[^\n]*\n)?[ \t]*)'
+            r'(ctx->f\[\d+\] = '+re.escape(rule['helper'])+r'\(ctx->f\[\d+\]\);)')
+        count=changed=0
+        def replace(match):
+            nonlocal count,changed
+            result=expression(rule,int(match[2],16),match[3]); count+=1; changed+=result!=match[3]
+            return match[1]+result
+        updated=pattern.sub(replace,updated)
+        # Unrecognized emission cannot silently escape the active rule.
+        nested=0
+        if rule['helper']=='FPU_SQRT_S':
+            from fpu import nested_sqrt_calls
+            nested=nested_sqrt_calls(updated)
+        if len(re.findall(re.escape(rule['helper'])+r'\s*\(',updated)) != count+nested:
+            raise ValueError('FPU helper without a recognized instruction record: '+label)
+        totals['instructions']+=count; totals['corrected']+=changed
+        if count: applied.append(dict(id=rule['id'],matched=count,changed=changed))
+    # Lint (always on): ctx->vi has VI0-VI15 only; a larger index is an out-of-bounds access.
+    from vu0_macro import vi_index_violations
+    violations=vi_index_violations(updated)
+    if violations:
+        raise ValueError(f'Generated code indexes ctx->vi past VI15 {violations}: '+label)
+    return updated,applied,totals
+
+
+def rewrite_source(text,identity=None,bank=None,only=None,label='source.cpp'):
+    """Opcode-qualified rules for an in-memory EE source; no writes or execution."""
+    if not isinstance(text,str):raise ValueError('Translation source must be text')
+    bank=validate(bank) if bank is not None else load()
+    selected=[r for r in bank['rules'] if r['kind'] in {'ee_signed_branch','fpu_operand','mmi_pmulth','fpu_scalar','vu0_vcallmsr','vu0_vu_memory'} and eligible(r,identity) and (only is None or r['id'] in only)]
+    updated,rules,counts=_rewrite_source(text,selected,label)
+    return dict(text=updated,rules=rules,**counts)
+
+
 def apply_translation(directory, identity=None, bank=None, only=None, write=True):
     bank=validate(bank) if bank is not None else load()
     directory=Path(directory).resolve(); pending=[]; records=[]
@@ -195,44 +255,8 @@ def apply_translation(directory, identity=None, bank=None, only=None, write=True
     for path in lab.generated_sources(directory):
         if path.is_symlink() or not path.resolve().is_relative_to(directory): raise ValueError('Unsafe generated source')
         raw=path.read_bytes(); original=raw.decode(); updated=original; applied=[]
-        for rule in selected:
-            if rule['kind'] in {'ee_signed_branch','mmi_pmulth','fpu_scalar','vu0_vcallmsr','vu0_vu_memory'}:
-                if rule['kind']=='mmi_pmulth':
-                    from mmi import rewrite
-                elif rule['kind']=='vu0_vcallmsr':
-                    from vu0_macro import rewrite
-                elif rule['kind']=='vu0_vu_memory':
-                    from vu0_macro import mem_rewrite as rewrite
-                elif rule['kind']=='ee_signed_branch':
-                    from branches import rewrite
-                else:
-                    from fpu import rewrite
-                updated,count,changed=rewrite(updated)
-                totals['instructions']+=count; totals['corrected']+=changed
-                if count: applied.append(dict(id=rule['id'],matched=count,changed=changed))
-                continue
-            pattern=re.compile(r'(// 0x[0-9a-fA-F]+: 0x([0-9a-fA-F]+)[^\n]*\n(?:[ \t]*ctx->pc[^\n]*\n)?[ \t]*)'
-                r'(ctx->f\[\d+\] = '+re.escape(rule['helper'])+r'\(ctx->f\[\d+\]\);)')
-            count=changed=0
-            def replace(match):
-                nonlocal count,changed
-                result=expression(rule,int(match[2],16),match[3]); count+=1; changed+=result!=match[3]
-                return match[1]+result
-            updated=pattern.sub(replace,updated)
-            # Unrecognized emission cannot silently escape the active rule.
-            nested=0
-            if rule['helper']=='FPU_SQRT_S':
-                from fpu import nested_sqrt_calls
-                nested=nested_sqrt_calls(updated)
-            if len(re.findall(re.escape(rule['helper'])+r'\s*\(',updated)) != count+nested:
-                raise ValueError('FPU helper without a recognized instruction record: '+path.name)
-            totals['instructions']+=count; totals['corrected']+=changed
-            if count: applied.append(dict(id=rule['id'],matched=count,changed=changed))
-        # Lint (always on): ctx->vi has VI0-VI15 only; a larger index is an out-of-bounds access.
-        from vu0_macro import vi_index_violations
-        violations=vi_index_violations(updated)
-        if violations:
-            raise ValueError(f'Generated code indexes ctx->vi past VI15 {violations}: '+path.name)
+        updated,applied,counts=_rewrite_source(original,selected,path.name)
+        totals['instructions']+=counts['instructions'];totals['corrected']+=counts['corrected']
         if applied:
             records.append(dict(file=path.name,before_sha256=sha(raw),after_sha256=sha(updated.encode()),rules=applied))
         if updated!=original: pending.append((path,raw,updated.encode()))

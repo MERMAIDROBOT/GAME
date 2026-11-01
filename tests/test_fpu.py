@@ -13,6 +13,15 @@ def record(w,body):return f'// 0x1000: 0x{w:08x} untrusted-name\nctx->pc = 0x100
 
 
 class FpuTests(unittest.TestCase):
+    def test_known_finite_divide_compatibility_form_upgrades_without_erasing_unknown_helpers(self):
+        w=word(0x46000003);fd,fs,ft=fpu.registers(w)
+        header='#ifndef CLAUDE_PS2_DIV0\n#define CLAUDE_PS2_DIV0\n#include <cstring>\n// retained compatibility note\n'+fpu.FINITE_HELPER+'\n#endif\n'
+        body=fpu.legacy(w).replace(f'copysignf(INFINITY, ctx->f[{fs}] * 0.0f)',f'claude_ps2_div0(ctx->f[{fs}], ctx->f[{ft}])')
+        updated,n,changed=fpu.rewrite(header+record(w,body))
+        self.assertEqual((n,changed),(1,1));self.assertNotIn('claude_ps2_div0',updated);self.assertIn(fpu.emit(w),updated)
+        with self.assertRaises(ValueError):fpu.rewrite((header+record(w,body)).replace('0x7F7FFFFFu','0x7F800000u'))
+        unknown=header.replace('0x7F7FFFFFu','0x7F800000u')
+        self.assertEqual(fpu.rewrite(unknown),(unknown,0,0))
     def test_operand_decode_shapes_aliases_and_idempotence(self):
         for op in fpu.VALUES:
             for fd,fs,ft in [(2,3,4),(3,3,4),(4,3,4),(2,3,3),(0,0,4)]:

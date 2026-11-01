@@ -41,5 +41,7 @@ class PSPadBackend {public:bool readState(int,int,uint8_t*,size_t);};
                  str(ROOT/'tests/host_pad.cpp'),'-o',str(p/'pad')]
             built=subprocess.run(cmd,capture_output=True,text=True,timeout=60)
             self.assertEqual(built.returncode,0,built.stderr)
-            run=subprocess.run([str(p/'pad')],capture_output=True,text=True,timeout=30)
-            self.assertEqual(run.returncode,0,run.stdout+run.stderr)
+            env={k:v for k,v in os.environ.items() if not k.startswith(('PS2_PORT_','PS2X_'))}
+            for args in ([], ['--touch']):
+                run=subprocess.run([str(p/'pad'),*args],env=env,capture_output=True,text=True,timeout=30)
+                self.assertEqual(run.returncode,0,run.stdout+run.stderr)

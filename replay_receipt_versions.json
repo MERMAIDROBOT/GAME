@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "transitions": [
+    {
+      "from": {
+        "translation_graph.py": "118ffa60c4c0685bbe862b6bbab5a3fa1e4d30d66095ef0d4ad284ba63944ee6",
+        "graph_amend.py": "b6b2f97050e4ece7c9d7155225742ba6bb14882d442502d0d68eb2e67ff6ec69",
+        "runtime_header_replay.py": "d44ee38d27cfa85b0fc4983c65306f5e73bc156cc7de965340f3544b3dcceff8",
+        "tools/ps2_scalar_fpu.h": "007e73dd1e66f7a73b2031ce3383ae7b6ecf33e787448029a287e7958e3c65f0"
+      },
+      "to": {
+        "translation_graph.py": "e2ddd60f525c7adebae63f3bde1dac57eca706995ee95b11f59eb160cf611c21",
+        "graph_amend.py": "33f00e00a690371f1acfba6c7d9a66adc4c3fd1fc54086fee8babeccb2638cf4",
+        "runtime_header_replay.py": "d44ee38d27cfa85b0fc4983c65306f5e73bc156cc7de965340f3544b3dcceff8",
+        "tools/ps2_scalar_fpu.h": "007e73dd1e66f7a73b2031ce3383ae7b6ecf33e787448029a287e7958e3c65f0"
+      },
+      "reason": "Planned contract preflight only; literal edit/replay output unchanged. Historical graph/input/generated-source and translation-rule pins remain mandatory."
+    }
+  ]
+}

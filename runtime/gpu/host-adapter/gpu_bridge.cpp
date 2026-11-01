@@ -1,3 +1,7 @@
+#include "alpha_cut_rule.hpp"
+#include "target_freshness.hpp"
+#include <chrono>
+#include "vram_ranges.hpp"
 #include "runtime_mips.hpp"
 /*
  * The GPU GS renderer (engine/gpu, engine/docs/GPU.md) driven by the host's GS
@@ -60,8 +64,7 @@
 #include <unordered_map>
 #include <vector>
 
-#define XXH_INLINE_ALL
-#include "xxhash.h"
+#include "cache_hash.hpp"
 
 #include "ps2host/gs.h"
 #include "ps2host/profile.h"
@@ -73,7 +76,7 @@
 #if PS2HOST_VULKAN
 #include "ps2gpu/display.h"
 #include "ps2gpu/gs_renderer.h"
-#include "texpack/hw_runtime_pack.hpp"   // Claude 2026-10-21: the runtime texture pack on this path
+#include "hw_runtime_pack.hpp"   // Claude 2026-10-21: the runtime texture pack on this path
 #endif
 
 namespace ps2host {
@@ -147,6 +150,7 @@ struct Owned {
     u32 dirty_begin = ~0u, dirty_end = 0;
     u32 x1 = 0, y1 = 0;             // how much of it the GPU has drawn
     bool gpu_newer = false;         // drawn on the GPU, not yet in local memory
+    target_freshness::CpuWrites cpu_writes;
     bool stale = true;              // local memory changed since the image was loaded
     bool stale_beyond = false;      // ...in rows past `end`: stale when it grows into them
     int why = 0;                    // what made it stale: 0 new, 1 memory written, 2 a draw over it, 3 another's write-back
@@ -182,7 +186,9 @@ struct Cached {
     texture_pack::Name pack_name;
     u64 replacement = 0;            // the renderer's image for it (texture_pack::Image::id)
     u64 pack_generation = 0;
-    u32 begin = 0, end = 0;
+    u32 begin = 0, end = 0; // Diagnostic envelope only; synchronization uses the wrapped ranges.
+    std::vector<VramRanges::Range> ranges;
+    bool overlaps(u32 a,u32 b) const {return VramRanges::overlaps(ranges,a,b);}
     bool valid = false;
     u64 decoded_serial = 0;         // Bridge::serial when decoded
     u64 content = 0;                // a hash of its blocks when decoded
@@ -199,6 +205,7 @@ struct Bridge {
     std::unique_ptr<ps2gpu::Gpu> gpu;
     std::unique_ptr<ps2gpu::GsRenderer> renderer;
     bool primary = false;
+    bool last_texture_context = false;
     // --gpu-shadow-rtt: a texture that is a GPU target is sampled from it, as
     // the GPU will have to on its own.
     bool targets_as_textures = false;
@@ -224,7 +231,7 @@ struct Bridge {
     // The last completed displayed image stays on the renderer worker. Repeated
     // fields need neither another GPU readback nor a second mutable pixel copy.
     std::vector<u32> displayed_rgba;
-    std::tuple<u32,u32,u32,u32,u64> displayed_key{~0u,0,0,0,0};
+    std::tuple<u32,u32,u32,u32,u64,u32,u32> displayed_key{~0u,0,0,0,0,0,0};
     u32 displayed_width=0,displayed_height=0;
     u64 displayed_reads=0,displayed_reuses=0;
 
@@ -235,7 +242,7 @@ struct Bridge {
     // race. Elements of `textures` stay put until erased.
     std::vector<std::vector<Cached*>> texture_pages = std::vector<std::vector<Cached*>>(512);
     void IndexTexture(Cached* t, bool add) {
-        for (u32 page = t->begin >> 5; page <= ((std::max(t->end, t->begin + 1) - 1) >> 5) && page < 512; ++page) {
+        for (auto range : t->ranges) for (u32 page = range.first >> 5; page <= ((range.second - 1) >> 5); ++page) {
             std::vector<Cached*>& list = texture_pages[page];
             if (add) {
                 list.push_back(t);
@@ -449,8 +456,17 @@ void WriteBack(Bridge& b, Owned& o) {
 /* Before the CPU reads or writes local memory [begin, end): what the GPU drew
    there comes back to it; written, the GPU images there must reload. */
 void ApplyPatch(Bridge& b);
+void FlushPendingClear(u32 proven_rows = 0);
 
 void Sync(Bridge& b, u32 begin, u32 end, bool write, const Owned* except = nullptr) {
+    if(end<=begin)return;
+    if(begin>=16384u || end>16384u) {
+        std::vector<VramRanges::Range> ranges;
+        VramRanges::add(ranges,begin,end-begin);
+        for(auto range:ranges)Sync(b,range.first,range.second,write,except);
+        return;
+    }
+    FlushPendingClear(0);
     ++g_mutations;
     ApplyPatch(b);
     for (auto& [key, o] : b.owned)
@@ -466,6 +482,7 @@ void Sync(Bridge& b, u32 begin, u32 end, bool write, const Owned* except = nullp
         if (!write || end <= o.begin || o.full_end <= begin) continue;
         if (begin < o.end) {
             MarkStale(o, 1, begin, end);
+            o.cpu_writes.written(begin,end);
         } else {
             o.stale_beyond = true;
         }
@@ -473,7 +490,7 @@ void Sync(Bridge& b, u32 begin, u32 end, bool write, const Owned* except = nullp
     if (write && begin < end)
         for (u32 page = begin >> 5; page <= ((end - 1) >> 5) && page < 512; ++page)
             for (Cached* t : b.texture_pages[page])
-                if (t->begin < end && begin < t->end) t->valid = false;
+                if (t->overlaps(begin,end)) t->valid = false;
 }
 
 /* An image transfer about to write blocks [begin, end) (Gs::on_write): the
@@ -482,6 +499,7 @@ void Sync(Bridge& b, u32 begin, u32 end, bool write, const Owned* except = nullp
    has queued, and a race's texture uploads into blocks the GPU drew over
    cost a wait each (1,400 of ~6 ms in a minute of racing, 4 KB each). */
 void SyncWrite(Bridge& b, u32 begin, u32 end, const u8* cover) {
+    FlushPendingClear(0);
     ++g_mutations;
     ApplyPatch(b);                          // one before it, if it never finished
     u32 first = end, last = begin;          // the blocks written
@@ -504,12 +522,12 @@ void SyncWrite(Bridge& b, u32 begin, u32 end, const u8* cover) {
         if (cover[i - begin] && !(cover[i - begin] == 1 && b.blocks[i] == Bridge::kGpuNewer)) b.blocks[i] = Bridge::kCpuNewer;
     for (auto& [key, o] : b.owned) {
         if (last <= o.begin || o.full_end <= first) continue;
-        if (first < o.end) MarkStale(o, 1, first, last);
+        if (first < o.end) { MarkStale(o, 1, first, last);o.cpu_writes.written(first,last); }
         else o.stale_beyond = true;
     }
     for (u32 page = first >> 5; page <= ((last - 1) >> 5) && page < 512; ++page)
         for (Cached* t : b.texture_pages[page])
-            if (t->begin < last && first < t->end) t->valid = false;
+            if (t->overlaps(first,last)) t->valid = false;
 }
 
 /* The pending patch (Bridge::Patch): each pixel of the transfer's rectangle
@@ -556,7 +574,7 @@ void ApplyPatch(Bridge& b) {
 
 /* A target or depth buffer about to be drawn into or sampled: up to date with
    memory and whatever else the GPU drew over its blocks. */
-Owned& Use(Bridge& b, u32 fbp, u32 fbw, u32 psm, bool depth, u32 width, u32 height, u32 rows) {
+Owned& Use(Bridge& b, u32 fbp, u32 fbw, u32 psm, bool depth, u32 width, u32 height, u32 rows, u32 overwrite_depth_rows = 0) {
     // Tens of thousands of draws a frame go to the same target as the one
     // before: that one, without the map (its elements stay put).
     static Owned* last = nullptr;
@@ -567,6 +585,7 @@ Owned& Use(Bridge& b, u32 fbp, u32 fbw, u32 psm, bool depth, u32 width, u32 heig
         last_key = key;
     }
     Owned& o = *last;
+    const bool was_initialized = o.width != 0;
     if (!o.width) {
         o.fbp = fbp;
         o.fbw = fbw;
@@ -600,34 +619,39 @@ Owned& Use(Bridge& b, u32 fbp, u32 fbw, u32 psm, bool depth, u32 width, u32 heig
         // Loaded from the GPU's local memory, the CPU's writes there first -
         // and its own drawing not yet there: an image goes stale for rows
         // another drew over while newer than memory in rows of its own.
+        const bool had_newer_pixels = o.gpu_newer;
         if (o.gpu_newer) WriteBack(b, o);
         Timed timed(Section::GpuSync);
         const TimelineStep step("sync: an image reloaded");
-        ++b.reloads;
-        Coherent(b, o.begin, o.full_end, true);
         const u32 r0 = std::min(o.stale_row0, o.height), r1 = std::min(o.stale_row1, o.height);
-        if (gs::TheGs().trace)   // in a capture's trace: an image brought back from memory, and why (Owned::why)
-            std::fprintf(gs::TheGs().trace_out, "[gpu] reload %s %X/%u/%02X why %d rows %u-%u\n", depth ? "Z" : "C",
-                         unsigned(o.fbp), unsigned(o.fbw), unsigned(o.psm), o.why, unsigned(r0), unsigned(r1));
-        // A 32-bit image stale only from a 16-bit view's drawing over it (the
-        // race's depth into the frame's alpha): its own colour kept where only
-        // alpha changed (ReloadKeepsColour) - not a picture as memory holds it.
-        b.renderer->ReloadKeepsColour(o.by16 && !Is16(o.psm));
-        // Depth buffers come back whole: the renderer keeps one a target
-        // size over the same memory, and a part of one reloaded left the
-        // race's garage a few pixels off the software GS.
-        if ((r0 == 0 && r1 >= o.height) || depth) {
-            if (depth) b.renderer->DepthFromMemory(o.fbp, o.width, o.height, o.fbw, o.psm);
-            else b.renderer->TargetFromMemory(o.fbp, o.fbw, o.psm, o.width, o.height);
-        } else if (r0 < r1) {
-            if (depth) b.renderer->DepthRowsFromMemory(o.fbp, o.width, o.height, o.fbw, o.psm, r0, r1 - r0);
-            else b.renderer->TargetRowsFromMemory(o.fbp, o.fbw, o.psm, o.width, o.height, r0, r1 - r0);
+        static const bool discard_enabled = [] { const char* e = std::getenv("PS2_PORT_DEPTH_CLEAR_RELOAD_FIX"); return !(e && *e == '0'); }();
+        const bool replaced_by_clear = discard_enabled && depth && was_initialized && !had_newer_pixels && overwrite_depth_rows >= r1 && overwrite_depth_rows > 0;
+        if (!replaced_by_clear) {
+            ++b.reloads;
+            Coherent(b, o.begin, o.full_end, true);
+            if (gs::TheGs().trace)   // in a capture's trace: an image brought back from memory, and why (Owned::why)
+                std::fprintf(gs::TheGs().trace_out, "[gpu] reload %s %X/%u/%02X why %d rows %u-%u\n", depth ? "Z" : "C",
+                             unsigned(o.fbp), unsigned(o.fbw), unsigned(o.psm), o.why, unsigned(r0), unsigned(r1));
+            // A 32-bit image stale only from a 16-bit view's drawing over it (the
+            // race's depth into the frame's alpha): its own colour kept where only
+            // alpha changed (ReloadKeepsColour) - not a picture as memory holds it.
+            b.renderer->ReloadKeepsColour(o.by16 && !Is16(o.psm));
+            // Depth buffers come back whole: the renderer keeps one a target
+            // size over the same memory, and a part of one reloaded left the
+            // race's garage a few pixels off the software GS.
+            if ((r0 == 0 && r1 >= o.height) || depth) {
+                if (depth) b.renderer->DepthFromMemory(o.fbp, o.width, o.height, o.fbw, o.psm);
+                else b.renderer->TargetFromMemory(o.fbp, o.fbw, o.psm, o.width, o.height);
+            } else if (r0 < r1) {
+                if (depth) b.renderer->DepthRowsFromMemory(o.fbp, o.width, o.height, o.fbw, o.psm, r0, r1 - r0);
+                else b.renderer->TargetRowsFromMemory(o.fbp, o.fbw, o.psm, o.width, o.height, r0, r1 - r0);
+            }
+            b.renderer->ReloadKeepsColour(false);
+            ++o.reloads[o.why];
         }
-        b.renderer->ReloadKeepsColour(false);
         o.stale_row0 = 0;
         o.stale_row1 = ~0u;
         o.stale_pages.reset();
-        ++o.reloads[o.why];
         o.stale = o.stale_beyond = false;
     }
     return o;
@@ -674,6 +698,7 @@ void Drew(Bridge& b, Owned& o, u32 x0, u32 x1, u32 y1, u32 y0) {
     }
     const u32 db = o.begin + r[2] * row_blocks;
     const u32 de = o.begin + (r[3] + 1) * row_blocks;
+    o.cpu_writes.drawn(db,de);
     const Pages pages = PagesOf(o, x0, x1, y0, y1);
     const bool inside = o.gpu_newer && db >= o.dirty_begin && de <= o.dirty_end && (pages & ~o.dirty_pages).none();
     o.gpu_newer = true;
@@ -753,10 +778,8 @@ void Sample(Bridge& b, Owned& o, const Pages& pages) {
    textures are hashed hundreds of thousands of times a run (only compared
    within a run, so the values themselves are free to change). */
 u64 Hash(const unsigned char* data, std::size_t size) {
-    // XXH3 (as texture_pack.cpp has it): a re-uploaded texture's blocks are
-    // hashed each time it is used again (Burnout 3 sends its textures every
-    // picture) - several times as fast as the four-lane hash it replaced.
-    return XXH3_64bits(data, size);
+    // Run-only cache identity, independent of external pack naming.
+    return RuntimeCacheHash64(data, size);
 }
 
 bool GpuHolds(const Bridge& b, u32 begin, u32 end);
@@ -801,6 +824,7 @@ u64 ClutHash(const Bridge& b, u32 psm, u32 csa) {
    from images just drawn, and bringing those back waited ~8 ms each - else
    left to the GS model. */
 bool LoadClut(Bridge& b, u64 tex0, u64 texa) {
+    FlushPendingClear(0);
     ++g_mutations;
     const u32 psm = Bits(tex0, 20, 6), cbp = Bits(tex0, 37, 14), cpsm = Bits(tex0, 51, 4);
     // CSM2 (bit 55) loads from TEXCLUT's row, at entry 0 whatever CSA: the GS
@@ -808,7 +832,8 @@ bool LoadClut(Bridge& b, u64 tex0, u64 texa) {
     const bool csm2 = Bits(tex0, 55, 1);
     const u32 csa = csm2 ? 0 : Bits(tex0, 56, 5);
     const u32 rows = ClutRowsOf(psm, csa);
-    if (csm2 || !GpuHolds(b, cbp, cbp + 8)) {
+    const u32 clut_blocks = (psm == gs::PSMT8 || psm == gs::PSMT8H) ? 4u : 1u;
+    if (csm2 || !GpuHolds(b, cbp, cbp + clut_blocks)) {
         b.clut_cpu |= rows;
         b.clut_gpu &= ~rows;
         return false;
@@ -816,8 +841,8 @@ bool LoadClut(Bridge& b, u64 tex0, u64 texa) {
     Timed timed(Section::GpuSync);
     const TimelineStep step("sync: a CLUT load");
     for (auto& [key, o] : b.owned)
-        if (o.gpu_newer && o.dirty_begin < cbp + 8 && cbp < o.dirty_end) WriteBack(b, o);
-    Coherent(b, cbp, cbp + 8, true);
+        if (o.gpu_newer && o.dirty_begin < cbp + clut_blocks && cbp < o.dirty_end) WriteBack(b, o);
+    Coherent(b, cbp, cbp + clut_blocks, true);
     ps2gpu::GsClutLoad load;
     load.cbp = cbp;
     load.cpsm = cpsm;
@@ -933,7 +958,7 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
         for (u32 n = 0; n < mips.count; ++n) {
             const u32 h = std::max(1u, th >> n), w = std::max(1u, tw >> n), bw = std::max(1u, mips.tbw[n]);
             t.begin = std::min(t.begin, mips.tbp[n]);
-            u32 end = mips.tbp[n] + std::max(1u, bw * 64 * h * PixelBits(psm) / 8 / 256 + 32);
+            u32 end = mips.tbp[n] + std::max(1u, (bw * 64 * h * PixelBits(psm) / 8 + 255) / 256);
             if (page_span) {
                 const u32 bits = PixelBits(psm);
                 const u32 page_w = bits >= 32 ? 64 : bits == 16 ? 64 : bits == 8 ? 128 : 128;
@@ -944,21 +969,31 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
                 end = std::max(end, mips.tbp[n] + ((rows - 1) * row_pages + cols) * 32);
             }
             t.end = std::max(t.end, std::min(16384u, end));
+            VramRanges::add(t.ranges,mips.tbp[n],end-mips.tbp[n]);
         }
         b.IndexTexture(&t, true);
     } else {
         b.texture_lru.splice(b.texture_lru.begin(), b.texture_lru, t.lru);
     }
+    auto textureHolds=[&] {for(auto range:t.ranges)if(GpuHolds(b,range.first,range.second))return true;return false;};
+    auto textureHash=[&] {
+        u64 value=0;bool first=true;
+        for(auto range:t.ranges) {
+            const u64 h=Hash(gs::TheGs().memory.data()+std::size_t(range.first)*256,std::size_t(range.second-range.first)*256);
+            value=first?h:(value^(h+0x9e3779b97f4a7c15ull+(value<<6)+(value>>2)));first=false;
+        }
+        return value;
+    };
     // The GPU drawing over its blocks since it was decoded makes it out of date
     // as surely as memory written there.
     if (t.owned_seen != b.owned.size()) {
         t.over.clear();
         for (const auto& [okey, o] : b.owned)
-            if (o.begin < t.end && t.begin < o.full_end) t.over.push_back(&o);
+            if (t.overlaps(o.begin,o.full_end)) t.over.push_back(&o);
         t.owned_seen = b.owned.size();
     }
     for (const Owned* o : t.over)
-        if (o->drawn_serial > t.decoded_serial && o->begin < t.end && t.begin < o->drawn_end) t.valid = false;
+        if (o->drawn_serial > t.decoded_serial && t.overlaps(o->begin,o->drawn_end)) t.valid = false;
     // A texture pack (texture_pack.h), for textures from memory - not ones the
     // GPU drew, as PCSX2 replaces none of those. Turned on or off (Tab):
     // every texture comes back once, replaced or as the game has it.
@@ -975,8 +1010,8 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
     bool gpu_holds_now = false;
     auto gpu_decode = [&] {
         for (auto& [okey, o] : b.owned)
-            if (o.gpu_newer && o.dirty_begin < t.end && t.begin < o.dirty_end) WriteBack(b, o);
-        Coherent(b, t.begin, t.end, true);
+            if (o.gpu_newer && t.overlaps(o.dirty_begin,o.dirty_end)) WriteBack(b, o);
+        for(auto range:t.ranges)Coherent(b,range.first,range.second,true);
         ps2gpu::GsTextureDecode d;
         d.tbp = tbp;
         d.tbw = tbw;
@@ -1056,8 +1091,8 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
     // CPU's blocks (the GPU holding none of them) hold something else than when it was decoded - a missed
     // invalidation.
     static const char* const stalecheck = std::getenv("PS2HOST_GPU_STALECHECK");
-    if (stalecheck && t.valid && t.decoded && tbp == u32(std::strtoul(stalecheck, nullptr, 16)) && !GpuHolds(b, t.begin, t.end)) {
-        const u64 now = Hash(gs::TheGs().memory.data() + std::size_t(t.begin) * 256, std::size_t(t.end - t.begin) * 256);
+    if (stalecheck && t.valid && t.decoded && tbp == u32(std::strtoul(stalecheck, nullptr, 16)) && !textureHolds()) {
+        const u64 now = textureHash();
         static u64 reported = 0;
         if (now != t.content && reported++ < 40) {
             // Which blocks: compare against nothing kept - report the span and the primitive count.
@@ -1065,7 +1100,7 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
                          unsigned(tw), unsigned(th), unsigned(t.begin), unsigned(t.end), (unsigned long long)gs::TheGs().primitives());
         }
     }
-    if (!t.valid && (GpuHolds(b, t.begin, t.end) || (clut_rows & ~b.clut_cpu))) {
+    if (!t.valid && (textureHolds() || (clut_rows & ~b.clut_cpu))) {
         Timed timed(Section::GpuSync);
         const TimelineStep step("sync: a texture decoded on the GPU");
         gpu_holds_now = true;
@@ -1079,13 +1114,12 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
         const TimelineStep step("sync: a texture from the CPU");
         b.cause = 0;
         const u64 before = b.downloads;
-        Sync(b, t.begin, t.end, false);
+        for(auto range:t.ranges)Sync(b,range.first,range.second,false);
         if (b.downloads != before) b.texture_downloads[psm << 16 | tbw] += b.downloads - before;
         // Games send the same texels again and again (Burnout 3 its textures
         // every frame, through PATH3): decoded again only if its blocks hold
         // something else than when it was last decoded.
-        const u64 content = Hash(gs::TheGs().memory.data() + std::size_t(t.begin) * 256,
-                                 std::size_t(t.end - t.begin) * 256);
+        const u64 content = textureHash();
         // Something else: decoded on the GPU all the same (texel by texel on
         // the CPU, the race's streamed textures were a twelfth of the GS
         // thread), the hash kept to compare the next time.
@@ -1114,6 +1148,8 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
             t.content = content;
             ++b.decodes;
         } else {
+            if (!t.replaced && hw_runtime_pack::On())
+                RuntimeReplace(b, t, c, texa, mips.count, tcc_keyed, true);
             ++b.unchanged;
             t.decoded_serial = b.serial;
         }
@@ -1121,6 +1157,7 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
         t.decoded = true;
     }
     const u64 renderer_key = t.renderer_key;
+    b.last_texture_context=t.replaced && hw_runtime_pack::ContextBuilt(t.replacement);
     // Keep the cache bounded: the least recently used go (4,096: a race keeps
     // over 2,048 about, and each one evicted came back decoded again).
     while (b.textures.size() > 4096) {
@@ -1274,6 +1311,56 @@ Owned* Containing(Bridge& b, u32 fbp, u32 fbw, u32 psm, u32* offset) {
     return best;
 }
 
+void OnDraw(const gs::Gs::DrawCall& call);
+
+struct SavedStrip {
+    u64 prim = 0;
+    gs::Context context{};
+    u64 texa = 0;
+    gs::Vertex vertices[6]{};
+    u32 count = 0;
+    u64 fogcol = 0;
+    bool pabe = false;
+};
+
+struct PendingDepthClear {
+    bool active = false;
+    bool flushing = false;
+    u64 regs[12] = {};
+    u32 width = 0;
+    u32 rows = 0;
+    float covered_x = 0.0f;
+    std::vector<SavedStrip> strips;
+};
+
+PendingDepthClear g_pending_clear;
+u32 g_proven_overwrite_rows = 0;
+
+void FlushPendingClear(u32 proven_rows) {
+    if (!g_pending_clear.active || g_pending_clear.flushing) return;
+    g_pending_clear.flushing = true;
+    g_pending_clear.active = false;
+    std::vector<SavedStrip> strips;
+    strips.swap(g_pending_clear.strips);
+    g_proven_overwrite_rows = proven_rows;
+    gs::Context replay_ctx{};
+    for (const SavedStrip& s : strips) {
+        replay_ctx = s.context;
+        gs::Gs::DrawCall c{};
+        c.prim = s.prim;
+        c.context = &replay_ctx;
+        c.texa = s.texa;
+        c.vertices = s.vertices;
+        c.count = s.count;
+        c.fogcol = s.fogcol;
+        c.pabe = s.pabe;
+        OnDraw(c);
+        g_proven_overwrite_rows = 0;
+    }
+    g_proven_overwrite_rows = 0;
+    g_pending_clear.flushing = false;
+}
+
 void OnDraw(const gs::Gs::DrawCall& call) {
     // Timed only past the fast path below: two clock reads a primitive were
     // a twentieth of the GS thread.
@@ -1309,16 +1396,13 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     }
     if (!s.primary && type < 3) return;                 // the shadow compares what it has always drawn
     const gs::Context& c = *call.context;
-    if (std::getenv("PS2_PORT_SCANOUT_XY_TRACE") && Bits(c.frame,16,6)==8 && type>=3 && !(call.prim&(1ull<<8))) {
+    // Claude 2026-10-25: read once - getenv on every draw was ~2/3 of OnDraw at Mavericks.
+    static const bool scanout_xy_trace = std::getenv("PS2_PORT_SCANOUT_XY_TRACE") != nullptr;
+    if (scanout_xy_trace && Bits(c.frame,16,6)==8 && type>=3 && !(call.prim&(1ull<<8))) {
         static std::map<u32,u64> last;static unsigned n=0;const u32 bp=Bits(c.frame,0,9);
         if(n<100 && (!last.count(bp)||last[bp]!=c.xyoffset)){last[bp]=c.xyoffset;++n;std::fprintf(stderr,"[scanout xy] fbp=%u xy=%016llx fieldmode=%d\n",bp,(unsigned long long)c.xyoffset,gs::TheGs().FieldMode());}
     }
 
-    if (s.primary) hw_runtime_pack::OnDrawTarget(c.frame, c.zbuf, Bits(c.scissor, 48, 11) + 1);
-    if (g_present_waits) {
-        u32 fbp = 0, fbw = 0, psm = 0;
-        if (!gs::TheGs().Displayed(&fbp, &fbw, &psm) || Bits(c.frame, 0, 9) != fbp) PresentWaiting();
-    }
     // The frame and scissor as the registers have them; the draw's whole
     // state (a large struct) is made past the fast path below, which reuses
     // the one before.
@@ -1380,6 +1464,62 @@ void OnDraw(const gs::Gs::DrawCall& call) {
             return;
         if (Bits(c.test, 16, 1) && Bits(c.test, 17, 2) == 0) return;    // ZTST NEVER: every pixel fails
     }
+    const u64 regs[12] = {call.prim, c.frame, c.scissor, c.tex0, c.tex1, c.clamp, c.alpha, c.test, c.zbuf,
+                          call.texa, call.fogcol | (u64(call.pabe) << 63) | (u64(c.fba & 1) << 62), c.miptbp1 ^ (c.miptbp2 * 31)};
+    const float sample_delta = (targetMapping && (frame_width <= 320 || frame_width >= 1024)) ? 0.0f : g_subpixel_delta;
+    const float raw_x0 = low_x - sample_delta, raw_x1 = high_x - sample_delta;
+    const float raw_y0 = low_y - sample_delta, raw_y1 = high_y - sample_delta;
+    const bool strip_alpha_ok = !Bits(c.test, 0, 1) || Bits(c.test, 1, 3) == 1 || (Bits(c.test, 1, 3) == 0 && Bits(c.test, 12, 2) == 2);
+    const bool strip_date = Bits(c.test, 14, 1) != 0 && frame_psm != gs::PSMCT24;
+    const u32 strip_rows = (raw_y0 <= 0.0f && scissor_y1 >= 0)
+                               ? std::min(u32(std::max(0.0f, std::floor(raw_y1))), u32(scissor_y1 + 1))
+                               : 0u;
+    const bool is_depth_clear_strip = s.primary && !s.Dumping() && type == 6 && call.count <= 6 &&
+                                      !((call.prim >> 4) & 1) && !strip_date &&
+                                      Bits(c.test, 16, 1) != 0 && Bits(c.test, 17, 2) == 1 && Bits(c.zbuf, 32, 1) == 0 &&
+                                      strip_alpha_ok && scissor_x0 == 0 && scissor_y0 == 0 &&
+                                      scissor_x1 >= int(frame_width) - 1 && strip_rows > 0 && raw_y1 <= float(frame_height);
+    if (!g_pending_clear.flushing) {
+        auto save_strip = [&]() {
+            SavedStrip st{};
+            st.prim = call.prim;
+            st.context = c;
+            st.texa = call.texa;
+            for (u32 i = 0; i < call.count && i < 6; ++i) st.vertices[i] = call.vertices[i];
+            st.count = call.count;
+            st.fogcol = call.fogcol;
+            st.pabe = call.pabe;
+            g_pending_clear.strips.push_back(st);
+        };
+        if (g_pending_clear.active) {
+            if (is_depth_clear_strip && std::memcmp(regs, g_pending_clear.regs, sizeof regs) == 0 &&
+                frame_width == g_pending_clear.width && strip_rows == g_pending_clear.rows &&
+                raw_x0 <= g_pending_clear.covered_x && raw_x1 > g_pending_clear.covered_x) {
+                save_strip();
+                g_pending_clear.covered_x = std::floor(raw_x1);
+                if (g_pending_clear.covered_x >= float(frame_width)) {
+                    FlushPendingClear(g_pending_clear.rows);
+                }
+                return;
+            }
+            FlushPendingClear(0);
+        }
+        if (is_depth_clear_strip && raw_x0 <= 0.0f && raw_x1 > 0.0f && raw_x1 < float(frame_width)) {
+            g_pending_clear.active = true;
+            std::memcpy(g_pending_clear.regs, regs, sizeof regs);
+            g_pending_clear.width = frame_width;
+            g_pending_clear.rows = strip_rows;
+            g_pending_clear.covered_x = std::floor(raw_x1);
+            g_pending_clear.strips.clear();
+            save_strip();
+            return;
+        }
+    }
+    if (s.primary) hw_runtime_pack::OnDrawTarget(c.frame, c.zbuf, Bits(c.scissor, 48, 11) + 1);
+    if (g_present_waits) {
+        u32 fbp = 0, fbw = 0, psm = 0;
+        if (!gs::TheGs().Displayed(&fbp, &fbw, &psm) || Bits(c.frame, 0, 9) != fbp) PresentWaiting();
+    }
     // Claude 2026-10-20: a flat clear taller than a target image (512 rows at 32 bits): the rows past it
     // written straight to memory, as the software GS draws them. Kelly clears all 4 MB at boot (1024x1024,
     // alpha 0x80); CLUTs it uploads there later as PSMCT24 keep that alpha, and without it the menu font's
@@ -1434,8 +1574,6 @@ void OnDraw(const gs::Gs::DrawCall& call) {
         u32 y_offset = 0, t_offset = 0, th = 1;     // Containing's: the target's rows, the texture's
     };
     static Fast fast;
-    const u64 regs[12] = {call.prim, c.frame, c.scissor, c.tex0, c.tex1, c.clamp, c.alpha, c.test, c.zbuf,
-                          call.texa, call.fogcol | (u64(call.pabe) << 63) | (u64(c.fba & 1) << 62), c.miptbp1 ^ (c.miptbp2 * 31)};
     if (s.primary && fast.valid && fast.mutations == g_mutations && fast.context == call.context &&
         rows <= fast.rows && std::memcmp(regs, fast.regs, sizeof regs) == 0 && !s.Dumping() &&
         (!fast.source || !fast.source->stale)) {
@@ -1471,6 +1609,28 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     state.textured = (call.prim >> 4) & 1;
     state.sprite = type == 6 && s.renderer->Scale() > 1;     // (at 1x it would only split batches)
     state.sprite_prim = type == 6;
+    // Claude 2026-10-25: a flat (no perspective) alpha-blended 2D piece the GS draws minified - over 1.4 texels a
+    // pixel, so its 1x pixels never resolved single texels - gets gs.frag's hard-alpha-cut rule (blend_ops bit 18):
+    // pieces cut from separate textures and laid edge to edge show no gap between them at 4x. Fonts (1.1-1.3) and
+    // magnified or perspective textures are left alone. PS2_PORT_HW_GS_ALPHA_CUT=0: off.
+    {
+        static const bool alpha_cut = [] { const char* e = std::getenv("PS2_PORT_HW_GS_ALPHA_CUT"); return e && e[0] == '1'; }();
+        state.alpha_cut = false;
+        if (alpha_cut && state.textured && ((call.prim >> 6) & 1) && s.renderer->Scale() > 1 && call.count >= 2 && call.count <= 6) {
+            float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f, u0 = 1e9f, u1 = -1e9f, v0 = 1e9f, v1 = -1e9f, q0 = 1e9f, q1 = -1e9f;
+            for (u32 i = 0; i < call.count; ++i) {
+                const gs::Vertex& w = call.vertices[i];
+                const float u = fst ? float(w.u) / 16.0f : w.s / w.q * float(tw), vv = fst ? float(w.v) / 16.0f : w.t / w.q * float(th);
+                x0 = std::min(x0, w.x); x1 = std::max(x1, w.x); y0 = std::min(y0, w.y); y1 = std::max(y1, w.y);
+                u0 = std::min(u0, u); u1 = std::max(u1, u); v0 = std::min(v0, vv); v1 = std::max(v1, vv);
+                q0 = std::min(q0, w.q); q1 = std::max(q1, w.q);
+            }
+            const bool flat = fst || q1 - q0 <= 1e-4f * std::max(1.0f, q1);
+            const float rx = x1 > x0 ? (u1 - u0) / (x1 - x0) : 0.0f, ry = y1 > y0 ? (v1 - v0) / (y1 - y0) : 0.0f;
+            state.alpha_cut = alpha_cut_rule::Applies(c.tex0, state.textured, true, s.renderer->Scale(), call.count, flat, x1 - x0, y1 - y0, std::max(rx, ry));
+
+        }
+    }
     if (s.primary && s.Dumping()) {
         const auto key = std::make_tuple(state.fbp, state.fbw, state.psm);
         if (key != s.last_target) {
@@ -1541,8 +1701,13 @@ void OnDraw(const gs::Gs::DrawCall& call) {
                         for (std::size_t i = 0; i < n; ++i) v[i].t += float(offset) * v[i].q / float(th);
                     }
                 }
-                const bool known = s.primary ? s.owned.count(std::make_tuple(tex_fbp, tex_fbw, psm, false)) != 0
+                bool known = s.primary ? s.owned.count(std::make_tuple(tex_fbp, tex_fbw, psm, false)) != 0
                                              : s.renderer->HasTarget(tex_fbp, tex_fbw, psm);
+                static const bool stale_fix=[] {const char* e=std::getenv("PS2_PORT_HW_GS_STALE_TARGET_FIX");return !(e && e[0]=='0');}();
+                if(known && s.primary && stale_fix){
+                    const auto& source=s.owned.at(std::make_tuple(tex_fbp,tex_fbw,psm,false));
+                    if(source.cpu_writes.rejects(source.gpu_newer,tbp_blocks,tex_fbw,tw,th,PixelBits(tex_psm)))known=false;
+                }
                 if (!known) {
                     if (t_offset)
                         for (std::size_t i = 0; i < n; ++i) v[i].t -= float(t_offset) * v[i].q / float(th);
@@ -1575,6 +1740,7 @@ void OnDraw(const gs::Gs::DrawCall& call) {
         if (!state.texture_target) {
             if (s.primary) {
                 state.texture = CachedTexture(s, c, call.texa, tw, th);
+                if(s.last_texture_context)state.alpha_cut=false;
             } else {
                 // Decoded again when the texture's registers change, local memory
                 // is uploaded into, or a draw since went into the texture's blocks.
@@ -1672,7 +1838,10 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     Owned* depth = nullptr;
     if (state.depth) {
         if (s.primary) {
-            depth = &Use(s, state.zbp, state.fbw, zpsm, true, state.width, 512, rows);   // (the renderer's kDepthRows)
+            u32 overwrite_rows = g_proven_overwrite_rows;
+            if (is_depth_clear_strip && raw_x0 <= 0.0f && raw_x1 >= float(state.width))
+                overwrite_rows = std::max(overwrite_rows, strip_rows);
+            depth = &Use(s, state.zbp, state.fbw, zpsm, true, state.width, 512, rows, overwrite_rows);   // (the renderer's kDepthRows)
         } else if (s.depth_seeded.insert(state.zbp).second) {
             // Each depth buffer starts the frame as local memory has it, so the
             // GPU tests against what the software GS drew.
@@ -1818,6 +1987,7 @@ u32 WantedScale(const ps2gpu::Display* display) {
    first, the renderer drops its targets and depth buffers, and every image
    comes back from memory at the new size as it is next used. */
 void Rescale(Bridge& b, u32 scale) {
+    FlushPendingClear(0);
     UpdateSubpixel(scale);
     for (auto& [key, o] : b.owned)
         if (o.gpu_newer) WriteBack(b, o);
@@ -1843,6 +2013,7 @@ void Rescale(Bridge& b, u32 scale) {
 }
 
 void PresentGpuPicture(ps2gpu::Display& display, u64 due_ns) {
+    FlushPendingClear(0);
     u32 fbp = 0, fbw = 0, psm = 0;
     if (g_bridge && gs::TheGs().Displayed(&fbp, &fbw, &psm)) {
         auto found = g_bridge->owned.find(std::make_tuple(fbp, fbw, psm, false));
@@ -1940,8 +2111,14 @@ bool StartGpuRenderer(std::string* error, GpuMode mode, bool show) {
             g_bridge->cause = 2;
             SyncWrite(*g_bridge, begin, end, cover);
         };
-        g.on_clut_load = [](u64 tex0, u64 texa) { hw_runtime_pack::OnClutLoad(tex0, !GpuHolds(*g_bridge, Bits(tex0, 37, 14), Bits(tex0, 37, 14) + 8)); return LoadClut(*g_bridge, tex0, texa); };
-        g.on_transfer_done = [] { ApplyPatch(*g_bridge); hw_runtime_pack::OnTransferDone(gs::TheGs()); };
+        g.on_clut_load = [](u64 tex0, u64 texa) {
+            FlushPendingClear(0);
+            const u32 psm = Bits(tex0, 20, 6), cbp = Bits(tex0, 37, 14);
+            const u32 clut_blocks = (psm == gs::PSMT8 || psm == gs::PSMT8H) ? 4u : 1u;
+            hw_runtime_pack::OnClutLoad(tex0, !GpuHolds(*g_bridge, cbp, cbp + clut_blocks));
+            return LoadClut(*g_bridge, tex0, texa);
+        };
+        g.on_transfer_done = [] { FlushPendingClear(0); ApplyPatch(*g_bridge); hw_runtime_pack::OnTransferDone(gs::TheGs()); };
     }
     if (show || bridge.primary) {
         // The window shows the GPU's picture: the displayed buffer read back
@@ -1994,8 +2171,17 @@ bool GpuPrimary() { return g_bridge && g_bridge->primary; }
 
 // Claude 2026-10-20: for the plugin backend (libclaude-hwgs): end the frame and read the displayed target at the
 // renderer's internal resolution (the window path's picture source crops to 640x448). RGBA8 bytes, row-major.
+static u64 scanout_pmode=0,scanout_smode2=0,scanout_fb[2]={},scanout_display[2]={};
+void ClaudeHwScanoutRegister(unsigned address,u64 value) {
+    switch(address&0xffffu) {
+      case 0:scanout_pmode=value;break;case 0x20:scanout_smode2=value;break;
+      case 0x70:scanout_fb[0]=value;break;case 0x90:scanout_fb[1]=value;break;
+      case 0x80:scanout_display[0]=value;break;case 0xa0:scanout_display[1]=value;break;
+    }
+}
 bool ClaudeHwFrame(u64 frame, const std::vector<u32>** rgba, u32* width, u32* height, u32* scale) {
     if (!g_bridge) return false;
+    FlushPendingClear(0);
     GpuShadowFrame(frame, std::string()); // Submit all work, including a different back buffer.
     u32 fbp=0,fbw=0,psm=0;
     if (!gs::TheGs().Displayed(&fbp,&fbw,&psm)) return false;
@@ -2003,14 +2189,70 @@ bool ClaudeHwFrame(u64 frame, const std::vector<u32>** rgba, u32* width, u32* he
     auto found=b.owned.find(std::make_tuple(fbp,fbw,psm,false));
     if(found==b.owned.end() || found->second.stale)return false;
     const u32 k=b.renderer->Scale();
-    const auto key=std::make_tuple(fbp,fbw,psm,k,found->second.drawn_serial);
-    if(key!=b.displayed_key || b.displayed_rgba.empty()) {
-        if(!b.renderer->ReadTargetFull(fbp,fbw,psm,&b.displayed_rgba,&b.displayed_width,&b.displayed_height))return false;
+    const unsigned circuit=((scanout_pmode&2u) || (!(scanout_pmode&1u) && scanout_fb[1]))?1:0;
+    const u64 fb=scanout_fb[circuit],display=scanout_display[circuit];
+    u32 shownW=(Bits(display,32,12)+1)/(Bits(display,23,4)+1);
+    u32 shownH=(Bits(display,44,11)+1)/(Bits(display,27,2)+1);
+    // Invalid/placeholder geometry retains the complete target.
+    static const bool cropped=[] {const char* e=std::getenv("PS2_PORT_HW_GS_SCANOUT_RECT");return !(e && *e=='0');}();
+    const bool known=cropped && shownW>=160 && shownW<=1024 && shownH>=100 && shownH<=1024;
+    if((scanout_smode2&3u)==3u)shownH=std::max(1u,shownH/2);
+    const u32 maxW=known?(Bits(fb,32,11)+shownW)*k:0;
+    const u32 maxH=known?(Bits(fb,43,11)+shownH)*k:0;
+    const auto key=std::make_tuple(fbp,fbw,psm,k,found->second.drawn_serial,maxW,maxH);
+    // Claude 2026-10-25: asynchronous: request this picture, show the newest the GPU has finished (one behind);
+    // synchronous only until the first finishes or when a different shape is asked for.
+    static std::uint64_t async_serial=0; static decltype(b.displayed_key) async_key;
+    if(key!=async_key){async_key=key;++async_serial;}
+    std::uint64_t done=0;
+    if(b.renderer->ReadTargetRectAsync(fbp,fbw,psm,maxW,maxH,async_serial,&b.displayed_rgba,&b.displayed_width,&b.displayed_height,&done) &&
+       b.displayed_width>=std::min(maxW?maxW:1u,b.displayed_width)) {
+        if(done==async_serial){b.displayed_key=key;} ++b.displayed_reads;
+    } else if(key!=b.displayed_key || b.displayed_rgba.empty()) {
+        if(!b.renderer->ReadTargetRect(fbp,fbw,psm,maxW,maxH,&b.displayed_rgba,&b.displayed_width,&b.displayed_height))return false;
         b.displayed_key=key;++b.displayed_reads;
     } else ++b.displayed_reuses;
-    if(std::getenv("PS2_PORT_SCANOUT_CACHE_TRACE") && (b.displayed_reads+b.displayed_reuses)%120==0)
+    static const bool scanout_cache_trace=std::getenv("PS2_PORT_SCANOUT_CACHE_TRACE")!=nullptr;
+    if(scanout_cache_trace && (b.displayed_reads+b.displayed_reuses)%120==0)
         std::fprintf(stderr,"[scanout cache] downloaded=%llu reused=%llu\n",(unsigned long long)b.displayed_reads,(unsigned long long)b.displayed_reuses);
     *rgba=&b.displayed_rgba;*width=b.displayed_width;*height=b.displayed_height;*scale=k;
+    return true;
+}
+
+// Claude 2026-10-26: zero-copy presentation. ClaudeHwFrameInfo: the displayed target and the size ClaudeHwFrame would
+// return (its scanout rectangle from the origin), without reading it; ClaudeHwFrameSurface: the caller's crop of it
+// (sx, sy, dw, dh) to ow x oh copied on the GPU into a window-shared picture (*serial), nothing read back.
+static u32 zc_fbp = 0, zc_fbw = 0, zc_psm = 0; static bool zc_valid = false;
+bool ClaudeHwFrameInfo(u64 frame, u32* width, u32* height, u32* scale) {
+    zc_valid = false;
+    if (!g_bridge || !width || !height || !scale) return false;
+    FlushPendingClear(0);
+    (void)frame; // Geometry query alone does not advance the frame clock.
+    u32 fbp=0,fbw=0,psm=0;
+    if (!gs::TheGs().Displayed(&fbp,&fbw,&psm)) return false;
+    Bridge& b=*g_bridge;
+    auto found=b.owned.find(std::make_tuple(fbp,fbw,psm,false));
+    if(found==b.owned.end() || found->second.stale)return false;
+    const u32 k=b.renderer->Scale();
+    const unsigned circuit=((scanout_pmode&2u) || (!(scanout_pmode&1u) && scanout_fb[1]))?1:0;
+    const u64 fb=scanout_fb[circuit],display=scanout_display[circuit];
+    u32 shownW=(Bits(display,32,12)+1)/(Bits(display,23,4)+1);
+    u32 shownH=(Bits(display,44,11)+1)/(Bits(display,27,2)+1);
+    static const bool cropped=[] {const char* e=std::getenv("PS2_PORT_HW_GS_SCANOUT_RECT");return !(e && *e=='0');}();
+    const bool known=cropped && shownW>=160 && shownW<=1024 && shownH>=100 && shownH<=1024;
+    if((scanout_smode2&3u)==3u)shownH=std::max(1u,shownH/2);
+    const u32 maxW=known?(Bits(fb,32,11)+shownW)*k:0, maxH=known?(Bits(fb,43,11)+shownH)*k:0;
+    const u32 pw=found->second.width*k, ph=found->second.height*k;
+    *width=maxW?std::min(maxW,pw):pw; *height=maxH?std::min(maxH,ph):ph; *scale=k;
+    zc_fbp=fbp; zc_fbw=fbw; zc_psm=psm; zc_valid=true;
+    return true;
+}
+bool ClaudeHwFrameSurface(u64 frame, u32 sx, u32 sy, u32 dw, u32 dh, u32 ow, u32 oh, unsigned long long* serial) {
+    if (!g_bridge || !zc_valid || !serial) return false;
+    GpuShadowFrame(frame, std::string());
+    std::uint64_t s = 0;
+    if (!g_bridge->renderer->BlitTargetToSurface(zc_fbp, zc_fbw, zc_psm, sx, sy, dw, dh, ow, oh, &s)) return false;
+    *serial = s;
     return true;
 }
 
@@ -2020,6 +2262,7 @@ bool ClaudeHwContentStamp(unsigned* fbp, unsigned* fbw, unsigned* psm, unsigned 
     if(i==g_bridge->owned.end() || i->second.stale) return false;
     *serial=i->second.drawn_serial; return true;
 }
+u32 GpuCurrentScale() {return g_bridge?g_bridge->renderer->Scale():1;}
 void GpuSetScale(u32 scale) {
     if (g_bridge && scale != g_bridge->renderer->Scale()) Rescale(*g_bridge, scale);
     if (g_bridge) UpdateSubpixel(g_bridge->renderer->Scale());
@@ -2063,6 +2306,7 @@ std::string GpuCaptureScreen(const std::string& dir) {
 
 void GpuShadowFrame(u64 frame, const std::string& dump_dir) {
     if (!g_bridge) return;
+    FlushPendingClear(0);
     Bridge& s = *g_bridge;
     if (s.primary) {
         if (s.Dumping() && std::get<0>(s.last_target) != ~0u) DumpPass(s, s.last_target);
@@ -2072,6 +2316,17 @@ void GpuShadowFrame(u64 frame, const std::string& dump_dir) {
         {
             Timed timed(Section::GpuRender);
             s.renderer->Kick();
+        }
+        // Claude 2026-10-25: GPU busy time and CPU waits per 100 frames (PS2_PORT_HW_GS_BUSY=1).
+        static const bool busy_log = [] { const char* e = std::getenv("PS2_PORT_HW_GS_BUSY"); return e && *e == '1'; }();
+        if (busy_log && frame % 100 == 0) {
+            static std::uint64_t last_ns = 0; static double last_wait = 0; static auto last_t = std::chrono::steady_clock::now();
+            const std::uint64_t ns = ps2gpu::GpuBusyNanoseconds(); const double wait = ps2gpu::GpuWaitSeconds();
+            const auto t = std::chrono::steady_clock::now();
+            std::fprintf(stderr, "[gpu-busy] frame %llu: GPU %.1f ms per frame, CPU waited %.1f ms per frame, wall %.1f ms per frame, %zu replacements resident\n",
+                         (unsigned long long)frame, double(ns - last_ns) / 1e6 / 100.0, (wait - last_wait) * 1000.0 / 100.0,
+                         std::chrono::duration<double>(t - last_t).count() * 1000.0 / 100.0, std::size_t(0));
+            last_ns = ns; last_wait = wait; last_t = t;
         }
         if (frame % 100 == 0)
             std::fprintf(stderr, "[gpu] frame %llu: %llu draws, %llu write-backs, %llu reloads, %llu decodes, %zu images, %zu textures\n",
@@ -2202,6 +2457,7 @@ bool StartGpuRenderer(std::string* error, GpuMode, bool) {
     if (error) *error = "built without the GPU renderer (PS2HOST_VULKAN)";
     return false;
 }
+u32 GpuCurrentScale() {return 1;}
 void GpuSetScale(u32) {}
 void GpuShadowFrame(gs::u64, const std::string&) {}
 std::string GpuShadowSummary() { return ""; }

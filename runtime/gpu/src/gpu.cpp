@@ -8,8 +8,12 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#endif
 
 namespace ps2gpu {
 
@@ -38,8 +42,23 @@ bool VulkanGpu::Init(std::string* error) {
         if (error) *error = text;
         return false;
     };
-    VkResult r = volkInitialize();
-    if (r != VK_SUCCESS) return fail("volkInitialize (is there a Vulkan driver?)", r);
+    VkResult r = VK_SUCCESS;
+#if defined(__APPLE__)
+    if (const char* library = std::getenv("PS2_PORT_PRIVATE_MOLTENVK"); library && *library) {
+        if (library[0] != '/') return fail("MoltenVK binding must be absolute", VK_ERROR_INITIALIZATION_FAILED);
+        // Keep the bundled driver resident while any Vulkan function pointers live.
+        // Loading it does not construct an unused second instance/device.
+        void* loader = dlopen(library, RTLD_NOW | RTLD_LOCAL);
+        if (!loader) { if (error) *error = dlerror(); return false; }
+        auto get_proc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(loader, "vkGetInstanceProcAddr"));
+        if (!get_proc) return fail("Bundled MoltenVK entry point missing", VK_ERROR_INITIALIZATION_FAILED);
+        volkInitializeCustom(get_proc);
+    } else
+#endif
+    {
+        r = volkInitialize();
+        if (r != VK_SUCCESS) return fail("volkInitialize (is there a Vulkan driver?)", r);
+    }
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "ps2gpu";
     app.apiVersion = VK_API_VERSION_1_3;
@@ -104,6 +123,21 @@ bool VulkanGpu::Init(std::string* error) {
     dci.pNext = &features;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
+#if defined(__APPLE__)
+    // Claude 2026-10-26: VK_EXT_metal_objects (MoltenVK), when offered: images backed by IOSurfaces, which the window's
+    // OpenGL samples directly (zero-copy presentation). PS2_PORT_HW_GS_ZERO_COPY=1 opts in; other values keep the existing path.
+    const char* metal_objects_name = "VK_EXT_metal_objects";
+    {
+        const char* e = std::getenv("PS2_PORT_HW_GS_ZERO_COPY");
+        std::uint32_t n = 0;
+        vkEnumerateDeviceExtensionProperties(gpu, nullptr, &n, nullptr);
+        std::vector<VkExtensionProperties> exts(n);
+        vkEnumerateDeviceExtensionProperties(gpu, nullptr, &n, exts.data());
+        for (const VkExtensionProperties& x : exts)
+            if ((e && e[0] == '1' && e[1] == 0) && std::strcmp(x.extensionName, metal_objects_name) == 0) metal_objects = true;
+        if (metal_objects) { dci.enabledExtensionCount = 1; dci.ppEnabledExtensionNames = &metal_objects_name; }
+    }
+#endif
     if ((r = vkCreateDevice(gpu, &dci, nullptr, &device)) != VK_SUCCESS) return fail("vkCreateDevice", r);
     // Device functions stay the loader's (volkLoadInstance): they dispatch by
     // handle, so the window's device and this one can live side by side. volk
@@ -151,7 +185,7 @@ void VulkanGpu::MakeTimestamps() {
     timestamp_ns_ = properties.limits.timestampPeriod;
     if (std::getenv("PS2HOST_GPU_PROFILE")) {
         qci.queryCount = kMarks * kSlots;
-        if (vkCreateQueryPool(device, &qci, nullptr, &profile_) != VK_SUCCESS) profile_ = VK_NULL_HANDLE;
+        if (vkCreateQueryPool(device, &qci, nullptr, &profile_) != VK_SUCCESS) { profile_ = VK_NULL_HANDLE; std::fprintf(stderr, "[gpu] profile query pool not made\n"); } else std::fprintf(stderr, "[gpu] profile query pool made\n");
     }
 }
 

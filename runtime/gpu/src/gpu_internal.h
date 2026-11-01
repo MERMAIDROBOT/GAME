@@ -31,7 +31,9 @@ inline GpuWaitObserver g_wait_observer = nullptr;      // SetGpuWaitObserver
 inline std::atomic<std::uint64_t> g_gpu_ns{0};
 /* PS2HOST_GPU_PROFILE: the GPU's time by what it did (GpuProfileReport). */
 enum ProfileKind { kProfOther, kProfDraw, kProfSwizzle, kProfLinear, kProfMemory, kProfFeedback, kProfDecode,
-                   kProfUpload, kProfClear, kProfDate, kProfReadback, kProfKinds };
+                   kProfUpload, kProfClear, kProfDate, kProfReadback,
+                   // Claude 2026-10-25: draws by kind
+                   kProfDrawReplaced, kProfDrawFromTarget, kProfDrawSmallTarget, kProfDrawUntextured, kProfKinds };
 inline std::atomic<std::uint64_t> g_profile_ns[kProfKinds] = {};
 struct WaitReason { const char* why; std::uint64_t count; double seconds; };
 inline WaitReason g_waits[16] = {};
@@ -102,6 +104,7 @@ public:
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice gpu = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
+    bool metal_objects = false;
     std::uint32_t family = 0;
     VkQueue queue = VK_NULL_HANDLE;
     VkCommandPool pool = VK_NULL_HANDLE;
@@ -122,7 +125,7 @@ private:
     double timestamp_ns_ = 0;               // a tick, in nanoseconds
     bool stamped_[kSlots] = {};
     void MakeTimestamps();
-    static constexpr std::uint32_t kMarks = 8192;
+    static constexpr std::uint32_t kMarks = 1024;   // Claude 2026-10-25: 3 x 8192 queries made no pool on MoltenVK
     VkQueryPool profile_ = VK_NULL_HANDLE;
     std::vector<int> marks_[kSlots];
     std::vector<std::function<void()>> after_submit_;

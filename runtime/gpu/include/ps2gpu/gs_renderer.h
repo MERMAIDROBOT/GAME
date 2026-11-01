@@ -121,6 +121,7 @@ struct GsDrawState {
     std::uint32_t fix = 0x80;
     bool pabe = false;                                   /* PABE: blend only where As >= 0x80 */
     bool fba = false;                                    /* FBA: alpha's top bit set on every write (Claude 2026-10-20) */
+    bool alpha_cut = false;                              /* gs.frag: nearest texel at hard alpha cuts (Claude 2026-10-25) */
 
     /* Fog (PRIM.FGE): C = (F * C + (255 - F) * FOGCOL) / 256, colour only. */
     bool fog = false;
@@ -296,7 +297,33 @@ public:
                                 std::vector<std::uint32_t>* pixels, std::uint32_t* width, std::uint32_t* height) {
         return ReadTarget(fbp, fbw, psm, pixels, width, height);
     }
+    // Bounding rectangle from the origin; zero limits retain the full target.
+    // Scanout includes DISPFB offsets in these limits; general captures stay full.
+    virtual bool ReadTargetRect(std::uint32_t fbp,std::uint32_t fbw,std::uint32_t psm,
+        std::uint32_t maxW,std::uint32_t maxH,std::vector<std::uint32_t>* pixels,
+        std::uint32_t* width,std::uint32_t* height) {return ReadTargetFull(fbp,fbw,psm,pixels,width,height);}
+    // Claude 2026-10-25: asynchronous scanout read-back. Starts copying the target (tagged `serial`) without waiting
+    // for the GPU, and returns in *pixels the newest copy the GPU has already finished (*done_serial its tag) - one
+    // picture behind instead of stalling the CPU behind the whole frame. False when nothing has finished yet (the
+    // caller then reads synchronously). Default: synchronous.
+    virtual bool ReadTargetRectAsync(std::uint32_t fbp,std::uint32_t fbw,std::uint32_t psm,std::uint32_t maxW,
+        std::uint32_t maxH,std::uint64_t serial,std::vector<std::uint32_t>* pixels,std::uint32_t* width,
+        std::uint32_t* height,std::uint64_t* done_serial) {
+        *done_serial=serial; return ReadTargetRect(fbp,fbw,psm,maxW,maxH,pixels,width,height);}
+    // The producer submits the crop without a CPU readback. Unsupported devices
+    // return false so callers retain the ordinary pixel path.
+    virtual bool BlitTargetToSurface(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm,
+        std::uint32_t sx, std::uint32_t sy, std::uint32_t dw, std::uint32_t dh,
+        std::uint32_t ow, std::uint32_t oh, std::uint64_t* serial) {
+        (void)fbp;(void)fbw;(void)psm;(void)sx;(void)sy;(void)dw;(void)dh;(void)ow;(void)oh;(void)serial;
+        return false;
+    }
 };
+// Success returns a retained backing surface and its actual serial. Release
+// exactly once after the consumer's GPU work completes, including on shutdown.
+// Invalid parameters, missing/replaced frames and timeouts return nullptr.
+void* ZeroCopyWait(std::uint64_t* serial, std::uint32_t* width, std::uint32_t* height, int timeout_ms);
+void ZeroCopyRelease(std::uint64_t serial);
 std::unique_ptr<GsRenderer> CreateGsRenderer(Gpu& gpu, std::string* error);
 /* Where the renderer keeps what it learns between runs: a folder (the PC
    settings'), for its pipeline cache (gpu_pipeline_cache.bin) and the
@@ -323,6 +350,7 @@ std::string RendererCounters();
 /* The GPU's time on the frames' command buffers, in all (nanoseconds; 0
    where the GPU keeps no time). */
 std::uint64_t GpuBusyNanoseconds();
+double GpuWaitSeconds();   // Claude 2026-10-25: total CPU wait for the GPU (seconds)
 /* PS2HOST_GPU_PROFILE: the GPU's time since the last call, by what it did. */
 std::string GpuProfileReport();
 

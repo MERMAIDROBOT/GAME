@@ -24,6 +24,10 @@ Shared fixes, platform changes and regression tests use one PR stream. CI tests
 both targets from the same commit. The C++ workflow does not initialize the Mac
 adapter. See [PLATFORMS.md](PLATFORMS.md) for the extension contract.
 
+## Source rebuild and renderer carryforward
+
+[Source build/audit commands](CLEAN-BUILD.md) compile pinned graphs without historical objects and derive closure blockers from real link recipes. The renderer carries the October 25 Mavericks filtering, readback and VRAM coverage work. A fresh Kelly disc-to-current-app rebuild remains unproven.
+
 ## What is implemented
 
 - [Bounded VU1 dependency reports](VU-DEPENDENCIES.md), adapted from Devil Kings:

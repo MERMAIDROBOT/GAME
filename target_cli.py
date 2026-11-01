@@ -3,9 +3,11 @@ import platform
 import sys
 import pipeline
 
-CORE_COMMANDS = {'convert-disc','qualify-port','review-upstreams','oracle-check','recover-function','find-recovery-candidates','collect-runtime-targets','analyze-vu-dependencies','instruction-check','analyze-cadence','doctor','bootstrap','import','verify','inspect','analyze','translate',
+CORE_COMMANDS = {'recover-link-target','audit-abi-layouts','recover-make-plan','select-archive-sources','compare-source-objects','merge-source-graphs','recover-compile-settings','revise-source-graph','audit-archive','stage-source-graph','analyze-field-trace','audit-build','build-source','convert-disc','qualify-port','review-upstreams','oracle-check','recover-function','find-recovery-candidates','collect-runtime-targets','analyze-vu-dependencies','instruction-check','analyze-cadence','doctor','bootstrap','import','verify','inspect','analyze','translate',
                  'check-generated','prepare','status','new-profile','next-game','knowledge-plan',
                  'knowledge-add','enhancement-plan','source-package','freeze-source'}
+CORE_COMMANDS.add('import-preserved-copy')
+CORE_COMMANDS.update({'isolate-tool-sources','relocate-source-graph','amend-source-graph','capture-source-corrections','retain-source-corrections','apply-source-corrections'})
 
 
 def check_target(target,command,system=None):

@@ -25,12 +25,32 @@ def fetch(path):
     return json.loads(raw)
 
 
-def collect(repositories, *, since, until, getter=fetch):
+def pages(path, getter, limit):
+    """Bound API work; report uncertainty when the final page is full."""
+    items=[]
+    seen=set()
+    for page in range(1,limit+1):
+        batch=getter(path+'&page='+str(page))
+        if not isinstance(batch,list) or len(batch)>100:
+            raise ValueError('Invalid upstream page')
+        # A repeated full page can otherwise make an incomplete review look complete.
+        fingerprint=hashlib.sha256(json.dumps(batch,sort_keys=True).encode()).hexdigest()
+        if batch and fingerprint in seen:
+            raise ValueError('Upstream repeated a page')
+        seen.add(fingerprint)
+        items.extend(batch)
+        if len(batch)<100:return items,False,page
+    return items,True,limit
+
+
+def collect(repositories, *, since, until, getter=fetch, max_pages=10):
     start = datetime.fromisoformat(since.replace('Z','+00:00'))
     end = datetime.fromisoformat(until.replace('Z','+00:00'))
     if start.tzinfo is None or end.tzinfo is None or end<=start or end-start>timedelta(days=31):
         raise ValueError('Use a timezone-aware window of at most 31 days')
     if len(repositories)>32: raise ValueError('At most 32 repositories per review')
+    if type(max_pages) is not int or not 1<=max_pages<=10:
+        raise ValueError('Use between 1 and 10 pages per endpoint')
     results=[]
     for name in dict.fromkeys(repositories):
         if not REPOSITORY.fullmatch(name): raise ValueError('Invalid GitHub repository')
@@ -40,8 +60,8 @@ def collect(repositories, *, since, until, getter=fetch):
             # Branch names are URL-encoded; never use input as a shell command.
             from urllib.parse import quote
             head=getter('/repos/'+name+'/commits/'+quote(branch,safe=''))
-            commits=getter('/repos/'+name+'/commits?since='+quote(since,safe='')+'&until='+quote(until,safe='')+'&per_page=100')
-            releases=getter('/repos/'+name+'/releases?per_page=100')
+            commits,commits_truncated,commit_pages=pages('/repos/'+name+'/commits?since='+quote(since,safe='')+'&until='+quote(until,safe='')+'&per_page=100',getter,max_pages)
+            releases,releases_truncated,release_pages=pages('/repos/'+name+'/releases?per_page=100',getter,max_pages)
             recent=[]
             for release in releases:
                 date=release.get('published_at')
@@ -51,7 +71,8 @@ def collect(repositories, *, since, until, getter=fetch):
                 creation_is_publication_proof=False,license=(meta.get('license') or {}).get('spdx_id'),
                 head=head['sha'],head_date=head['commit']['committer']['date'],
                 commits=[dict(sha=c['sha'],date=c['commit']['committer']['date'],subject=c['commit']['message'].splitlines()[0],url=c['html_url']) for c in commits],
-                commits_truncated=len(commits)==100,releases=recent,releases_truncated=len(releases)==100,
+                commits_truncated=commits_truncated,commit_pages=commit_pages,
+                releases=recent,releases_truncated=releases_truncated,release_pages=release_pages,
                 status='review_required',source_inspected=False,locally_qualified=False))
         except (HTTPError,URLError,KeyError,ValueError) as error:
             results.append(dict(repository=name,status='unavailable',error=str(error)))

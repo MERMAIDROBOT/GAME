@@ -210,7 +210,7 @@ vec4 Sample(vec2 uv, int n, bool linear) {
 
 // A texture pack's replacement (GsRenderer::UploadReplacement): finer than
 // the GS's TW x TH, with mipmap levels of its own (levels - 1 in tex_format's
-// bits 9-11), its texels RGBA as they are (alpha 0x80 is 1.0, as the GS's). Placed
+// bits 9-12), its texels RGBA as they are (alpha 0x80 is 1.0, as the GS's). Placed
 // over the GS's texels: CLAMP's modes and region in them, k replacement
 // texels to one; filtered as the game filters, with the level the pixel's
 // footprint in the replacement's texels asks for (the GS's LOD knows only its
@@ -251,12 +251,33 @@ vec4 ReplacedLevel(vec2 r, int n, bool linear) {
 // `r`: where in level 0's texels; `footprint`: its derivatives' larger length.
 vec4 ReplacedSample(vec2 r, float footprint) {
     const uint m = p.bilinear;
-    const bool linear = (m & 2u) == 0u ? (m & 1u) != 0u : ((m >> 8) & 1u) != 0u || ((m >> 5) & 7u) >= 4u;
-    const int last = int((p.tex_format >> 9) & 7u);
+    const bool mip = (m & 2u) != 0u;
+    const uint mmin = (m >> 5) & 7u;
+    const int last = int((p.tex_format >> 9) & 15u);
     const float lod = clamp(log2(max(footprint, 1e-6)), 0.0, float(last));
+    // Magnification and minification are independent GS modes. The old OR
+    // incorrectly made one linear setting force the other, and floor() chose
+    // the wrong nearest mip. Keep derivative mips for non-mip HD replacements
+    // (the existing antialiasing enhancement), preserving their texel filter.
+    const bool linear = !mip ? (m & 1u) != 0u
+                            : footprint <= 1.0 ? ((m >> 8) & 1u) != 0u
+                                               : (mmin == 4u || mmin == 5u);
+    // Claude 2026-10-25: REPEAT/CLAMP with linear filtering - the sampler bound for it (tex_format bit 13: linear,
+    // linear between levels, repeat/clamp as the GS's) does in one fetch what ReplacedLevel does with four (eight
+    // between levels), each with a textureSize query. Nearest filtering and region modes stay exact below.
+    if ((p.tex_format & 0x2000u) != 0u && linear && !(mip && mmin == 2u)) {
+        const vec2 at = r / vec2(ReplacedSize(0));
+        const float level = footprint <= 1.0 ? 0.0 : (mip && mmin == 4u) ? min(floor(lod + 0.5), float(last)) : lod;
+        return floor(textureLod(texture_image, at, level) * 255.0 + 0.5);
+    }
+    if (footprint <= 1.0) return floor(ReplacedLevel(r, 0, linear) + 0.5);
+    if (mip && (mmin == 2u || mmin == 4u))
+        return floor(ReplacedLevel(r, min(int(floor(lod + 0.5)), last), linear) + 0.5);
     const int n = int(floor(lod));
     const vec4 c0 = ReplacedLevel(r, n, linear);
-    if (!linear || n >= last || lod == float(n)) return floor(c0 + 0.5);
+    if (n >= last || lod == float(n)) return floor(c0 + 0.5);
+    // Nearest texels can still use linear interpolation between mip levels
+    // (MMIN3); the former !linear shortcut incorrectly disabled that.
     return floor(mix(c0, ReplacedLevel(r, n + 1, linear), lod - float(n)) + 0.5);
 }
 
@@ -267,6 +288,10 @@ vec4 ReplacedSample(vec2 r, float footprint) {
 // selection, not the GPU's: the levels it picks at any internal resolution
 // (the software GS's ChooseLevel).
 vec4 Sample(vec2 uv) {
+    // Claude 2026-10-25: tex_format bit 14 (gs_renderer.cpp): bilinear, no mipmaps, REPEAT/CLAMP, the image exactly
+    // the texture - the sampler bound for it filters as the hand-written Sample(uv, 0, true) does, in one fetch.
+    if ((p.tex_format & 0x4000u) != 0u)
+        return floor(textureLod(texture_image, uv / vec2(ImageSize()), 0.0) * 255.0 + 0.5);
     const uint m = p.bilinear;
     if (!Has(kMip) || (m & 2u) == 0u) return Sample(uv, 0, Has(kLinear) && (m & 1u) != 0u);
     const int mxl = int((m >> 2) & 7u);
@@ -322,6 +347,32 @@ void main() {
             t = ReplacedSample(uv * k, sqrt(max(dot(dx, dx), dot(dy, dy))));
         } else {
             t = Sample(uv);
+        }
+        // Claude 2026-10-25: a hard alpha cut (a transparent texel beside one of alpha 24 or more, GS scale 0-128) under a bilinear sample
+        // of a 2D piece the GS drew minified (blend_ops bit 18, gs_renderer.cpp): the nearest texel instead. Two
+        // halves cut from separate textures and laid edge to edge (the wave-direction panel) each faded across the
+        // cut, and the background showed through between them at 4x - where 1x pixel centres never sampled.
+        if (((p.blend_ops >> 18) & 1u) != 0u) {
+            if (Replaced()) {
+                // Tested on the original texels' grid (the replacement's alpha at their centres): an upscaled cut
+                // fades over several of its own texels. Cut: the replacement's texel at the centre of the original
+                // texel the pixel is in - the halves meet without a gap.
+                const vec2 k = vec2(ReplacedSize(0)) / vec2(TextureSize());
+                const vec2 g0 = floor(uv - 0.5);
+                const float a00 = ReplacedTexel(int((g0.x + 0.5) * k.x), int((g0.y + 0.5) * k.y), 0, k).a;
+                const float a10 = ReplacedTexel(int((g0.x + 1.5) * k.x), int((g0.y + 0.5) * k.y), 0, k).a;
+                const float a01 = ReplacedTexel(int((g0.x + 0.5) * k.x), int((g0.y + 1.5) * k.y), 0, k).a;
+                const float a11 = ReplacedTexel(int((g0.x + 1.5) * k.x), int((g0.y + 1.5) * k.y), 0, k).a;
+                if (min(min(a00, a10), min(a01, a11)) < 1.0 && max(max(a00, a10), max(a01, a11)) >= 24.0) {
+                    t = ReplacedTexel(int((floor(uv.x) + 0.5) * k.x), int((floor(uv.y) + 0.5) * k.y), 0, k);
+                }
+            } else {
+                const ivec2 i0 = ivec2(floor(uv - 0.5));
+                const float a00 = Texel(i0.x, i0.y, 0).a, a10 = Texel(i0.x + 1, i0.y, 0).a;
+                const float a01 = Texel(i0.x, i0.y + 1, 0).a, a11 = Texel(i0.x + 1, i0.y + 1, 0).a;
+                if (min(min(a00, a10), min(a01, a11)) < 1.0 && max(max(a00, a10), max(a01, a11)) >= 24.0)
+                    t = Texel(int(floor(uv.x)), int(floor(uv.y)), 0);
+            }
         }
         vec3 product = floor(t.rgb * v.rgb / 128.0);
         if (p.tfx == 0u) {

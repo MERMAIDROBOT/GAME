@@ -132,3 +132,78 @@ def analyze_capture(profile, private, capture, name, expected_field_hz=60000/100
     output.mkdir(parents=True, exist_ok=False)
     save(output/'report.json', report)
     return report
+
+
+def analyze_field_trace(path, window_seconds=60):
+    """Native swap trace: host_ns, completed_tick, generation, ingress_sequence.
+
+    Completed stamps describe frame delivery, not pixel differences or simulation
+    updates. Never bridge startup zeros or generation transitions into a hold.
+    """
+    path=Path(path);window_seconds=finite(window_seconds)
+    if not 0 < window_seconds <= 3600 or path.stat().st_size > MAX_BYTES:
+        raise ValueError('Use a bounded field trace/window')
+    rows=[]
+    with path.open(newline='') as f:
+        for row in csv.reader(f):
+            if len(rows)>=MAX_ROWS or len(row)!=4:raise ValueError('Malformed or oversized field trace')
+            r=tuple(counter(v) for v in row)
+            if rows and r[0]<=rows[-1][0]:raise ValueError('Host timestamps must strictly increase')
+            rows.append(r)
+    if len(rows)<2:raise ValueError('Need at least two trace rows')
+    rows=[r for r in rows if r[0]>=rows[-1][0]-window_seconds*1e9]
+    if len(rows)<2:raise ValueError('Window too short')
+    holds=[];changes=0;known_ns=0;previous_change=None;resets=0
+    for a,b in zip(rows,rows[1:]):
+        if not a[1] or not b[1] or a[2]!=b[2]:
+            previous_change=None;resets+=1;continue
+        if b[1]<a[1]:raise ValueError('Completed tick regressed within one generation')
+        known_ns+=b[0]-a[0]
+        if b[1]!=a[1]:
+            changes+=1
+            if previous_change is not None:holds.append((b[0]-previous_change)/1e6)
+            previous_change=b[0]
+    swaps=[(b[0]-a[0])/1e6 for a,b in zip(rows,rows[1:])]
+    span=(rows[-1][0]-rows[0][0])/1e9
+    rate=changes/(known_ns/1e9) if known_ns else None
+    hold=distribution(holds);swap=distribution(swaps)
+    flags=[]
+    if hold and hold['p99']>50:flags.append('completed_field_delivery_hitches')
+    if swap['p99']<34 and hold and hold['p99']>50:
+        flags.append('regular_host_loop_does_not_prove_smooth_game_delivery')
+    return dict(schema=1,samples=len(rows),duration_seconds=span,host_swap_hz=(len(rows)-1)/span,
+        host_interval_ms=swap,completed_stamp_changes=changes,completed_stamp_change_hz=rate,
+        completed_hold_ms=hold,invalid_or_generation_boundaries=resets,findings=flags,
+        gameplay_verified=False,unique_pixel_fps=None,simulation_fps=None,
+        scope='Completed-field stamp transitions at host swaps; no pixel, player-mode or simulation FPS proof.')
+
+
+def analyze_surface_acquisitions(text, *, start_serial=None, end_serial=None):
+    """GPU-fence-ready acquisitions for one consumer, NOT display/game FPS."""
+    import re
+    if not isinstance(text,str) or len(text)>MAX_BYTES:raise ValueError('Select a bounded surface log')
+    for value in (start_serial,end_serial):
+        if value is not None and (type(value) is not int or value<1):raise ValueError('Invalid surface serial range')
+    if start_serial is not None and end_serial is not None and start_serial>end_serial:raise ValueError('Invalid surface serial range')
+    pattern=re.compile(r'^\[native-surface acquired\] ns=(\d+) serial=(\d+) width=(\d+) height=(\d+)$')
+    rows=[];observed=0
+    for line in text.splitlines():
+        if not line.startswith('[native-surface acquired]'):continue
+        match=pattern.fullmatch(line)
+        if not match:raise ValueError('Malformed surface acquisition record')
+        observed+=1
+        if observed>MAX_ROWS:raise ValueError('Select a bounded surface interval')
+        ns,serial,width,height=map(int,match.groups())
+        if ns<=0 or serial<=0 or not 1<=width<=16384 or not 1<=height<=16384:raise ValueError('Invalid surface acquisition dimensions or counters')
+        if (start_serial is not None and serial<start_serial) or (end_serial is not None and serial>end_serial):continue
+        if rows and (ns<=rows[-1][0] or serial<=rows[-1][1]):raise ValueError('Surface times and serials must increase for one consumer')
+        rows.append((ns,serial,width,height))
+    intervals=[(b[0]-a[0])/1e6 for a,b in zip(rows,rows[1:])]
+    duration=(rows[-1][0]-rows[0][0])/1e9 if len(rows)>1 else 0
+    return dict(schema=1,status='observed' if len(rows)>1 else 'insufficient_samples',
+        scope='GPU-fence-ready surface acquisitions before the window copy; single consumer',
+        samples=len(rows),duration_seconds=duration,acquisition_hz=(len(rows)-1)/duration if duration else None,
+        acquisition_interval_ms=distribution(intervals),intervals_over_40ms=sum(value>40 for value in intervals),
+        first_serial=rows[0][1] if rows else None,last_serial=rows[-1][1] if rows else None,
+        dimensions=sorted(set((r[2],r[3]) for r in rows)),unique_game_fps=None,monitor_presentation_hz=None,
+        gameplay_verified=False)

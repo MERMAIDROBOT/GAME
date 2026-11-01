@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "status": "isolated_source_candidate_not_compiled_or_qualified",
+  "changes": [
+    "Removed unused Granite/reference renderer device construction",
+    "Kept worker ownership, field clocks, FIFO/photo and scanout paths",
+    "Only hardware register layout types remain from paraLLEl-GS"
+  ],
+  "files": [
+    {
+      "file": "raw_backend.hpp",
+      "source_sha256": "19152c18dba3171c9094348dfb6daf997b25770c1c438b0ef9e61f109ed1f42d",
+      "candidate_sha256": "19152c18dba3171c9094348dfb6daf997b25770c1c438b0ef9e61f109ed1f42d"
+    },
+    {
+      "file": "hw_owner.hpp",
+      "source_sha256": "c79e53b396df3f40e3ad36d0f2e4e5d279af25e3a48f6d1f44b1b2991dd5ac7f",
+      "candidate_sha256": "3de6e201a13f18ceb339a302e026d540c58bc0a0a9e3ee4e98095251eb272d61"
+    },
+    {
+      "file": "queued_owner.hpp",
+      "source_sha256": "7f9181490ef05d93525b67b5babc3dc2f1c56df2953e4ceab04c1bbd60659265",
+      "candidate_sha256": "d76c2cdfbe27840d2981316fe07248361a947c8f9febdd7f741c1e70372e60b3"
+    },
+    {
+      "file": "field_publisher.hpp",
+      "source_sha256": "cbd0f6085383e30e5292e9a3a19c713a0388654b8d3fc93cad9d46138c230f81",
+      "candidate_sha256": "cbd0f6085383e30e5292e9a3a19c713a0388654b8d3fc93cad9d46138c230f81"
+    },
+    {
+      "file": "field_readiness.hpp",
+      "source_sha256": "1793119af1911390025aa3e4a13b70799b529e65e6c3e5f59722e6b587e7bdb0",
+      "candidate_sha256": "1793119af1911390025aa3e4a13b70799b529e65e6c3e5f59722e6b587e7bdb0"
+    },
+    {
+      "file": "image_stamp.hpp",
+      "source_sha256": "262f3e4916ed5025ef53aec4b0b8b51a8af0dc3050f1d2d6f710c06fcc4ce5e3",
+      "candidate_sha256": "262f3e4916ed5025ef53aec4b0b8b51a8af0dc3050f1d2d6f710c06fcc4ce5e3"
+    },
+    {
+      "file": "scanout_latch.hpp",
+      "source_sha256": "a0235608db09b97267aa86a98203058c28c636bd233a6a5cbefea97130bb1afc",
+      "candidate_sha256": "a0235608db09b97267aa86a98203058c28c636bd233a6a5cbefea97130bb1afc"
+    },
+    {
+      "file": "raw_field.hpp",
+      "source_sha256": "485ef364c30bb55bfdb6d9b3b3b2db6cb39f3d4e781e59992825a72dda862aab",
+      "candidate_sha256": "485ef364c30bb55bfdb6d9b3b3b2db6cb39f3d4e781e59992825a72dda862aab"
+    },
+    {
+      "file": "serial_queue.hpp",
+      "source_sha256": "200fd6d25b1dea452b6376e7be4bbb4626b6db00ecf0878de9f4a35934754343",
+      "candidate_sha256": "200fd6d25b1dea452b6376e7be4bbb4626b6db00ecf0878de9f4a35934754343"
+    },
+    {
+      "file": "staging.hpp",
+      "source_sha256": "267e1f4fb07142fdf3b85222686c9ca25e3e6a2cc1c04a100a09a69b1eb64c9b",
+      "candidate_sha256": "267e1f4fb07142fdf3b85222686c9ca25e3e6a2cc1c04a100a09a69b1eb64c9b"
+    },
+    {
+      "file": "gs_registers.hpp",
+      "source_sha256": "1a7fba7fad9548f570a96399c2fd50a291380f3f52d7d5ee179cb5c40f21ed44",
+      "license": "LGPL-3.0-or-later",
+      "origin": "paraLLEl-GS register layouts; original SPDX retained",
+      "candidate_sha256": "1a7fba7fad9548f570a96399c2fd50a291380f3f52d7d5ee179cb5c40f21ed44"
+    },
+    {
+      "file": "gs_register_addr.hpp",
+      "source_sha256": "c5cacb7a63783f8605bb33530af2cc76eff694c4532f38d1fed0f558b51cd70b",
+      "candidate_sha256": "c5cacb7a63783f8605bb33530af2cc76eff694c4532f38d1fed0f558b51cd70b"
+    }
+  ],
+  "gameplay_verified": false
+}

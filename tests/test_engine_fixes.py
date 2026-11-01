@@ -266,6 +266,29 @@ class TranslationAcceptanceTests(unittest.TestCase):
 
 
 class GeneratedSourceTests(unittest.TestCase):
+    def test_verified_metadata_is_excluded_consistently_in_python_and_cmake(self):
+        import shutil
+        cmake=shutil.which('cmake') or str(lab.ENV/'bin/cmake')
+        if not Path(cmake).is_file():self.skipTest('CMake unavailable')
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);generated=root/'generated';generated.mkdir()
+            for name in ['a.cpp','b.cpp']:(generated/name).write_text('void function() {}\n')
+            (generated/'._a.cpp').write_bytes(bytes.fromhex('0005160700020000')+b'metadata')
+            (generated/'._b.cpp').write_text('void legitimate_source() {}\n')
+            # Without its companion this is not verified filesystem metadata.
+            (generated/'._orphan.cpp').write_bytes(bytes.fromhex('0005160700020000'))
+            expected=lab.generated_sources(generated)
+            self.assertEqual({p.name for p in expected},{'a.cpp','b.cpp','._b.cpp','._orphan.cpp'})
+            script=root/'inventory.cmake';output=root/'inventory.txt'
+            script.write_text(f'include("{lab.ROOT}/cmake/SourceInventory.cmake")\nfile(GLOB inputs "{generated}/*.cpp")\nps2_port_filter_metadata(result ${{inputs}})\nfile(WRITE "{output}" "${{result}}")\n')
+            subprocess.run([cmake,'-P',str(script)],check=True,capture_output=True,text=True)
+            self.assertEqual(set(output.read_text().split(';')),{str(p) for p in expected})
+            (generated/'._orphan.cpp').unlink()
+            import knowledge,sdk_policy,port_checks
+            knowledge.apply_translation(generated,write=False)
+            self.assertEqual(sdk_policy.audit_generated(generated)['files_scanned'],3)
+            self.assertTrue(port_checks.audit(generated=generated)['structural_checks_passed'])
+
     def test_nested_or_unsupported_generated_cpp_fails_closed_for_every_consumer(self):
         import knowledge
         with tempfile.TemporaryDirectory() as directory:

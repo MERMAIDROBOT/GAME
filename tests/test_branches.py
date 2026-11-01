@@ -25,6 +25,33 @@ class SignedBranches(unittest.TestCase):
         text='// 0x1000: 0x25080001 addiu\nSET_GPR_S32(ctx,8,1);\n'
         self.assertEqual(branches.rewrite(text),(text,0,0))
 
+    def test_resumable_delay_slot_does_not_hide_the_owning_branch(self):
+        # Synthetic branch plus a repeated delay-slot comparison. Only the
+        # opcode-addressed branch predicate uses the EE's full signed width.
+        text='''// 0x1000: 0x05000001 bltz
+label_1004:
+if (ctx->pc == 0x1004u) {
+    // 0x1004: 0x29090000 slti (Delay Slot)
+    SET_GPR_S32(ctx,9,GPR_S32(ctx, 8) < 0);
+    goto label_1008;
+}
+const bool branch_taken_0x1000 = (GPR_S32(ctx, 8) < 0);
+// 0x1004: 0x29090000 slti (Delay Slot)
+SET_GPR_S32(ctx,9,GPR_S32(ctx, 8) < 0);
+// 0x1008: 0x00000000 nop
+'''
+        updated,count,changed=branches.rewrite(text)
+        self.assertEqual((count,changed),(1,1))
+        self.assertIn('branch_taken_0x1000 = (GPR_S64(ctx, 8) < 0)',updated)
+        self.assertEqual(updated.count('GPR_S32(ctx, 8) < 0'),2)
+        self.assertEqual(branches.rewrite(updated),(updated,1,0))
+        with self.assertRaisesRegex(ValueError,'Unrecognized'):
+            branches.rewrite(text.replace('branch_taken_0x1000 = (GPR_S32(ctx, 8)','branch_taken_0x1000 = (GPR_S32(ctx, 9)'))
+
+    def test_branch_inside_delay_slot_is_flagged_instead_of_guessed(self):
+        with self.assertRaisesRegex(ValueError,'delay slot'):
+            branches.rewrite('// 0x1000: 0x05000001 bltz (Delay Slot)\nunknown();\n')
+
     def test_translation_pipeline_corrects_and_rejects_before_any_write(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'a.cpp'

@@ -15,6 +15,7 @@
  */
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -32,6 +33,11 @@
 #include <unordered_map>
 
 #include "gpu_internal.h"
+#include "surface_leases.h"
+#if defined(__APPLE__)
+#include <IOSurface/IOSurface.h>
+#include <vulkan/vulkan_metal.h>
+#endif
 #include "gs_frag.h"
 #include "gs_frag_single.h"
 #include "gs_frag_blend.h"
@@ -160,10 +166,10 @@ constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
 
 struct Texture {
     Image image;
-    VkDescriptorSet sets[8] = {};       /* by sampler */
+    VkDescriptorSet sets[12] = {};      /* by sampler (8-11: replacements, hardware-filtered) */
     /* A texture drawn as a texture pack's replacement (UseReplacement): its
        id, 0 for none. A replacement itself (replacements_): gs.frag's
-       tex_format for it - bit 8, levels - 1 in bits 9-11 - when it was last
+       tex_format for it - bit 8, levels - 1 in bits 9-12 - when it was last
        drawn (frames, Kick's), its size in memory. */
     std::uint64_t replacement = 0;
     std::uint32_t replaced = 0;
@@ -360,7 +366,7 @@ bool SameBatch(const GsDrawState& x, const GsDrawState& y) {
            x.fix == y.fix && x.pabe == y.pabe && x.fba == y.fba)) && x.depth == y.depth &&
            (!x.depth || (x.zbp == y.zbp && x.ztst == y.ztst && x.depth_write == y.depth_write)) &&
            x.fog == y.fog && (!x.fog || x.fogcol == y.fogcol) && x.date == y.date && (!x.date || x.datm == y.datm) &&
-           x.sprite == y.sprite && x.sprite_prim == y.sprite_prim;
+           x.sprite == y.sprite && x.sprite_prim == y.sprite_prim && x.alpha_cut == y.alpha_cut;
 }
 
 class VulkanGsRenderer final : public GsRenderer {
@@ -368,6 +374,9 @@ public:
     explicit VulkanGsRenderer(VulkanGpu& gpu) : g_(gpu) {}
     ~VulkanGsRenderer() override;
     // ReadTargetFull's read-back buffer, kept between pictures (released with the renderer).
+    std::vector<std::uint32_t> ready_pixels_;
+    std::uint32_t ready_w_ = 0, ready_h_ = 0;
+    std::uint64_t ready_serial_ = 0;
     VkBuffer kept_buffer_ = VK_NULL_HANDLE;
     VkDeviceMemory kept_memory_ = VK_NULL_HANDLE;
     void* kept_mapped_ = nullptr;
@@ -378,7 +387,13 @@ public:
     bool UploadReplacement(std::uint64_t id, std::uint32_t format, std::uint32_t width, std::uint32_t height,
                            std::uint32_t levels, const std::uint8_t* data, std::size_t bytes) override;
     bool HasReplacement(std::uint64_t id) const override { return replacements_.count(id) != 0; }
-    void UseReplacement(std::uint64_t key, std::uint64_t id) override { textures_[key].replacement = id; }
+    void UseReplacement(std::uint64_t key, std::uint64_t id) override {
+        Texture& t = textures_[key];
+        if (t.replacement != id) {
+            Flush();
+            t.replacement = id;
+        }
+    }
     bool BlockCompression() const override { return g_.bc; }
     void UploadDepth(std::uint32_t zbp, std::uint32_t width, std::uint32_t height, const std::uint32_t* z) override;
     void UploadTarget(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, const std::uint32_t* pixels,
@@ -437,6 +452,26 @@ public:
                         std::uint32_t* width, std::uint32_t* height) override;
     bool ReadTexture(std::uint64_t key, std::vector<std::uint32_t>* pixels, std::uint32_t* width,
                      std::uint32_t* height) override;
+    bool ReadTargetRectAsync(std::uint32_t fbp,std::uint32_t fbw,std::uint32_t psm,std::uint32_t maxW,
+        std::uint32_t maxH,std::uint64_t serial,std::vector<std::uint32_t>* pixels,std::uint32_t* width,
+        std::uint32_t* height,std::uint64_t* done_serial) override;
+    struct AsyncRead {
+        VkBuffer buffer = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE; void* mapped = nullptr;
+        VkDeviceSize bytes = 0; VkCommandBuffer cmd = VK_NULL_HANDLE; VkFence fence = VK_NULL_HANDLE;
+        bool pending = false; std::uint64_t serial = 0, order = 0; std::uint32_t w = 0, h = 0;
+    };
+    static constexpr int kAsyncReads = 3;
+    AsyncRead async_[kAsyncReads];
+    std::uint64_t async_order_ = 0, async_requested_ = ~0ull, async_done_order_ = 0;
+    bool async_have_ = false;
+    AsyncRead* async_newest_ = nullptr;
+    std::uint64_t async_delivered_ = 0;
+    void AsyncCollect(bool wait_oldest);
+    bool BlitTargetToSurface(std::uint32_t fbp,std::uint32_t fbw,std::uint32_t psm,std::uint32_t sx,std::uint32_t sy,
+        std::uint32_t dw,std::uint32_t dh,std::uint32_t ow,std::uint32_t oh,std::uint64_t* serial) override;
+    bool ReadTargetRect(std::uint32_t fbp,std::uint32_t fbw,std::uint32_t psm,
+        std::uint32_t maxW,std::uint32_t maxH,std::vector<std::uint32_t>* pixels,
+        std::uint32_t* width,std::uint32_t* height) override;
     bool ReadImage(Image& image, std::vector<std::uint32_t>* pixels);
 
 private:
@@ -574,7 +609,7 @@ private:
     VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
     bool keep_colour_ = false;      /* ReloadKeepsColour */
-    VkSampler samplers_[8] = {};    /* bilinear << 2 | clamp_s << 1 | clamp_t */
+    VkSampler samplers_[12] = {};   /* bilinear << 2 | clamp_s << 1 | clamp_t; 8 + clamp_s << 1 | clamp_t: trilinear, all levels */
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     std::map<std::uint32_t, VkPipeline> pipelines_;
     std::uint32_t last_pipeline_key_ = ~0u;
@@ -996,6 +1031,19 @@ bool VulkanGsRenderer::Init(std::string* error) {
         sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         sci.maxLod = 0.0f;
         vkCreateSampler(g_.device, &sci, nullptr, &samplers_[i]);
+    }
+    // Claude 2026-10-25: texture-pack replacements filtered by the GPU's sampler (bilinear within a level, linear
+    // between levels, every level) - one fetch instead of gs.frag's eight texelFetch and their textureSize queries,
+    // which made replaced draws ~3x the GPU time at Mavericks.
+    for (int i = 0; i < 4; ++i) {
+        VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sci.addressModeU = (i & 2) ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sci.addressModeV = (i & 1) ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.maxLod = 16.0f;
+        vkCreateSampler(g_.device, &sci, nullptr, &samplers_[8 + i]);
     }
     VkPushConstantRange push[2] = {{VK_SHADER_STAGE_VERTEX_BIT, 0, 8},
                                    {VK_SHADER_STAGE_FRAGMENT_BIT, kFragmentOffset, sizeof(FragmentParams)}};
@@ -2109,7 +2157,8 @@ bool VulkanGsRenderer::UploadReplacement(std::uint64_t id, std::uint32_t format,
                                         VK_FORMAT_BC2_UNORM_BLOCK, VK_FORMAT_BC3_UNORM_BLOCK,
                                         VK_FORMAT_BC7_UNORM_BLOCK};
     if (format > 4 || (format != 0 && !g_.bc) || width == 0 || height == 0) return false;
-    levels = std::min(8u, std::max(1u, levels));
+    const unsigned maximum = 1u + unsigned(std::floor(std::log2(std::max(width,height))));
+    levels = std::min(13u, std::min(maximum, std::max(1u, levels)));
     // Each level's place in `data`.
     std::vector<VkBufferImageCopy> copies;
     VkDeviceSize at = 0;
@@ -2785,8 +2834,22 @@ void VulkanGsRenderer::Flush() {
             }
         }
     }
-    // The shader addresses and filters texels itself (texelFetch), as the GS does.
-    const int sampler = 3;
+    // The shader addresses and filters texels itself (texelFetch), as the GS does - except, with a replacement
+    // and REPEAT/CLAMP wrapping, through the hardware-filtered samplers (gs.frag's fast path; tex_format bit 13).
+    // PS2_PORT_HW_GS_REPLACED_HWFILTER=0: every texel by hand, as before.
+    static const bool hw_filter = [] { const char* e = std::getenv("PS2_PORT_HW_GS_REPLACED_HWFILTER"); return !(e && e[0] == '0'); }();
+    const bool replaced_hw = hw_filter && (texture->replaced & 0x100u) && state_.wms < 2 && state_.wmt < 2;
+    // Claude 2026-10-25: a texture from memory the GPU's bilinear filter reads exactly as gs.frag's by hand would -
+    // linear, no mipmaps, REPEAT/CLAMP, no format expansion, its image exactly TW x TH at 1x - through the linear
+    // samplers (gs.frag's fast path; tex_format bit 14). PS2_PORT_HW_GS_TEXTURE_HWFILTER=0: by hand, as before.
+    static const bool hw_regular = [] { const char* e = std::getenv("PS2_PORT_HW_GS_TEXTURE_HWFILTER"); return e && e[0] == '1'; }();
+    const bool regular_hw = hw_regular && state_.textured && texture != &blank_ && !(texture->replaced & 0x100u) &&
+                            !(state_.textured && state_.texture_target) && (texture->replaced & 0xFFu) == 0 &&
+                            (state_.bilinear & 1u) && !(state_.bilinear & 2u) && state_.wms < 2 && state_.wmt < 2 &&
+                            texture->image.scale == 1 && texture->image.width == (1u << state_.tw) &&
+                            texture->image.height == (1u << state_.th);
+    const int sampler = replaced_hw ? 8 | (state_.wms == 1 ? 2 : 0) | (state_.wmt == 1 ? 1 : 0)
+                      : regular_hw ? 4 | (state_.wms == 1 ? 2 : 0) | (state_.wmt == 1 ? 1 : 0) : 3;
     VkDescriptorSet set = SetFor(*texture, sampler);
     // Render to texture: the target itself, or a copy when it is also drawn into.
     Image* source = nullptr;
@@ -2877,7 +2940,12 @@ void VulkanGsRenderer::Flush() {
     params.maxv = state_.maxv;
     params.tw = state_.tw;
     params.th = state_.th;
-    params.tex_format = source ? state_.tex_format : texture->replaced;     // gs.frag's Replaced
+    params.tex_format = source ? state_.tex_format : (texture->replaced | (replaced_hw ? 0x2000u : 0u) | (regular_hw ? 0x4000u : 0u));   // gs.frag's Replaced
+    // Claude 2026-10-25: which kind of draw, for the GPU profile.
+    const int draw_kind = (texture->replaced & 0x100u) && !source ? kProfDrawReplaced
+                        : source ? kProfDrawFromTarget
+                        : !params.textured ? kProfDrawUntextured
+                        : t->scale == 1 && scale_ > 1 ? kProfDrawSmallTarget : kProfDraw;
     params.texa = (state_.ta0 & 0xFFu) | (state_.ta1 & 0xFFu) << 8 | (state_.aem ? 1u : 0u) << 16;
     params.image_size = (bound->pw() & 0xFFFFu) | bound->ph() << 16;
     params.scale = source ? source->scale : 1;
@@ -2885,6 +2953,7 @@ void VulkanGsRenderer::Flush() {
                        std::uint32_t(state_.d) << 6;
     if (state_.textured && t->scale > 1) params.blend_ops |= (t->scale & 0xFFu) << 8;
     if (Is16Bit(state_.psm)) params.blend_ops |= 1u << 16;
+    if (state_.alpha_cut && t->scale > 1) params.blend_ops |= 1u << 18;   // gs.frag: hard alpha cuts sampled nearest
     if (state_.fba) params.blend_ops |= 1u << 17;             // gs.frag: FBA, the written alpha's top bit set    // gs.frag: colour cut to five bits a channel
     const std::uint32_t count = std::uint32_t(pending_.size());
     static int complaints = 0;
@@ -3046,7 +3115,7 @@ void VulkanGsRenderer::Flush() {
                                            sizeof params, &params);
                         ++g_draws;
                         vkCmdDraw(cmd, count, 1, first, 0);
-                        g_.Mark(cmd, kProfDraw);
+                        g_.Mark(cmd, draw_kind);
                     }
                 }
             }
@@ -3125,11 +3194,17 @@ bool VulkanGsRenderer::ReadTexture(std::uint64_t key, std::vector<std::uint32_t>
 bool VulkanGsRenderer::ReadTargetFull(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm,
                                       std::vector<std::uint32_t>* pixels, std::uint32_t* width,
                                       std::uint32_t* height) {
+    return ReadTargetRect(fbp,fbw,psm,0,0,pixels,width,height);
+}
+bool VulkanGsRenderer::ReadTargetRect(std::uint32_t fbp,std::uint32_t fbw,std::uint32_t psm,
+    std::uint32_t maxW,std::uint32_t maxH,std::vector<std::uint32_t>* pixels,
+    std::uint32_t* width,std::uint32_t* height) {
     Flush();
     auto found = targets_.find(Key{fbp, fbw, psm});
     if (found == targets_.end()) return false;
     Image& t = found->second;
-    const VkDeviceSize bytes = VkDeviceSize(t.pw()) * t.ph() * 4;
+    const std::uint32_t rw=maxW?std::min(maxW,t.pw()):t.pw(),rh=maxH?std::min(maxH,t.ph()):t.ph();
+    const VkDeviceSize bytes = VkDeviceSize(rw) * rh * 4;
     // Claude 2026-10-20: one read-back buffer kept (grown when needed) - a 16 MB host buffer made and freed
     // each picture at 4x was most of a picture's 19 ms. PS2_PORT_HW_GS_READBACK_CACHE=0: a buffer each time.
     static const bool keep = [] { const char* e = std::getenv("PS2_PORT_HW_GS_READBACK_CACHE"); return !(e && e[0] == '0'); }();
@@ -3153,14 +3228,14 @@ bool VulkanGsRenderer::ReadTargetFull(std::uint32_t fbp, std::uint32_t fbw, std:
                    VK_PIPELINE_STAGE_TRANSFER_BIT);
         VkBufferImageCopy copy{};
         copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        copy.imageExtent = {t.pw(), t.ph(), 1};
+        copy.imageExtent = {rw, rh, 1};
         vkCmdCopyImageToBuffer(cmd, t.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &copy);
         g_.Mark(cmd, kProfReadback);
     }, "a target read-back");
     const std::uint32_t* from = static_cast<const std::uint32_t*>(mapped);
-    pixels->assign(from, from + std::size_t(t.pw()) * t.ph());
-    *width = t.pw();
-    *height = t.ph();
+    pixels->assign(from, from + std::size_t(rw) * rh);
+    *width = rw;
+    *height = rh;
     if (!keep) {
         vkUnmapMemory(g_.device, memory);
         vkDestroyBuffer(g_.device, buffer, nullptr);
@@ -3168,6 +3243,253 @@ bool VulkanGsRenderer::ReadTargetFull(std::uint32_t fbp, std::uint32_t fbw, std:
     }
     return true;
 }
+
+// Claude 2026-10-25: asynchronous scanout read-back (see GsRenderer::ReadTargetRectAsync). Each request records the
+// copy into a command buffer of its own, submitted after the frame's work (same queue: its barrier orders it after
+// every earlier draw) with a fence of its own, and returns the newest finished copy. Three in flight at most; the
+// oldest is waited for only when all three are busy. PS2_PORT_HW_GS_ASYNC_READBACK=0: synchronous, as before.
+void VulkanGsRenderer::AsyncCollect(bool wait_oldest) {
+    if (wait_oldest) {
+        AsyncRead* oldest = nullptr;
+        for (AsyncRead& r : async_) if (r.pending && (!oldest || r.order < oldest->order)) oldest = &r;
+        if (oldest) vkWaitForFences(g_.device, 1, &oldest->fence, VK_TRUE, UINT64_MAX);
+    }
+    for (AsyncRead& r : async_)
+        if (r.pending && vkGetFenceStatus(g_.device, r.fence) == VK_SUCCESS) {
+            r.pending = false;
+            if (r.order > async_done_order_) { async_done_order_ = r.order; async_newest_ = &r; }
+        }
+}
+
+bool VulkanGsRenderer::ReadTargetRectAsync(std::uint32_t fbp,std::uint32_t fbw,std::uint32_t psm,std::uint32_t maxW,
+    std::uint32_t maxH,std::uint64_t serial,std::vector<std::uint32_t>* pixels,std::uint32_t* width,
+    std::uint32_t* height,std::uint64_t* done_serial) {
+    static const bool on = [] { const char* e = std::getenv("PS2_PORT_HW_GS_ASYNC_READBACK"); return !(e && e[0] == '0'); }();
+    if (!on) { *done_serial = serial; return ReadTargetRect(fbp,fbw,psm,maxW,maxH,pixels,width,height); }
+    AsyncCollect(false);
+    // The newest finished copy straight into the caller's pixels (one copy, only when it is new), before its slot
+    // can be taken again below.
+    auto deliver = [&] {
+        if (async_newest_ && async_done_order_ > async_delivered_) {
+            const AsyncRead& r = *async_newest_;
+            pixels->assign(static_cast<const std::uint32_t*>(r.mapped), static_cast<const std::uint32_t*>(r.mapped) + std::size_t(r.w) * r.h);
+            ready_w_ = r.w; ready_h_ = r.h; ready_serial_ = r.serial; async_delivered_ = async_done_order_; async_have_ = true;
+        }
+    };
+    deliver();
+    if (serial != async_requested_) {
+        auto found = targets_.find(Key{fbp, fbw, psm});
+        if (found == targets_.end()) return false;
+        Image& t = found->second;
+        const std::uint32_t rw=maxW?std::min(maxW,t.pw()):t.pw(),rh=maxH?std::min(maxH,t.ph()):t.ph();
+        const VkDeviceSize bytes = VkDeviceSize(rw) * rh * 4;
+        AsyncRead* slot = nullptr;
+        for (AsyncRead& r : async_) if (!r.pending) { slot = &r; break; }
+        if (!slot) { AsyncCollect(true); deliver(); for (AsyncRead& r : async_) if (!r.pending) { slot = &r; break; } }
+        if (!slot) return false;
+        if (!slot->fence) {
+            VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            if (vkCreateFence(g_.device, &fi, nullptr, &slot->fence) != VK_SUCCESS) return false;
+            VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            ai.commandPool = g_.pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+            if (vkAllocateCommandBuffers(g_.device, &ai, &slot->cmd) != VK_SUCCESS) return false;
+        }
+        if (slot->bytes < bytes) {
+            if (slot->buffer) { vkUnmapMemory(g_.device, slot->memory); vkDestroyBuffer(g_.device, slot->buffer, nullptr); vkFreeMemory(g_.device, slot->memory, nullptr); slot->buffer = VK_NULL_HANDLE; }
+            if (!Buffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &slot->buffer, &slot->memory, &slot->mapped)) { slot->bytes = 0; return false; }
+            slot->bytes = bytes;
+        }
+        Flush();                                    // the frame's draws go first (no wait)
+        g_.Flush();
+        vkResetCommandBuffer(slot->cmd, 0);
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(slot->cmd, &bi);
+        Transition(slot->cmd, t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {rw, rh, 1};
+        vkCmdCopyImageToBuffer(slot->cmd, t.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slot->buffer, 1, &copy);
+        VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(slot->cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        vkEndCommandBuffer(slot->cmd);
+        vkResetFences(g_.device, 1, &slot->fence);
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount = 1; si.pCommandBuffers = &slot->cmd;
+        bool ok;
+        { std::lock_guard<std::mutex> hold(g_queue_lock); ok = vkQueueSubmit(g_.queue, 1, &si, slot->fence) == VK_SUCCESS; }
+        if (!ok) return false;
+        slot->pending = true; slot->serial = serial; slot->order = ++async_order_; slot->w = rw; slot->h = rh;
+        async_requested_ = serial;
+        if (!async_have_) { AsyncCollect(true); deliver(); }      // the very first picture: wait once
+    }
+    if (!async_have_) return false;
+    *width = ready_w_; *height = ready_h_; *done_serial = ready_serial_;   // *pixels: as delivered (unchanged if not new)
+    return true;
+}
+
+#if defined(__APPLE__)
+// Claude 2026-10-26: zero-copy presentation. The displayed picture goes to the window without leaving the GPU: a blit
+// (the scanout crop, rows copied or each shown twice in field mode, R8G8B8A8 -> B8G8R8A8) into one of four
+// IOSurfaces this device writes through VK_EXT_metal_objects, and the window's OpenGL samples the same memory.
+// Replaces the read-back, the plugin's row copy, the latch copy and the window upload (four 14 MB copies a picture
+// at 4x). The window side takes a finished picture (ZeroCopyWait, waiting on its fence) and gives it back when its own
+// GPU copy is done (ZeroCopyRelease); a held picture is never written. Any thread: the ring has its own lock.
+namespace {
+struct ZcSlot {
+    std::shared_ptr<void> surface; VkImage image = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE; VkFence fence = VK_NULL_HANDLE;
+    std::uint32_t w = 0, h = 0; std::uint64_t serial = 0; bool pending = false;
+};
+struct ZcRing {
+    std::mutex lock; VkDevice device = VK_NULL_HANDLE; ZcSlot slots[12]; SurfaceLeases leases;
+};
+// Process-lifetime metadata avoids static destruction-order races with the
+// bridge's renderer. Renderer destruction still frees every Vulkan object;
+// balanced consumer releases free the independently retained IOSurfaces.
+ZcRing& g_zc = *new ZcRing;
+IOSurfaceRef MakeSurface(std::uint32_t w, std::uint32_t h) {
+    const int iw = int(w), ih = int(h), bpe = 4, format = 'BGRA';
+    CFNumberRef nw = CFNumberCreate(nullptr, kCFNumberIntType, &iw), nh = CFNumberCreate(nullptr, kCFNumberIntType, &ih);
+    CFNumberRef nb = CFNumberCreate(nullptr, kCFNumberIntType, &bpe), nf = CFNumberCreate(nullptr, kCFNumberIntType, &format);
+    const void* keys[] = {kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement, kIOSurfacePixelFormat};
+    const void* values[] = {nw, nh, nb, nf};
+    CFDictionaryRef d = CFDictionaryCreate(nullptr, keys, values, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    IOSurfaceRef surface = IOSurfaceCreate(d);
+    CFRelease(d); CFRelease(nw); CFRelease(nh); CFRelease(nb); CFRelease(nf);
+    return surface;
+}
+void ZcFree(VkDevice device, ZcSlot& z) {
+    if (z.image) vkDestroyImage(device, z.image, nullptr);
+    if (z.memory) vkFreeMemory(device, z.memory, nullptr);
+    z.surface.reset();
+    z.image = VK_NULL_HANDLE; z.memory = VK_NULL_HANDLE; z.w = z.h = 0;
+}
+}  // namespace
+
+void* ZcWait(std::uint64_t* serial, std::uint32_t* width, std::uint32_t* height, int timeout_ms) {
+    if (!serial || !width || !height || timeout_ms < 0 || timeout_ms > 5000) return nullptr;
+    std::lock_guard<std::mutex> hold(g_zc.lock);
+    if (!g_zc.device) return nullptr;
+    ZcSlot* selected = selectSurfaceSlot(g_zc.slots,*serial);
+    if (!selected) return nullptr;
+    // Keep teardown and slot reuse excluded throughout the fence wait. The
+    // consumer then owns a surface reference independent of Vulkan resources.
+    if (selected->pending && vkWaitForFences(g_zc.device, 1, &selected->fence, VK_TRUE,
+            std::uint64_t(timeout_ms) * 1000000ull) != VK_SUCCESS) return nullptr;
+    if (!g_zc.leases.hold(selected->serial, selected->surface)) return nullptr;
+    *serial = selected->serial; *width = selected->w; *height = selected->h;
+    return selected->surface.get();
+}
+
+void ZcRelease(std::uint64_t serial) {
+    std::lock_guard<std::mutex> hold(g_zc.lock);
+    g_zc.leases.release(serial);
+}
+
+bool VulkanGsRenderer::BlitTargetToSurface(std::uint32_t fbp,std::uint32_t fbw,std::uint32_t psm,std::uint32_t sx,
+    std::uint32_t sy,std::uint32_t dw,std::uint32_t dh,std::uint32_t ow,std::uint32_t oh,std::uint64_t* serial) {
+    if (!serial || !g_.metal_objects || !ow || !oh || ow > 16384 || oh > 16384) return false;
+    // DrawTriangles batches may not have created this target yet. Finish the
+    // batch before looking it up, as the pixel readback path already does.
+    Flush();
+    auto found = targets_.find(Key{fbp, fbw, psm});
+    if (found == targets_.end()) return false;
+    Image& t = found->second;
+    if (!dw || !dh || sx > t.pw() || sy > t.ph() || dw > t.pw()-sx || dh > t.ph()-sy) return false;
+    g_.Flush();
+    std::lock_guard<std::mutex> ringLock(g_zc.lock);
+    if (g_zc.device && g_zc.device != g_.device) return false;
+    ZcSlot* z = nullptr;
+    {
+        g_zc.device = g_.device;
+        // Oldest completed unleased slot. Allocate on demand within a bounded
+        // pool covering eight paced fields, the retained field/window, and slack.
+        // Exhaustion falls back to pixels instead of overwriting a live payload.
+        for (ZcSlot& s : g_zc.slots) {
+            if (g_zc.leases.held(s.serial)) continue;
+            if (s.pending && vkGetFenceStatus(g_.device, s.fence) != VK_SUCCESS) continue;
+            if (!z || s.serial < z->serial) z = &s;
+        }
+        if (!z) return false;
+        z->pending = false;
+        z->serial = 0;                  // not to be taken while it is rewritten
+    }
+    if (z->w != ow || z->h != oh) {
+        ZcFree(g_.device, *z);
+        z->surface = std::shared_ptr<void>(MakeSurface(ow, oh), [](void* surface) { if (surface) CFRelease(surface); });
+        if (!z->surface) return false;
+        VkImportMetalIOSurfaceInfoEXT import{VK_STRUCTURE_TYPE_IMPORT_METAL_IO_SURFACE_INFO_EXT};
+        import.ioSurface = static_cast<IOSurfaceRef>(z->surface.get());
+        VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ci.pNext = &import;
+        ci.imageType = VK_IMAGE_TYPE_2D; ci.format = VK_FORMAT_B8G8R8A8_UNORM; ci.extent = {ow, oh, 1};
+        ci.mipLevels = 1; ci.arrayLayers = 1; ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(g_.device, &ci, nullptr, &z->image) != VK_SUCCESS) { ZcFree(g_.device, *z); return false; }
+        VkMemoryRequirements req;
+        vkGetImageMemoryRequirements(g_.device, z->image, &req);
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.allocationSize = req.size;
+        mai.memoryTypeIndex = g_.FindMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (vkAllocateMemory(g_.device, &mai, nullptr, &z->memory) != VK_SUCCESS ||
+            vkBindImageMemory(g_.device, z->image, z->memory, 0) != VK_SUCCESS) { ZcFree(g_.device, *z); return false; }
+        z->w = ow; z->h = oh;
+        static int told = 0;
+        if (told++ < 4) std::fprintf(stderr, "[claude-hwgs] zero-copy picture %ux%u (IOSurface %u)\n", ow, oh, unsigned(IOSurfaceGetID(static_cast<IOSurfaceRef>(z->surface.get()))));
+    }
+    if (!z->fence) {
+        VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (vkCreateFence(g_.device, &fi, nullptr, &z->fence) != VK_SUCCESS) return false;
+    }
+    if (!z->cmd) {
+        VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        ai.commandPool = g_.pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(g_.device, &ai, &z->cmd) != VK_SUCCESS) return false;
+    }
+    const auto nextSerial = g_zc.leases.nextSerial();
+    if (!nextSerial || vkResetCommandBuffer(z->cmd, 0) != VK_SUCCESS) return false;
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(z->cmd, &bi) != VK_SUCCESS) return false;
+    Transition(z->cmd, t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.srcAccessMask = 0; b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = z->image; b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(z->cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    VkImageBlit blit{};
+    blit.srcSubresource = blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.srcOffsets[0] = {int(sx), int(sy), 0}; blit.srcOffsets[1] = {int(sx + dw), int(sy + dh), 1};
+    blit.dstOffsets[0] = {0, 0, 0}; blit.dstOffsets[1] = {int(ow), int(oh), 1};
+    vkCmdBlitImage(z->cmd, t.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, z->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+    vkCmdPipelineBarrier(z->cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    g_.Mark(z->cmd, kProfReadback);
+    if (vkEndCommandBuffer(z->cmd) != VK_SUCCESS || vkResetFences(g_.device, 1, &z->fence) != VK_SUCCESS) return false;
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1; si.pCommandBuffers = &z->cmd;
+    // Publication owns one lease before another field can recycle this slot.
+    // RawField releases it after async/pacing consumers drop that payload.
+    if (!g_zc.leases.hold(nextSerial,z->surface)) return false;
+    bool ok;
+    { std::lock_guard<std::mutex> hold(g_queue_lock); ok = vkQueueSubmit(g_.queue, 1, &si, z->fence) == VK_SUCCESS; }
+    if (!ok) {g_zc.leases.release(nextSerial);return false;}
+    z->pending = true; z->serial = nextSerial;
+    *serial = z->serial;
+    return true;
+}
+
+#else
+bool VulkanGsRenderer::BlitTargetToSurface(std::uint32_t, std::uint32_t, std::uint32_t,
+    std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t*) {
+    return false;
+}
+#endif
 
 bool VulkanGsRenderer::ReadTarget(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm,
                                   std::vector<std::uint32_t>* pixels, std::uint32_t* width, std::uint32_t* height) {
@@ -3205,6 +3527,27 @@ bool VulkanGsRenderer::ReadTarget(std::uint32_t fbp, std::uint32_t fbw, std::uin
 }
 
 VulkanGsRenderer::~VulkanGsRenderer() {
+#if defined(__APPLE__)
+    {
+        std::lock_guard<std::mutex> hold(g_zc.lock);
+        if (g_zc.device == g_.device) {
+        for (ZcSlot& z : g_zc.slots) {
+            if (z.pending) vkWaitForFences(g_.device, 1, &z.fence, VK_TRUE, UINT64_MAX);
+            ZcFree(g_.device, z);
+            if (z.fence) vkDestroyFence(g_.device, z.fence, nullptr);
+            if (z.cmd) vkFreeCommandBuffers(g_.device, g_.pool, 1, &z.cmd);
+            z = ZcSlot{};
+        }
+        g_zc.device = VK_NULL_HANDLE;
+        }
+    }
+#endif
+    for (AsyncRead& r : async_) {
+        if (r.pending) vkWaitForFences(g_.device, 1, &r.fence, VK_TRUE, UINT64_MAX);
+        if (r.buffer) { vkUnmapMemory(g_.device, r.memory); vkDestroyBuffer(g_.device, r.buffer, nullptr); vkFreeMemory(g_.device, r.memory, nullptr); }
+        if (r.fence) vkDestroyFence(g_.device, r.fence, nullptr);
+        if (r.cmd) vkFreeCommandBuffers(g_.device, g_.pool, 1, &r.cmd);
+    }
     if (kept_buffer_) {
         vkDeviceWaitIdle(g_.device);
         vkUnmapMemory(g_.device, kept_memory_);
@@ -3283,11 +3626,13 @@ VulkanGsRenderer::~VulkanGsRenderer() {
 }  // namespace
 
 std::uint64_t GpuBusyNanoseconds() { return g_gpu_ns.load(); }
+double GpuWaitSeconds() { return g_wait_seconds; }
 
 std::string GpuProfileReport() {
     static const char* const kNames[kProfKinds] = {"other", "draws", "swizzle", "image<->linear", "memory copies",
                                                    "feedback copies", "decodes", "uploads", "clears", "DATE",
-                                                   "read-backs"};
+                                                   "read-backs", "draws(replaced)", "draws(from target)",
+                                                   "draws(1x target)", "draws(untextured)"};
     std::uint64_t total = 0, ns[kProfKinds];
     for (int i = 0; i < kProfKinds; ++i) total += ns[i] = g_profile_ns[i].exchange(0);
     if (!total) return "";
@@ -3334,6 +3679,21 @@ std::unique_ptr<GsRenderer> CreateGsRenderer(Gpu& gpu, std::string* error) {
     auto renderer = std::make_unique<VulkanGsRenderer>(static_cast<VulkanGpu&>(gpu));
     if (!renderer->Init(error)) return nullptr;
     return renderer;
+}
+
+void* ZeroCopyWait(std::uint64_t* serial, std::uint32_t* width, std::uint32_t* height, int timeout_ms) {
+#if defined(__APPLE__)
+    return ZcWait(serial, width, height, timeout_ms);
+#else
+    (void)serial; (void)width; (void)height; (void)timeout_ms; return nullptr;
+#endif
+}
+void ZeroCopyRelease(std::uint64_t serial) {
+#if defined(__APPLE__)
+    ZcRelease(serial);
+#else
+    (void)serial;
+#endif
 }
 
 }  // namespace ps2gpu

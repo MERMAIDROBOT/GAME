@@ -10,7 +10,7 @@ inline Chain make(unsigned width,unsigned height,const std::vector<std::uint8_t>
  Chain result;result.pixels=base;
  if(!width||!height||width>4096||height>4096||base.size()!=std::size_t(width)*height*4)return result;
  std::size_t source=0;
- while(result.levels<8&&(width>1||height>1)) {
+ while(result.levels<13&&(width>1||height>1)) {
   const unsigned w=std::max(1u,width/2),h=std::max(1u,height/2);
   const std::size_t output=result.pixels.size();result.pixels.resize(output+std::size_t(w)*h*4);
   for(unsigned y=0;y<h;y++)for(unsigned x=0;x<w;x++) {
