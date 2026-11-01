@@ -10,4 +10,5 @@ class MacSurfacePresenter(unittest.TestCase):
    for args in [common+['-dynamiclib',str(ROOT/'tests/mac_surface_producer.cpp'),'-o',str(producer)],common+['-I'+str(ROOT/'runtime/presentation'),str(ROOT/'tests/mac_surface_presenter.cpp'),'-o',str(exe)]]:
     result=subprocess.run(args,capture_output=True,text=True,timeout=30);self.assertEqual(result.returncode,0,result.stderr)
    result=subprocess.run([str(exe),str(producer)],capture_output=True,text=True,timeout=30)
+   if result.returncode==77:self.skipTest('no accelerated OpenGL renderer on this host')
    self.assertEqual(result.returncode,0,result.stdout+result.stderr)

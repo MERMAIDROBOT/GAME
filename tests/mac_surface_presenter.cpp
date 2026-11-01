@@ -1,11 +1,13 @@
 #include "mac_surface_presenter.hpp"
 #include <cassert>
+#include <cstdio>
 #include <vector>
 int main(int argc,char**argv){
     assert(argc==2);
     CGLPixelFormatAttribute attributes[]={kCGLPFAAccelerated,kCGLPFAAllowOfflineRenderers,kCGLPFAOpenGLProfile,static_cast<CGLPixelFormatAttribute>(kCGLOGLPVersion_3_2_Core),static_cast<CGLPixelFormatAttribute>(0)};
     CGLPixelFormatObj format=nullptr;GLint count=0;
-    assert(CGLChoosePixelFormat(attributes,&format,&count)==kCGLNoError&&format);
+    // No accelerated OpenGL renderer (GPU-less CI virtual machines): report "skipped" (77), not a presenter failure.
+    if(CGLChoosePixelFormat(attributes,&format,&count)!=kCGLNoError||!format){std::fprintf(stderr,"no accelerated OpenGL pixel format\n");return 77;}
     ps2port::MacSurfacePresenter presenter;
     for(int generation=0;generation<2;++generation){
         CGLContextObj context=nullptr;assert(CGLCreateContext(format,nullptr,&context)==kCGLNoError);assert(CGLSetCurrentContext(context)==kCGLNoError);
