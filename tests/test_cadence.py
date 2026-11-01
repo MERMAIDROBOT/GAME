@@ -108,3 +108,17 @@ class CadenceTests(unittest.TestCase):
             self.assertEqual(result.returncode,1)
             self.assertNotIn('Traceback',result.stderr)
             self.assertIn('counters',result.stderr)
+
+
+class SurfaceAcquisitions(unittest.TestCase):
+ def test_ready_acquisitions_do_not_claim_display_or_simulation_fps(self):
+  text='\n'.join('[native-surface acquired] ns=%d serial=%d width=1536 height=1344'%(1000000000+i*20000000,i+1) for i in range(4))
+  from cadence import analyze_surface_acquisitions
+  report=analyze_surface_acquisitions(text,start_serial=2,end_serial=4)
+  self.assertAlmostEqual(report['acquisition_hz'],50);self.assertEqual(report['samples'],3)
+  self.assertIsNone(report['unique_game_fps']);self.assertIsNone(report['monitor_presentation_hz']);self.assertFalse(report['gameplay_verified'])
+ def test_surface_reset_malformed_and_dimension_errors_are_rejected(self):
+  from cadence import analyze_surface_acquisitions
+  first='[native-surface acquired] ns=1000 serial=2 width=100 height=100\n'
+  for rest in ['[native-surface acquired] ns=2000 serial=1 width=100 height=100','[native-surface acquired] ns=2000 serial=3 width=0 height=100','[native-surface acquired] broken']:
+   with self.assertRaises(ValueError):analyze_surface_acquisitions(first+rest)

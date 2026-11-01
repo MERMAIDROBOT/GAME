@@ -8,6 +8,7 @@ import subprocess
 import time
 
 import rawgs
+from compute_slot import exclusive,assert_idle
 from pipeline import WORK, digest, save
 
 
@@ -29,6 +30,7 @@ def pinned_file(spec):
     return path.resolve()
 
 
+@exclusive('graphics-replay')
 def run_replay(profile, private, capture, backend, name, batch='on', timeout=300):
     private = Path(private).resolve()
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,79}', name):
@@ -45,13 +47,16 @@ def run_replay(profile, private, capture, backend, name, batch='on', timeout=300
     if not os.access(executable, os.X_OK):
         raise ValueError('Replay backend is not executable')
     # Validate before starting a GPU process, including unsupported ingress records.
+    capture_hash = digest(capture)
+    backend_hash = digest(backend)
     validation = rawgs.validate(capture)
+    if digest(capture)!=capture_hash or digest(backend)!=backend_hash:
+        raise ValueError('Replay input changed during validation')
     if not validation['replayable']:
         raise ValueError('Capture contains unqualified or incomplete ingress')
-    capture_hash = digest(capture)
     output = private / 'logs/replays' / name
-    # Advisory lock covers this replay command across title profiles. Other tools
-    # still require an explicit process audit; this is not a global GPU scheduler.
+    # Keep the legacy replay lock too. The enclosing shared engine slot and
+    # process guard also prevent overlaps with builds, games and foreign renders.
     WORK.mkdir(parents=True, exist_ok=True)
     with (WORK / '.raw-gs-replay.lock').open('a') as lock:
         try:
@@ -62,14 +67,17 @@ def run_replay(profile, private, capture, backend, name, batch='on', timeout=300
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError('Another pipeline graphics replay is active') from None
+        assert_idle()
+        if digest(capture)!=capture_hash or digest(backend)!=backend_hash:
+            raise ValueError('Replay input changed before execution')
         output.mkdir(parents=True, exist_ok=False)
         report = {'status': 'running', 'local_only': True, 'profile_id': profile['id'],
                   'capture_sha256': capture_hash, 'capture_validation': validation,
-                  'backend_manifest_sha256': digest(backend), 'backend': spec,
+                  'backend_manifest_sha256': backend_hash, 'backend': spec,
                   'batch': batch, 'timeout_seconds': timeout,
                   'scope': 'Terminal VRAM differential only. No scanout history, original-hardware fidelity, gameplay or FPS acceptance.'}
         save(output / 'report.json', report)
-        env = {k: v for k, v in os.environ.items() if not k.startswith('PS2_PORT_PRIVATE_')}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('PS2_PORT_', 'PS2X_'))}
         env['PS2_PORT_PRIVATE_GIF_BATCH'] = '1' if batch == 'on' else '0'
         started = time.monotonic()
         try:
@@ -81,6 +89,10 @@ def run_replay(profile, private, capture, backend, name, batch='on', timeout=300
             report['returncode'] = result.returncode
             if result.returncode:
                 raise RuntimeError('Replay process failed; inspect private process.log')
+            if digest(capture)!=capture_hash or digest(backend)!=backend_hash:
+                raise ValueError('Replay input changed during execution')
+            pinned_file(spec['executable'])
+            pinned_file(spec['moltenvk'])
             native = json.loads((output / 'result.json').read_text())
             snapshot = output / 'vram.bin'
             if not isinstance(native, dict) or native.get('stage') != 'complete' or native.get('status') not in ('passed', 'pixel_mismatch'):

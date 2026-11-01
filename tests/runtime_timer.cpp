@@ -28,7 +28,9 @@ static uint32_t expected = 0;
 static bool finished = false;
 
 void second(uint8_t *, R5900Context *ctx, PS2Runtime *runtime) {
-    if (ctx->cop0_count != expected + 8u)
+    if (std::getenv("PS2_PORT_HOST_VSYNC_TEST") && ctx->cop0_count < expected + 1000000u)
+        throw std::runtime_error("Host-paced display fields left EE/IOP cycle accounting behind native work");
+    if (!std::getenv("PS2_PORT_HOST_VSYNC_TEST") && ctx->cop0_count != expected + 8u)
         throw std::runtime_error("Count did not persist across guest dispatch");
     if (std::getenv("PS2_PORT_HOST_VSYNC_TEST") && runtime->eeScheduler().currentVSyncTick() < 2u)
         throw std::runtime_error("Display clock stalled behind slow guest cycle accounting");
@@ -59,7 +61,42 @@ void first(uint8_t *, R5900Context *ctx, PS2Runtime *runtime) {
 }
 
 
+// Nested native callbacks must not invalidate the context consumed by dispatch.
+static unsigned nestedCallbacks = 0;
+static bool nestedEntered = false, nestedFinished = false;
+static constexpr uint32_t nestedCount = 0x10203040u;
+void nestedLeaf(uint8_t *, R5900Context *ctx, PS2Runtime *) {
+    if (ctx->cop0_count < nestedCount + 8u)
+        throw std::runtime_error("Nested callback lost its parent's Count write");
+    ++nestedCallbacks;
+    ctx->pc = 0;
+}
+void nestedParent(uint8_t *, R5900Context *ctx, PS2Runtime *runtime) {
+    ctx->pc = 0;
+    ctx->cop0_count = nestedCount;
+    GuestInvocation child{};
+    child.kind = GuestInvocationKind::HleCall;
+    child.context.pc = 0x100008u;
+    runtime->eeScheduler().invokeCurrent(std::move(child));
+}
+void nestedStart(uint8_t *, R5900Context *ctx, PS2Runtime *runtime) {
+    if (nestedEntered) {
+        if (nestedCallbacks != 1u || ctx->cop0_count < nestedCount + 8u)
+            throw std::runtime_error("Nested callback did not unwind once with Count preserved");
+        nestedFinished = true;
+        runtime->requestStop();
+        return;
+    }
+    nestedEntered = true;
+    ctx->pc = 0x100000u;
+    GuestInvocation parent{};
+    parent.kind = GuestInvocationKind::HleCall;
+    parent.context.pc = 0x100004u;
+    runtime->eeScheduler().invokeCurrent(std::move(parent));
+}
+
 static unsigned audioCallbackCount = 0;
+static bool audioReturnValid = true;
 static std::unordered_set<uint32_t> callbackRecords;
 void audioCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *) {
     const uint32_t addr = getRegU32(ctx, 5) & PS2_RAM_MASK;
@@ -78,8 +115,19 @@ void audioCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *) {
 }
 void audioEnd(uint8_t *, R5900Context *ctx, PS2Runtime *runtime) {
     if (!audioCallbackCount) throw std::runtime_error("MPEG audio callback was silently skipped with exhausted guest heap");
+    if (getRegU32(ctx,2) != 21u) {
+        audioReturnValid = false;
+        throw std::runtime_error("MPEG callback transfer lost consumed-byte return value");
+    }
     if (audioCallbackCount < 500u) ctx->pc = 0x100000u;
     else runtime->requestStop();
+}
+// Match the SDK wrapper emitted by PS2Recompiler: establish the return PC
+// from guest ra before a synchronous service can transfer to a callback.
+void audioGuestDemux(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
+    ctx->pc = getRegU32(ctx, 31);
+    if (audioCallbackCount & 1u) ps2_stubs::sceMpegDemuxPssRing(rdram, ctx, runtime);
+    else ps2_stubs::sceMpegDemuxPss(rdram, ctx, runtime);
 }
 void audioStart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
     runtime->eeScheduler().setupCurrentThread(0x1ff8000u, 0x8000u, 0u);
@@ -99,13 +147,18 @@ void audioStart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
     SET_GPR_U32(ctx, 4, 0x120000u);
     SET_GPR_U32(ctx, 5, 0x130000u);
     SET_GPR_U32(ctx, 6, sizeof(packet));
-    for (unsigned n = 0; n < 20u; ++n) {
-        SET_GPR_U32(ctx, 4, 0x120000u);
-        SET_GPR_U32(ctx, 5, 0x130000u);
-        SET_GPR_U32(ctx, 6, sizeof(packet));
-        ps2_stubs::sceMpegDemuxPss(rdram, ctx, runtime);
-    }
-    ctx->pc = 0x100004u;
+    // Alternate linear/ring service calls. Both may transfer to callbacks
+    // without returning through the service's C++ epilogue.
+    SET_GPR_U32(ctx, 7, 0x130000u);
+    const uint32_t ringSize=64u;
+    SET_GPR_U32(ctx, 8, ringSize);
+    std::memcpy(rdram + ((getRegU32(ctx,29)+16u)&PS2_RAM_MASK),&ringSize,sizeof(ringSize));
+    SET_GPR_U32(ctx, 2, 0xfeedfaceu);
+    // A compiled guest call publishes its continuation before an SDK service
+    // transfers synchronously to a stream callback. Publishing it afterward
+    // restarts audioStart indefinitely when the service transfers control.
+    SET_GPR_U32(ctx, 31, 0x100004u);
+    audioGuestDemux(rdram, ctx, runtime);
 }
 
 static unsigned graphicsIrqCount = 0;
@@ -856,6 +909,12 @@ int main() {
     ctx.pc = 0x100000u;
     runtime.eeScheduler().reset(runtime.memory().getRDRAM(), ctx);
     runtime.eeScheduler().run();
+    // The scheduler can contain guest exceptions. An early stopped run must
+    // not print PASS simply because run() returned to the host test harness.
+    if (!audioReturnValid || audioCallbackCount != 500u) {
+        std::cerr << "FAIL: MPEG callback consumed-byte return/500-call completion" << std::endl;
+        return 4;
+    }
     std::cout << "PASS: 500 MPEG audio callbacks execute with exhausted guest heap and reused scratch records" << std::endl;
     runtime.registerFunction(0x100000u, graphicsStart);
     runtime.registerFunction(0x100004u, graphicsEnd);
@@ -864,4 +923,14 @@ int main() {
     runtime.eeScheduler().reset(runtime.memory().getRDRAM(), ctx);
     runtime.eeScheduler().run();
     std::cout << "PASS: VIF command interrupt reaches its guest handler exactly once" << std::endl;
+    runtime.registerFunction(0x100000u, nestedStart);
+    runtime.registerFunction(0x100004u, nestedParent);
+    runtime.registerFunction(0x100008u, nestedLeaf);
+    ctx.pc = 0x100000u;
+    runtime.eeScheduler().reset(runtime.memory().getRDRAM(), ctx);
+    runtime.eeScheduler().run();
+    if (!nestedFinished || nestedCallbacks != 1u)
+        throw std::runtime_error("Nested native callback completion was skipped");
+    std::cout << "PASS: nested native callbacks unwind once and preserve parent Count writes" << std::endl;
+
 }

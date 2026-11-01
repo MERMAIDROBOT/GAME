@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "component": "EE register varargs",
+  "source": "Claude isolated Support.h correction, October25",
+  "base_sha256": "fcea61a05f3e0c04e83fa90accaf9b46b1ad7ec8548b46ba5b71dc07ca0209cb",
+  "candidate_sha256": "79db7695c2c275d84c94c091ef2cf20493567606f627111805f542add378acf2",
+  "license": "GPL-3.0, PS2Recomp runtime",
+  "scope": "64-bit register arguments only; historical stack and va_list layout retained",
+  "game_assets_or_generated_game_code": false,
+  "whole_gameplay_verified": false
+}

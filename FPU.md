@@ -95,3 +95,10 @@ Future instruction fixes should add encoded-instruction and compiled execution
 fixtures, independent expected results, failing controls and explicit limitations.
 The current scalar checker does not alone certify instruction decoding, all
 architectural state, flags, ACC, DMA, VU timing or gameplay.
+
+
+The EE EQ/LT/LE macros now decode extended finite values before comparison; see
+[RUNTIME-HOTPATHS.md](RUNTIME-HOTPATHS.md). This closes a clamp gap that arithmetic
+helpers alone leave open. The remaining conformance limits above still apply.
+
+The R5900 compare encodings use generic translator names: function 0x34 (C.LT) emits FPU_C_OLT_S and 0x36 (C.LE) emits FPU_C_OLE_S. Both route through the extended-value helpers; LT/LE aliases remain supported. The regression translates real instruction words using the pinned upstream FpuTranslator and compiles its emitted statements, with a census of function codes 0x30, 0x32, 0x34 and 0x36. This avoids testing an unused macro alias while leaving actual game comparisons on host IEEE semantics.

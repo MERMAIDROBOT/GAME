@@ -1,0 +1,221 @@
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -32,6 +32,90 @@
+     constexpr uint16_t PAD_L2 = 0x0100u;
+     // Window-thread only: retain guide events from the same queue as pad presses.
+     bool controlsToggleRequested = false;
++}
++
++// Event-ordered keyboard capture (v8).
++// The window thread samples input once per presented frame. When
++// presentation stalls (for example, 60-120 ms), several key transitions land
++// between samples and a level/press-queue sample cannot recover their order:
++// Left held, Circle down, both up before the next sample reached the game as
++// Circle alone. GLFW delivers every PRESS/RELEASE in order from inside
++// PollInputEvents on this same thread, so chain raylib's key callback and
++// record the full keyboard mask after each transition.
++extern "C" {
++    typedef struct GLFWwindow GLFWwindow;
++    typedef void (*GLFWkeyfun)(GLFWwindow *, int, int, int, int);
++    GLFWkeyfun glfwSetKeyCallback(GLFWwindow *, GLFWkeyfun);
++    GLFWwindow *glfwGetCurrentContext(void);
++#if defined(__APPLE__)
++    void *glfwGetCocoaWindow(GLFWwindow *);
++#endif
++}
++
++namespace
++{
++    constexpr int kKeyCount = 512; // raylib MAX_KEYBOARD_KEYS; raylib key codes are GLFW key codes
++    std::array<bool, kKeyCount> eventKeys{};
++    GLFWkeyfun previousKeyCallback = nullptr;
++    bool keyEventsInstalled = false;
++    std::array<uint16_t, 64> keyEvents{}; // positive (pressed=1) keyboard masks, in event order
++    size_t keyEventCount = 0;
++
++    uint16_t keyboardMaskFrom(const std::array<bool, kKeyCount> &k)
++    {
++        uint16_t m = 0;
++        if (k[KEY_UP]) m |= PAD_UP;
++        if (k[KEY_DOWN]) m |= PAD_DOWN;
++        if (k[KEY_LEFT]) m |= PAD_LEFT;
++        if (k[KEY_RIGHT]) m |= PAD_RIGHT;
++        if (k[KEY_X] || k[KEY_SPACE]) m |= PAD_CROSS;
++        if (k[KEY_C] || k[KEY_ESCAPE]) m |= PAD_CIRCLE;
++        if (k[KEY_Z] || k[KEY_KP_0]) m |= PAD_SQUARE;
++        if (k[KEY_V] || k[KEY_KP_1]) m |= PAD_TRIANGLE;
++        if (k[KEY_Q]) m |= PAD_L1;
++        if (k[KEY_E]) m |= PAD_R1;
++        if (k[KEY_LEFT_SHIFT]) m |= PAD_L2;
++        if (k[KEY_RIGHT_SHIFT]) m |= PAD_R2;
++        if (k[KEY_ENTER]) m |= PAD_START;
++        if (k[KEY_TAB]) m |= PAD_SELECT;
++        return m;
++    }
++
++    void onHostKey(GLFWwindow *window, int key, int scancode, int action, int mods)
++    {
++        // raylib keeps its own key state and press queue; it must see every event.
++        if (previousKeyCallback) previousKeyCallback(window, key, scancode, action, mods);
++        if (key <= 0 || key >= kKeyCount || action == 2 /* GLFW_REPEAT */) return;
++        const uint16_t before = keyboardMaskFrom(eventKeys);
++        eventKeys[key] = action == 1;
++        const uint16_t after = keyboardMaskFrom(eventKeys);
++        if (after == before) return;
++        if (keyEventCount < keyEvents.size()) keyEvents[keyEventCount++] = after;
++        else keyEvents.back() = after; // bounded; the latest state always survives
++    }
++
++    bool installHostKeyEvents()
++    {
++        if (keyEventsInstalled) return true;
++        static const bool disabled = [] {
++            const char *v = std::getenv("PS2_PORT_KEY_EVENTS");
++            return v && *v == '0';
++        }();
++        if (disabled) return false;
++        // GetWindowHandle returns NSWindow* on macOS, not GLFWwindow*.
++        // The native-window pointer must never be passed to a GLFW API.
++        GLFWwindow *handle = glfwGetCurrentContext();
++        if (!handle) return false;
++#if defined(__APPLE__)
++        if (glfwGetCocoaWindow(handle) != GetWindowHandle()) return false;
++#endif
++        for (int k = 1; k < kKeyCount; ++k) eventKeys[k] = IsKeyDown(k);
++        previousKeyCallback = glfwSetKeyCallback(handle, onHostKey);
++        keyEventsInstalled = true;
++        if (std::getenv("PS2_PORT_PAD_TRACE"))
++            std::cerr << "[port-lab host-pad] event-ordered keyboard capture installed" << std::endl;
++        return true;
++    }
+ }
+ 
+ // Internal window-thread API; consume exactly once after polling host input.
+@@ -146,9 +230,12 @@
+     // press queue retains that event even when IsKeyDown is already false.
+     // Publish it through the existing guest-consumed button latch.
+     auto queuedPress=[&](uint16_t mask){clearBit(mask);freshPresses|=mask;};
++    // With event-ordered capture the transitions are already recorded in
++    // order; the press queue is only drained (for F1).
++    const bool orderedKeys = !useGamepad && installHostKeyEvents();
+     for (int key = GetKeyPressed(); key != 0; key = GetKeyPressed()) {
+         if (key == KEY_F1) controlsToggleRequested = !controlsToggleRequested;
+-        if (useGamepad) continue;
++        if (useGamepad || orderedKeys) continue;
+         switch (key) {
+         case KEY_UP: queuedPress(PAD_UP); break;
+         case KEY_DOWN: queuedPress(PAD_DOWN); break;
+@@ -193,14 +280,18 @@
+     struct PadEdge {std::array<uint8_t,32> state{};bool pressOnly=false;};
+     std::array<PadEdge,16> padEdges{};
+     size_t edgeHead=0, edgeCount=0;
+-    static void queueEdge(const uint8_t* state,bool pressOnly) {
++    static void queueEdge(const uint8_t* state,bool pressOnly,bool coalesceRelease=true) {
+         // Several keys can arrive before one guest poll. Merge an expanding
+-        // held chord so it reaches the game immediately, while every release
+-        // remains a barrier (a quick tap/repress must never disappear).
+-        if(pressOnly && edgeCount) {
++        // held chord so it reaches the game immediately, and merge a shrinking
++        // multi-key release so releasing a diagonal+button chord does not emit
++        // spurious intermediate cardinal directions across several frames.
++        // Every press<->release transition remains a barrier so quick taps and
++        // represses never disappear.
++        if(edgeCount) {
+             auto& previous=padEdges[(edgeHead+edgeCount-1)%padEdges.size()];
+             const uint16_t a=previous.state[2] | (previous.state[3]<<8),b=state[2] | (state[3]<<8);
+-            if(previous.pressOnly && (b|a)==a) {std::memcpy(previous.state.data(),state,32);return;}
++            if(pressOnly && previous.pressOnly && (b|a)==a) {std::memcpy(previous.state.data(),state,32);return;}
++            if(coalesceRelease && !pressOnly && !previous.pressOnly && (a|b)==b) {std::memcpy(previous.state.data(),state,32);return;}
+         }
+         // Bound input memory if the game stalls for more than sixteen edges.
+         // Retain the most recent states; the final release cannot be stranded.
+@@ -264,7 +355,7 @@
+     // Headless local scenario commands: monotonically increasing sequence,
+     // buttons, bounded hold duration, left-stick X/Y. Malformed/stale commands
+     // are ignored. Normal keyboard input never reads this file.
+-    if (std::getenv("PS2_PORT_HEADLESS")) {
++    if (std::getenv("PS2_PORT_HEADLESS") || (std::getenv("PS2_PORT_PRIVATE_WINDOW_CONTROL") && *std::getenv("PS2_PORT_PRIVATE_WINDOW_CONTROL")==49)) {
+         if (const char *path = std::getenv("PS2_PORT_PAD_COMMAND")) {
+             static uint64_t sequence = 0;
+             static uint16_t mask = 0;
+@@ -286,7 +377,7 @@
+             if (std::chrono::steady_clock::now() < until) {
+                 after &= ~mask;
+             } else { mask = 0; lx = ly = 128; }
+-            
++
+             std::memcpy(hostPadState.data(), state, hostPadState.size());
+             hostPadState[2] = after & 255u; hostPadState[3] = after >> 8;
+             hostPadState[6] = lx; hostPadState[7] = ly;
+@@ -301,7 +392,7 @@
+             std::cerr << "[port-lab host-pad] ns=" << ns << " mask=" << static_cast<uint16_t>(~after) << std::endl;
+         }
+     }
+-    
++
+     std::memcpy(hostPadState.data(), state, hostPadState.size());
+     hostPadState[2] = after & 255u; hostPadState[3] = after >> 8;
+     retainEdges(hostPadState.data(),before,after,freshPresses);
+@@ -309,10 +400,52 @@
+ 
+ void ps2PortPublishPadState(const uint8_t* state){publishPadState(state,0);}
+ 
++// Publish each recorded keyboard transition as its own pad state, in order,
++// then the sampled state. Non-keyboard bits (mouse buttons) come from the
++// sample. queueEdge merges expanding press-only states and keeps every
++// release as a barrier, so Left, Left+Circle, Circle, none reaches the game
++// as Left+Circle, Circle, none.
++static void publishPadEvents(const uint8_t *state) {
++    std::lock_guard<std::mutex> lock(hostPadMutex);
++    const uint16_t sampled = uint16_t(~(state[2] | (state[3] << 8)));
++    const uint16_t otherBits = sampled & uint16_t(~keyboardMaskFrom(eventKeys));
++    uint16_t previous = uint16_t(~(hostPadState[2] | (hostPadState[3] << 8)));
++    std::array<uint8_t,32> edge;
++    std::memcpy(edge.data(), state, 32);
++    static const bool trace = std::getenv("PS2_PORT_PAD_TRACE") != nullptr;
++    auto emit = [&](uint16_t pressed) {
++        if (pressed == previous) return;
++        const uint16_t low = uint16_t(~pressed);
++        edge[2] = low & 255u; edge[3] = low >> 8;
++        // Ordered host events preserve each release state. In particular,
++        // releasing a direction while holding an action must reach the guest.
++        queueEdge(edge.data(), uint16_t(previous & ~pressed) == 0, false);
++        if (trace) {
++            static unsigned changes = 0;
++            if (changes++ < 512u) {
++                const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++                std::cerr << "[port-lab host-pad] ns=" << ns << " mask=" << pressed << " events=" << keyEventCount << std::endl;
++            }
++        }
++        previous = pressed;
++    };
++    for (size_t i = 0; i < keyEventCount; ++i) emit(uint16_t(keyEvents[i] | otherBits));
++    emit(sampled);
++    std::memcpy(hostPadState.data(), state, hostPadState.size());
++}
++
+ void ps2PortPollHostInput() {
+     uint8_t state[32];
+     uint16_t freshPresses=0;
+-    if (sampleHostPad(state, sizeof(state),freshPresses)) publishPadState(state,freshPresses);
++    const bool sampledOk = sampleHostPad(state, sizeof(state),freshPresses);
++    // Scripted window-control runs keep the command path in publishPadState.
++    const char *control = std::getenv("PS2_PORT_PRIVATE_WINDOW_CONTROL");
++    const bool scripted = control && *control == '1' && std::getenv("PS2_PORT_PAD_COMMAND");
++    if (sampledOk) {
++        if (keyEventsInstalled && !IsGamepadAvailable(0) && !scripted) publishPadEvents(state);
++        else publishPadState(state,freshPresses);
++    }
++    keyEventCount = 0;
+ }
+ 
+ bool PSPadBackend::readState(int port, int slot, uint8_t *data, size_t size) {
+@@ -334,6 +467,6 @@
+         }
+         previous = buttons;
+     }
+-    
++
+     return true;
+ }

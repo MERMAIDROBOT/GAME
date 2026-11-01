@@ -13,6 +13,8 @@ from pipeline import digest
 
 class ReplayTests(unittest.TestCase):
     def setUp(self):
+        # Only the synthetic Python backend runs; no GPU driver is loaded.
+        idle=patch.object(replay,'assert_idle');idle.start();self.addCleanup(idle.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -44,7 +46,8 @@ if mode=='missing': sys.exit(0)
 snapshot=bytes([1 if mode in ('mismatch','contradiction') else 0])*4194304
 (out/'vram.bin').write_bytes(snapshot)
 result={'stage':'complete','status':'passed','records_replayed':2,'compared_vram_bytes':4194304,'mismatched_bytes':0,
-        'batch_observed':os.environ['PS2_PORT_PRIVATE_GIF_BATCH']}
+        'batch_observed':os.environ['PS2_PORT_PRIVATE_GIF_BATCH'],
+        'inherited_game_flags':[k for k in os.environ if k.startswith(('PS2_PORT_','PS2X_')) and k!='PS2_PORT_PRIVATE_GIF_BATCH']}
 if mode=='mismatch': result.update(status='pixel_mismatch',mismatched_bytes=4194304)
 if mode=='coverage': result['records_replayed']=1
 (out/'result.json').write_text(json.dumps(result))
@@ -120,3 +123,45 @@ if mode=='coverage': result['records_replayed']=1
             with self.assertRaisesRegex(RuntimeError, 'Another pipeline'):
                 self.run_probe()
         self.assertFalse((self.private / 'logs').exists())
+
+    def test_foreign_compute_blocks_before_output_mutation(self):
+        with patch.object(replay,'assert_idle',side_effect=RuntimeError('occupied')):
+            with self.assertRaisesRegex(RuntimeError,'occupied'):
+                self.run_probe()
+        self.assertFalse((self.private/'logs').exists())
+
+    def test_shared_engine_slot_blocks_graphics_replay(self):
+        from compute_slot import slot
+        with slot('synthetic-build-owner'):
+            with self.assertRaisesRegex(RuntimeError,'compute slot'):
+                self.run_probe()
+        self.assertFalse((self.private/'logs').exists())
+
+    def test_parent_game_flags_do_not_define_replay(self):
+        import os
+        with patch.dict(os.environ,{'PS2_PORT_ENHANCE_FXAA':'1','PS2_PORT_TEST_PAD_SCRIPT':'bad','PS2X_VU1_RECOMP':'1'}):
+            result=self.run_probe()
+        self.assertEqual(result['native_result']['inherited_game_flags'],[])
+
+    def test_changed_capture_during_validation_is_not_replayed(self):
+        original=replay.rawgs.validate
+        def changing(path):
+            result=original(path)
+            path.write_bytes(path.read_bytes()+b'changed')
+            return result
+        with patch.object(replay.rawgs,'validate',side_effect=changing):
+            with self.assertRaisesRegex(ValueError,'changed during validation'):
+                self.run_probe()
+        self.assertFalse((self.private/'logs').exists())
+
+    def test_changed_capture_during_execution_is_not_accepted(self):
+        import subprocess
+        original=subprocess.run
+        def changing(*args,**kwargs):
+            result=original(*args,**kwargs)
+            p=self.private/'capture';p.write_bytes(p.read_bytes()+b'changed')
+            return result
+        with patch.object(replay.subprocess,'run',side_effect=changing):
+            result=self.run_probe()
+        self.assertEqual(result['status'],'failed')
+        self.assertIn('changed during execution',result['error'])

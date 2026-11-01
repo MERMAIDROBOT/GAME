@@ -1,0 +1,346 @@
+{
+  "schema": 2,
+  "implementation": "Vulkan/MoltenVK host renderer; GS compatibility remains",
+  "upstream": "https://github.com/danielgomesvieira2000/ps2-port-engine",
+  "license": "MIT upstream; repository modifications GPL-3.0",
+  "sources": {
+    "runtime/gpu/src/gs_renderer.cpp": {
+      "source": "work/build/hwgs-async/renderer/gs_renderer.cpp",
+      "source_sha256": "e3ec17a3a273fe1a96f370e68740ac5bf1ce7cbb0b66c3d7ef2436cf206328e6",
+      "sha256": "86db290bf694d577dd24a613fed1793a9b2fe9f441a9e8c1e2fc2680407fd256"
+    },
+    "runtime/gpu/src/threaded_renderer.cpp": {
+      "source": "work/build/hwgs-async/renderer/threaded_renderer.cpp",
+      "source_sha256": "82244bba4d512d838bd3fbbcdc93744f57601f9a5f3800d291dcad4baacab740",
+      "sha256": "c75aa7c6ffd66985115244a2573d212980b7c38b11d0004d1d3e9e004f74339e"
+    },
+    "runtime/gpu/src/gpu.cpp": {
+      "source": "work/build/hwgs-async/renderer/gpu.cpp",
+      "source_sha256": "19fa15cfaf0e6a7bc57f69f972bb81555933bd8a431d0dfbedd2b5bc235b16eb",
+      "sha256": "5b26a09020a2047d61dfd45c4e5e009951e4c7c353fd6f530aae3f9c8c7206f5"
+    },
+    "runtime/gpu/src/gpu_internal.h": {
+      "source": "work/build/hwgs-async/renderer/gpu_internal.h",
+      "source_sha256": "51b878a157a425316f0bb8def222fda5411e8cf19b088d1afecf6e40e811573f",
+      "sha256": "39e7699ed3e5b1b8aec48d398ec537eea9eaaa512253d6584342b33e5e175137"
+    },
+    "runtime/gpu/include/ps2gpu/gs_renderer.h": {
+      "source": "work/build/hwgs-async/renderer/ps2gpu/gs_renderer.h",
+      "source_sha256": "354e73842c1e211c33978265f1c193877b76e61ae34b9f6ac2370cb7920a8bb3",
+      "sha256": "2d7a1c683e75ad20cf449d6b2ed7be451f9df747301691bcdca3f5eacd98ee9c"
+    },
+    "runtime/gpu/shaders/gs.frag": {
+      "source": "work/build/hwgs-async/shaders/gs.frag",
+      "source_sha256": "b963a993ee255dfeda68b596324c8aed6c73dd49493ce010d0f9e1e449cdaca2",
+      "sha256": "b963a993ee255dfeda68b596324c8aed6c73dd49493ce010d0f9e1e449cdaca2"
+    },
+    "runtime/gpu/host-adapter/gpu_bridge.cpp": {
+      "source": "work/build/hwgs-async/renderer/gpu_bridge.cpp",
+      "source_sha256": "ac4aaee99297b08fe781a2f38cda0c104dcab77b4f3c838501c91d40c367d13e",
+      "sha256": "3239206b9e833f9e4bb6e12a5c5142d647136964d764cf2261dca868c60042e7"
+    },
+    "runtime/gpu/host-adapter/runtime_mips.hpp": {
+      "source": "work/build/hwgs-async/renderer/runtime_mips.hpp",
+      "source_sha256": "657a181a35c991653ae8382bccd7ae0016b9633b3f68260a79c1943e304664f2",
+      "sha256": "657a181a35c991653ae8382bccd7ae0016b9633b3f68260a79c1943e304664f2"
+    },
+    "runtime/gpu/host-adapter/vram_ranges.hpp": {
+      "source": "work/research/stage1-v10-2026-10-25/vram_ranges.hpp",
+      "source_sha256": "bf9416fbdad990e7060dc54bacc19aafe2daca8f48a75a8751c8291b3538c709",
+      "sha256": "bf9416fbdad990e7060dc54bacc19aafe2daca8f48a75a8751c8291b3538c709"
+    },
+    "runtime/gpu/host-adapter/texpack/hw_runtime_pack.hpp": {
+      "source": "work/build/hwgs-async/renderer/hw_runtime_pack.hpp",
+      "source_sha256": "b576602647989b623e039c1ea86f40f48a7e2c61f75ef58919dee3f9607ef400",
+      "sha256": "f77d96c5b7bd08e167791ee0217e9a9f2a7ad36e193cbccdf61bbadc45542460"
+    },
+    "runtime/gpu/host-adapter/texpack/blob_prefetch.hpp": {
+      "source": "work/build/hwgs-async/renderer/blob_prefetch.hpp",
+      "source_sha256": "131792ba0c9f7b8d92ff6dd67692a1ef0c90fc67ec4971bfdce1d6af05aac2c9",
+      "sha256": "131792ba0c9f7b8d92ff6dd67692a1ef0c90fc67ec4971bfdce1d6af05aac2c9"
+    },
+    "runtime/gpu/host-adapter/texpack/claude_tex_pack_core.hpp": {
+      "source": "work/build/hwgs-async/renderer/claude_tex_pack_core.hpp",
+      "source_sha256": "9ad3f9aab23737c4d06cf091ef4010981f5126a42edbcc7d180ed25aa55d6ee3",
+      "sha256": "9ad3f9aab23737c4d06cf091ef4010981f5126a42edbcc7d180ed25aa55d6ee3"
+    },
+    "runtime/gpu/host-model/src/gs.cpp": {
+      "source": "work/build/hwgs-async/renderer/gs.cpp",
+      "source_sha256": "e46e7847120dc4cb713f400ccb6cb12766df01dfa6a2baa03e5d6ce1d49cd549",
+      "sha256": "e46e7847120dc4cb713f400ccb6cb12766df01dfa6a2baa03e5d6ce1d49cd549"
+    },
+    "runtime/gpu/host-model/src/gs_draw.cpp": {
+      "source": "work/comparisons/ps2-port-engine/host/src/gs_draw.cpp",
+      "source_sha256": "aae58ae4c7b4d502e7d6010b9664c25a828e6b334ae8a4fd46472c3f599bfe4b",
+      "sha256": "aae58ae4c7b4d502e7d6010b9664c25a828e6b334ae8a4fd46472c3f599bfe4b"
+    },
+    "runtime/gpu/host-model/src/gs_memory.cpp": {
+      "source": "work/comparisons/ps2-port-engine/host/src/gs_memory.cpp",
+      "source_sha256": "1a825b057d1b62ea7f9b8981974affc2800d383b33736ea93bad03b6c6b69a10",
+      "sha256": "1a825b057d1b62ea7f9b8981974affc2800d383b33736ea93bad03b6c6b69a10"
+    },
+    "runtime/gpu/host-model/include/ps2host/dma.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/dma.h",
+      "source_sha256": "592962ecb3ba0a8223c39fd76628194641923a5b91631cea436ae620507607bf",
+      "sha256": "592962ecb3ba0a8223c39fd76628194641923a5b91631cea436ae620507607bf"
+    },
+    "runtime/gpu/host-model/include/ps2host/profile.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/profile.h",
+      "source_sha256": "41d95e50820d6e6047d4ded68ea8305f1a01f20440344c81137de5c6ad5ad53b",
+      "sha256": "41d95e50820d6e6047d4ded68ea8305f1a01f20440344c81137de5c6ad5ad53b"
+    },
+    "runtime/gpu/host-model/include/ps2host/texture_pack.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/texture_pack.h",
+      "source_sha256": "b7889b40e4bcb0ddf4995e572e95bfdae4333124e6c07fb3f3f638821d70f223",
+      "sha256": "b7889b40e4bcb0ddf4995e572e95bfdae4333124e6c07fb3f3f638821d70f223"
+    },
+    "runtime/gpu/host-model/include/ps2host/path3.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/path3.h",
+      "source_sha256": "d426b26dab45e20870bdf326838e6c644659f8f7bf47af65f3861a0c0415ae09",
+      "sha256": "d426b26dab45e20870bdf326838e6c644659f8f7bf47af65f3861a0c0415ae09"
+    },
+    "runtime/gpu/host-model/include/ps2host/host.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/host.h",
+      "source_sha256": "da95cbb894a875d0782b07d5fb65621856e1421c60c550187d486c3e62163716",
+      "sha256": "da95cbb894a875d0782b07d5fb65621856e1421c60c550187d486c3e62163716"
+    },
+    "runtime/gpu/host-model/include/ps2host/settings.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/settings.h",
+      "source_sha256": "c18a7cace49be2f86438e8609adbb334e2e508c23696c4a1d5a74ee7722c64a0",
+      "sha256": "c18a7cace49be2f86438e8609adbb334e2e508c23696c4a1d5a74ee7722c64a0"
+    },
+    "runtime/gpu/host-model/include/ps2host/iop_vm.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/iop_vm.h",
+      "source_sha256": "3783dba9a027806812d3fb2c33bb1c6ec1a6f9266e023859312936bb831bb67f",
+      "sha256": "3783dba9a027806812d3fb2c33bb1c6ec1a6f9266e023859312936bb831bb67f"
+    },
+    "runtime/gpu/host-model/include/ps2host/vif.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/vif.h",
+      "source_sha256": "05515c3237f5b3cc05a3c9ed7f20917191af63fdf5b87cdf73cc2d1e9c19e1e3",
+      "sha256": "05515c3237f5b3cc05a3c9ed7f20917191af63fdf5b87cdf73cc2d1e9c19e1e3"
+    },
+    "runtime/gpu/host-model/include/ps2host/ipu.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/ipu.h",
+      "source_sha256": "196be8d0d9857b00e9ac835fb3496888c501112e6d9462ba1f0b87637304296e",
+      "sha256": "196be8d0d9857b00e9ac835fb3496888c501112e6d9462ba1f0b87637304296e"
+    },
+    "runtime/gpu/host-model/include/ps2host/vu_core.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/vu_core.h",
+      "source_sha256": "20961cc902ca75cd885279bc63349c938faea3955475377c06f5d44bb0c8cd7a",
+      "sha256": "20961cc902ca75cd885279bc63349c938faea3955475377c06f5d44bb0c8cd7a"
+    },
+    "runtime/gpu/host-model/include/ps2host/memory.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/memory.h",
+      "source_sha256": "3849fb3e35da9baeb559be0bbf00754e67d11ca098dddc34990c67fa8a5ea390",
+      "sha256": "3849fb3e35da9baeb559be0bbf00754e67d11ca098dddc34990c67fa8a5ea390"
+    },
+    "runtime/gpu/host-model/include/ps2host/gs.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/gs.h",
+      "source_sha256": "0d8f47c01a74a265b3a17b6d8335062d7c7b9b84800ba4d8bdd055701d68c240",
+      "sha256": "fafcccf1d8b748eeeb41fee4e6508ebc045079a7891fec6001db24f437227965",
+      "fifo_cursor_recovery": "LocalReadOffset accessors recovered from pinned renderer-source-graph root_5; no object-layout change; TRXDIR already resets both cursor coordinates."
+    },
+    "runtime/gpu/host-model/include/ps2host/run.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/run.h",
+      "source_sha256": "324bd37215ad54ffd82b8f815252652c0a77644b11b6b753decb06ef14dfa0b5",
+      "sha256": "324bd37215ad54ffd82b8f815252652c0a77644b11b6b753decb06ef14dfa0b5"
+    },
+    "runtime/gpu/host-model/include/ps2host/timeline.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/timeline.h",
+      "source_sha256": "fc0a4a601a1b4aaa4c96d0e40babaf094395588905e642b22c15844d4bdc1b0b",
+      "sha256": "fc0a4a601a1b4aaa4c96d0e40babaf094395588905e642b22c15844d4bdc1b0b"
+    },
+    "runtime/gpu/host-model/include/ps2host/disc.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/disc.h",
+      "source_sha256": "87cf2dafc678d061918e68a4b519d15cd5c026e7140b67f751ed4fde0e3e7d18",
+      "sha256": "87cf2dafc678d061918e68a4b519d15cd5c026e7140b67f751ed4fde0e3e7d18"
+    },
+    "runtime/gpu/host-model/include/ps2host/mc2.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/mc2.h",
+      "source_sha256": "f2d697f8ad7999107dc85034061700e6c0ccafe1d918aae2f8aeb907e6a02702",
+      "sha256": "f2d697f8ad7999107dc85034061700e6c0ccafe1d918aae2f8aeb907e6a02702"
+    },
+    "runtime/gpu/host-model/include/ps2host/vu.h": {
+      "source": "work/build/hwgs/fba/hostinc/ps2host/vu.h",
+      "source_sha256": "19d41f5e30d28ec76b092fb466907629cd4a5d23dbe2422a99d656bc84344b75",
+      "sha256": "19d41f5e30d28ec76b092fb466907629cd4a5d23dbe2422a99d656bc84344b75"
+    },
+    "runtime/gpu/host-model/include/ps2rt/types.h": {
+      "source": "comparisons/ps2-port-engine/runtime/include/ps2rt/types.h",
+      "source_sha256": "cec5e5a0ee86c7eeb29f4118685e75fbe789d77244c0dcd29b911bac6e1e4f72",
+      "sha256": "cec5e5a0ee86c7eeb29f4118685e75fbe789d77244c0dcd29b911bac6e1e4f72",
+      "role": "Host declaration header dependency; no guest execution service linked by the graphics component"
+    },
+    "runtime/gpu/host-model/include/ps2rt/generated.h": {
+      "source": "comparisons/ps2-port-engine/runtime/include/ps2rt/generated.h",
+      "source_sha256": "503e3e9906f7fd390718ac62467160d63c905ba1e583637efa13f30d5e1ab3b8",
+      "sha256": "503e3e9906f7fd390718ac62467160d63c905ba1e583637efa13f30d5e1ab3b8",
+      "role": "Host declaration header dependency; no guest execution service linked by the graphics component"
+    },
+    "runtime/gpu/host-model/include/ps2rt/lifted.h": {
+      "source": "comparisons/ps2-port-engine/runtime/include/ps2rt/lifted.h",
+      "source_sha256": "b5a4530f1882389a397451ca227fa073123ee35b7358e36e9255afe16a386074",
+      "sha256": "b5a4530f1882389a397451ca227fa073123ee35b7358e36e9255afe16a386074",
+      "role": "Host declaration header dependency; no guest execution service linked by the graphics component"
+    },
+    "runtime/gpu/host-adapter/alpha_cut_rule.hpp": {
+      "source": "work/build/hwgs-async/renderer/alpha_cut_rule.hpp",
+      "source_sha256": "61105ecdc32f0a637522a8419ec30004be516dbd5ec41f1b9d788573d8948fc7",
+      "sha256": "61105ecdc32f0a637522a8419ec30004be516dbd5ec41f1b9d788573d8948fc7"
+    },
+    "runtime/gpu/host-adapter/hwgs_capi.cpp": {
+      "source": "work/build/hwgs-async/renderer/hwgs.cpp",
+      "source_sha256": "3866e0eb8e26b266fe285d65f510577c880b8574b60f64e610713b127a113671",
+      "sha256": "6ece3d48c40cacd449fb682daa02c462146addd9e8eea04175bea6430cc0256c"
+    }
+  },
+  "qualification": "Claude isolated scripted Mavericks candidate; not universal title acceptance or clean-disc reproduction",
+  "features": [
+    "replacement hardware filter with manual fallback",
+    "bounded asynchronous scanout with synchronous first/shape change",
+    "cached hot-path configuration",
+    "exact nonwrapping VRAM transfer coverage",
+    "full replacement mip tails",
+    "packed target scaling/photo protections"
+  ],
+  "excluded": [
+    "retail/generated title sources",
+    "binaries and captured game inputs",
+    "experimental bubble game-code changes",
+    "Blender assets"
+  ],
+  "latest_candidate_carryforward": {
+    "status": "source_carried_not_independently_compiled",
+    "features": [
+      "regular texture hardware sampling under exact-size/no-mip/repeat-or-clamp guards",
+      "magnified UI alpha-cut selection"
+    ],
+    "default_policy": "Both latest experiments require explicit profile opt-in; existing qualified replacement-texture path retained",
+    "adaptations": [
+      "portable VRAM header include",
+      "removed title-address diagnostic logging",
+      "latest experimental switches default off in shared engine"
+    ],
+    "gameplay_accepted": false
+  },
+  "native_adapter_candidate": {
+    "status": "source_candidate_not_yet_compiled_or_qualified",
+    "source_owns_all_adapter_and_host_units": true,
+    "opaque_reference_renderer_libraries_required": false,
+    "run_only_cache_hash": true,
+    "source_files": {
+      "runtime/gpu/native-plugin/CMakeLists.txt": "0ea2622ae965262f410a0733d7701e0d60dfef88925ec1424bdacf06fc40001b",
+      "runtime/gpu/native-plugin/COPYING.LGPLv3": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+      "runtime/gpu/native-plugin/ORIGIN.json": "0541677d40084e3178353b8b208a3795b77548790ce5658c6aad06a854408cfd",
+      "runtime/gpu/native-plugin/field_publisher.hpp": "cbd0f6085383e30e5292e9a3a19c713a0388654b8d3fc93cad9d46138c230f81",
+      "runtime/gpu/native-plugin/field_readiness.hpp": "1793119af1911390025aa3e4a13b70799b529e65e6c3e5f59722e6b587e7bdb0",
+      "runtime/gpu/native-plugin/gs_registers.hpp": "1a7fba7fad9548f570a96399c2fd50a291380f3f52d7d5ee179cb5c40f21ed44",
+      "runtime/gpu/native-plugin/hw_owner.hpp": "5a378def9046356c4cc3392ab6ea0aca38ef63d38b8b909edf23369d301d5e47",
+      "runtime/gpu/native-plugin/image_stamp.hpp": "262f3e4916ed5025ef53aec4b0b8b51a8af0dc3050f1d2d6f710c06fcc4ce5e3",
+      "runtime/gpu/native-plugin/native_registers.hpp": "49a48b1c95ed036e9eb1a396de818e595cae8a31b569d6e9a62f79848d7eda88",
+      "runtime/gpu/native-plugin/plugin.cpp": "8ba972112f69ff05bbb36526ccf437f5b78a5b6a9d4544d08300fb2368cb0d06",
+      "runtime/gpu/native-plugin/queued_owner.hpp": "d76c2cdfbe27840d2981316fe07248361a947c8f9febdd7f741c1e70372e60b3",
+      "runtime/gpu/native-plugin/raw_backend.hpp": "4cdc34657d768ff92c009869f8437d08965f34e3cd80f3771cb480b4d2a181aa",
+      "runtime/gpu/native-plugin/raw_field.hpp": "b7ebc054833c947d4b9ff65e8ee86b7c218cc81d3fbf2688394b068ce17161bc",
+      "runtime/gpu/native-plugin/scanout_latch.hpp": "a0235608db09b97267aa86a98203058c28c636bd233a6a5cbefea97130bb1afc",
+      "runtime/gpu/native-plugin/serial_queue.hpp": "200fd6d25b1dea452b6376e7be4bbb4626b6db00ecf0878de9f4a35934754343",
+      "runtime/gpu/native-plugin/staging.hpp": "267e1f4fb07142fdf3b85222686c9ca25e3e6a2cc1c04a100a09a69b1eb64c9b",
+      "runtime/gpu/host-adapter/cache_hash.hpp": "a6cc4af5be639cd6d306b4f85355d2251620e39a986ef77a33050e75461aefe7",
+      "runtime/gpu/host-adapter/hwgs_capi.cpp": "6ece3d48c40cacd449fb682daa02c462146addd9e8eea04175bea6430cc0256c",
+      "runtime/gpu/host-adapter/host_services.cpp": "15207af6a58a6debe2e6ef68076183ed428beac1d1de9a795893aee5bf03284f",
+      "runtime/gpu/host-adapter/host_defaults.cpp": "a654db32e99e55392c0a56376a4f40c523c67bd11ff31595cfc370a129399082",
+      "runtime/gpu/host-model/src/gs_thread.cpp": "7f80212ea955db1e2a890674e6bbf55fe95ce568e4c9d3ef57c4da3de832e9eb",
+      "runtime/gpu/host-model/src/profile.cpp": "05331a1a7c6e4005544a4df3c8ec4dca9ea25a15968902c6e60e3ce22fe1d110",
+      "runtime/gpu/third_party/stb/stb_image.h": "8e5b0d717dfc8a834c97ef202d20e78d083d009586e1731c985817d0155d568c",
+      "runtime/gpu/third_party/stb/stb_image_write.h": "51998500e9519a85be1aa3291c6ad57deb454da98a1693ab5230f91784577479",
+      "runtime/gpu/third_party/stb/LICENSE": "bebfe904b14301657e4e5d655c811d51fd31b97c455b9cc2d8600d6bac6cff63",
+      "runtime/gpu/native-plugin/gs_register_addr.hpp": "c5cacb7a63783f8605bb33530af2cc76eff694c4532f38d1fed0f558b51cd70b"
+    },
+    "api_boundary_checks": "Source graph ABI probes can verify exact function signatures as well as record layouts; actual native component qualification still pending.",
+    "factory_contract": "Compiled asset-free test passed: actual plugin factory/worker, ordered ingress and 4MiB VRAM snapshot; renderer/GPU and gameplay not tested."
+  },
+  "surface_presentation_candidate": {
+    "status": "source_implemented_not_compiled",
+    "default": "disabled; explicit PS2_PORT_HW_GS_ZERO_COPY=1 required",
+    "changes": [
+      "IOSurface producer and typed C boundary",
+      "surface leases retain backing storage after renderer teardown",
+      "monotonic frame IDs survive renderer restarts",
+      "held surfaces excluded from reuse",
+      "fence wait and teardown serialized",
+      "threaded renderer forwards ordered surface submissions",
+      "record/replay remains on pixel path"
+    ],
+    "open": [
+      "compile and lifetime fixture execution",
+      "native component build",
+      "plugin/token/runtime/window transport integration",
+      "actual player acceptance"
+    ],
+    "gameplay_verified": false
+  },
+  "files": {
+    "runtime/gpu/src/surface_leases.h": {
+      "origin": "Engine-owned presentation lifetime and C API boundary",
+      "sha256": "dc40b756911d12a66f2fb01dd74b5a5ee8723bbb386aa5aef58f87a11e996610"
+    },
+    "runtime/gpu/include/ps2gpu/surface_api.h": {
+      "origin": "Engine-owned presentation lifetime and C API boundary",
+      "sha256": "7ecf83620ba2576da4c79542f8ff58e6a563c29102900c8bbeffbeb50cb2e3a3"
+    },
+    "runtime/gpu/host-adapter/adaptive_scale_rule.hpp": {
+      "origin": "Engine-owned reusable rule adapted from the recorded Kelly renderer findings",
+      "sha256": "2a6174a7a4b5760de54d597b9bae7b0d1ed150083d77ae3a886674f202a00c20"
+    },
+    "runtime/gpu/host-adapter/target_freshness.hpp": {
+      "origin": "Engine-owned reusable rule adapted from the recorded Kelly renderer findings",
+      "sha256": "1bdd960d3f33bc513b33156ae336910b2cd2a4bd569ad9ab3131c03143944e06"
+    }
+  },
+  "carryforward": [
+    {
+      "change": "Require TEX0.TCC before hard-alpha-cut minification; prevents ignoring vertex-only alpha semantics",
+      "source": "work/build/hwgs-async/renderer/alpha_cut_rule.hpp",
+      "source_sha256": "61105ecdc32f0a637522a8419ec30004be516dbd5ec41f1b9d788573d8948fc7",
+      "test_source": "work/build/hwgs-async/tests/test_alpha_cut_rule.cpp",
+      "test_source_sha256": "4972e9e9992b848c83408c1c152cf8817552c7021719704533e84b33e6bd76be",
+      "generic": true,
+      "gameplay_verified": false
+    },
+    {
+      "change": "Optional successful fence-ready surface acquisition telemetry; no pixel capture and no display/simulation FPS claim",
+      "opt_in": "PS2_PORT_HW_GS_SURFACE_METRICS=1"
+    },
+    {
+      "change": "Track canonical CPU-written texture pages to reject stale GPU targets after cross-level/photo reuse; full page spans, stride and VRAM wrap",
+      "donor": "work/build/hwgs-async/renderer/gpu_bridge.cpp",
+      "donor_sha256": "32b3c7bea4b3195b61684f728e46f12d0c651f7c23a4fdff0c38b769cedb74df",
+      "generic": true,
+      "adaptations": [
+        "Physical storage bits for indexed high-byte formats",
+        "Swizzled full-page footprints and wrap",
+        "Preserve engine surface lifetime/fence behavior"
+      ],
+      "gameplay_verified": false
+    },
+    {
+      "change": "Opt-in one-way adaptive internal scale under three consecutive contention windows; live-scale zero-copy output geometry",
+      "donor": "work/build/hwgs-async/renderer/adaptive_scale_rule.hpp",
+      "donor_sha256": "17780d71a1aa5792c763eb242c712a9366e8f1865fc8ef5c2a616ce49f0f35e8",
+      "opt_in": "PS2_PORT_HW_GS_ADAPTIVE=1",
+      "adaptations": [
+        "Empty windows break consecutive counts",
+        "Non-finite timestamps rejected",
+        "Recording keeps fixed scale",
+        "Scanout latch resets on scale change"
+      ],
+      "gameplay_verified": false
+    },
+    {
+      "change": "Preserve alpha edges for context-composed texture replacements",
+      "donor": "work/build/hwgs-async/renderer/hw_runtime_pack.hpp",
+      "donor_sha256": "56cc3aa554156cd5ecaadd59393078da904230b43e1fdd145d2070369991e737",
+      "gameplay_verified": false
+    }
+  ]
+}

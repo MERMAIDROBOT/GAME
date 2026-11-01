@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "implementation": "Bounded mutation-aware native host environment snapshots",
+  "origin": "New engine implementation following exact-source runtime conformance failure of a historical launch-only cache",
+  "license": "GPL-3.0 repository license",
+  "sources": {
+    "env_cache.c": "e8f54830104efa3b80ff5cd2e174914970b87da6b036640644d87b9f072ea391"
+  },
+  "scope": "Unix host environment APIs; no retail code or assets"
+}

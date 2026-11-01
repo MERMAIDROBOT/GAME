@@ -1,0 +1,168 @@
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,5 +1,5 @@
+ #include "runtime/ps2_pad.h"
+-#include "ps2_host_backend.h"
++#include "raylib.h"
+ #include <cstring>
+ #include <array>
+ #include <mutex>
+@@ -42,7 +42,7 @@
+     return requested;
+ }
+ 
+-static bool sampleHostPad(uint8_t *data, size_t size)
++static bool sampleHostPad(uint8_t *data, size_t size, uint16_t& freshPresses)
+ {
+     if (!data || size < 32)
+         return false;
+@@ -54,6 +54,7 @@
+     data[3] = 0xFF;
+     data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
+ 
++    freshPresses=0;
+     uint16_t btns = 0xFFFFu;
+     constexpr int kGamepad = 0;
+     const bool useGamepad = IsGamepadAvailable(kGamepad);
+@@ -144,24 +145,25 @@
+     // A down/up pair can occur between slow presentation polls. Raylib's
+     // press queue retains that event even when IsKeyDown is already false.
+     // Publish it through the existing guest-consumed button latch.
++    auto queuedPress=[&](uint16_t mask){clearBit(mask);freshPresses|=mask;};
+     for (int key = GetKeyPressed(); key != 0; key = GetKeyPressed()) {
+         if (key == KEY_F1) controlsToggleRequested = !controlsToggleRequested;
+         if (useGamepad) continue;
+         switch (key) {
+-        case KEY_UP: clearBit(PAD_UP); break;
+-        case KEY_DOWN: clearBit(PAD_DOWN); break;
+-        case KEY_LEFT: clearBit(PAD_LEFT); break;
+-        case KEY_RIGHT: clearBit(PAD_RIGHT); break;
+-        case KEY_X: case KEY_SPACE: clearBit(PAD_CROSS); break;
+-        case KEY_C: case KEY_ESCAPE: clearBit(PAD_CIRCLE); break;
+-        case KEY_Z: case KEY_KP_0: clearBit(PAD_SQUARE); break;
+-        case KEY_V: case KEY_KP_1: clearBit(PAD_TRIANGLE); break;
+-        case KEY_Q: clearBit(PAD_L1); break;
+-        case KEY_E: clearBit(PAD_R1); break;
+-        case KEY_LEFT_SHIFT: clearBit(PAD_L2); break;
+-        case KEY_RIGHT_SHIFT: clearBit(PAD_R2); break;
+-        case KEY_ENTER: clearBit(PAD_START); break;
+-        case KEY_TAB: clearBit(PAD_SELECT); break;
++        case KEY_UP: queuedPress(PAD_UP); break;
++        case KEY_DOWN: queuedPress(PAD_DOWN); break;
++        case KEY_LEFT: queuedPress(PAD_LEFT); break;
++        case KEY_RIGHT: queuedPress(PAD_RIGHT); break;
++        case KEY_X: case KEY_SPACE: queuedPress(PAD_CROSS); break;
++        case KEY_C: case KEY_ESCAPE: queuedPress(PAD_CIRCLE); break;
++        case KEY_Z: case KEY_KP_0: queuedPress(PAD_SQUARE); break;
++        case KEY_V: case KEY_KP_1: queuedPress(PAD_TRIANGLE); break;
++        case KEY_Q: queuedPress(PAD_L1); break;
++        case KEY_E: queuedPress(PAD_R1); break;
++        case KEY_LEFT_SHIFT: queuedPress(PAD_L2); break;
++        case KEY_RIGHT_SHIFT: queuedPress(PAD_R2); break;
++        case KEY_ENTER: queuedPress(PAD_START); break;
++        case KEY_TAB: queuedPress(PAD_SELECT); break;
+         default: break;
+         }
+     }
+@@ -188,12 +190,39 @@
+         state[4] = state[5] = state[6] = state[7] = 128;
+         return state;
+     }();
+-    uint16_t pendingPadPresses = 0;
++    struct PadEdge {std::array<uint8_t,32> state{};bool pressOnly=false;};
++    std::array<PadEdge,16> padEdges{};
++    size_t edgeHead=0, edgeCount=0;
++    static void queueEdge(const uint8_t* state,bool pressOnly) {
++        // Several keys can arrive before one guest poll. Merge an expanding
++        // held chord so it reaches the game immediately, while every release
++        // remains a barrier (a quick tap/repress must never disappear).
++        if(pressOnly && edgeCount) {
++            auto& previous=padEdges[(edgeHead+edgeCount-1)%padEdges.size()];
++            const uint16_t a=previous.state[2] | (previous.state[3]<<8),b=state[2] | (state[3]<<8);
++            if(previous.pressOnly && (b|a)==a) {std::memcpy(previous.state.data(),state,32);return;}
++        }
++        // Bound input memory if the game stalls for more than sixteen edges.
++        // Retain the most recent states; the final release cannot be stranded.
++        if(edgeCount==padEdges.size()) { edgeHead=(edgeHead+1)%padEdges.size(); --edgeCount; }
++        auto& edge=padEdges[(edgeHead+edgeCount)%padEdges.size()];
++        std::memcpy(edge.state.data(),state,32);edge.pressOnly=pressOnly;++edgeCount;
++    }
++    static void retainEdges(const uint8_t* state,uint16_t before,uint16_t after,uint16_t fresh) {
++        // A queued GLFW PRESS while this button was already down proves a
++        // real release/repress occurred between host polls (not autorepeat).
++        const uint16_t repeat=fresh & uint16_t(~before) & uint16_t(~after);
++        if(repeat) {
++            std::array<uint8_t,32> release;std::memcpy(release.data(),state,32);
++            const uint16_t mask=after|repeat;release[2]=mask;release[3]=mask>>8;queueEdge(release.data(),false);
++        }
++        if(before!=after || repeat) queueEdge(state,repeat || (uint16_t(after & ~before)==0));
++    }
+ }
+ 
+ // Called on the window thread. Guest reads consume a synchronized snapshot,
+ // retaining a quick press until the guest has had a chance to observe it.
+-void ps2PortPublishPadState(const uint8_t *state) {
++static void publishPadState(const uint8_t *state,uint16_t freshPresses) {
+     std::lock_guard<std::mutex> lock(hostPadMutex);
+     const uint16_t before = hostPadState[2] | (hostPadState[3] << 8);
+     uint16_t after = state[2] | (state[3] << 8);
+@@ -257,10 +286,11 @@
+             if (std::chrono::steady_clock::now() < until) {
+                 after &= ~mask;
+             } else { mask = 0; lx = ly = 128; }
+-            pendingPadPresses |= before & ~after;
++            
+             std::memcpy(hostPadState.data(), state, hostPadState.size());
+             hostPadState[2] = after & 255u; hostPadState[3] = after >> 8;
+             hostPadState[6] = lx; hostPadState[7] = ly;
++            retainEdges(hostPadState.data(),before,after,freshPresses);
+             return;
+         }
+     }
+@@ -271,32 +301,39 @@
+             std::cerr << "[port-lab host-pad] ns=" << ns << " mask=" << static_cast<uint16_t>(~after) << std::endl;
+         }
+     }
+-    pendingPadPresses |= before & ~after;
++    
+     std::memcpy(hostPadState.data(), state, hostPadState.size());
+     hostPadState[2] = after & 255u; hostPadState[3] = after >> 8;
+-}
++    retainEdges(hostPadState.data(),before,after,freshPresses);
++}
++
++void ps2PortPublishPadState(const uint8_t* state){publishPadState(state,0);}
+ 
+ void ps2PortPollHostInput() {
+     uint8_t state[32];
+-    if (sampleHostPad(state, sizeof(state))) ps2PortPublishPadState(state);
++    uint16_t freshPresses=0;
++    if (sampleHostPad(state, sizeof(state),freshPresses)) publishPadState(state,freshPresses);
+ }
+ 
+ bool PSPadBackend::readState(int port, int slot, uint8_t *data, size_t size) {
+     if (!data || size < 32u || port != 0 || slot != 0) return false;
+     std::lock_guard<std::mutex> lock(hostPadMutex);
+     std::memcpy(data, hostPadState.data(), hostPadState.size());
+-    const uint16_t buttons = (data[2] | (data[3] << 8)) & ~pendingPadPresses;
+-    data[2] = buttons & 255u; data[3] = buttons >> 8;
++    if(edgeCount) {
++        std::memcpy(data,padEdges[edgeHead].state.data(),32);
++        edgeHead=(edgeHead+1)%padEdges.size();--edgeCount;
++    }
++    const uint16_t buttons = data[2] | (data[3]<<8);
+     if (std::getenv("PS2_PORT_PAD_TRACE")) {
+         static uint16_t previous = 0xffffu;
+         static unsigned changes = 0;
+         if (buttons != previous && changes++ < 256u) {
+             const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+             std::cerr << "[port-lab guest-pad] ns=" << ns << " mask=" << static_cast<uint16_t>(~buttons)
+-                      << " pending=" << pendingPadPresses << std::endl;
++                      << " queued=" << edgeCount << std::endl;
+         }
+         previous = buttons;
+     }
+-    pendingPadPresses = 0;
++    
+     return true;
+ }

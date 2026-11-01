@@ -142,3 +142,83 @@ class FeedbackTests(unittest.TestCase):
         check_target('cpp','collect-runtime-targets','Linux');check_target('macos','collect-runtime-targets','Darwin')
         for name in ['../escape','UPPER','a/b']:
             with self.assertRaises(ValueError):f.prepare(self.profile,self.root,'logs/one.log',name)
+
+class BootRecoveryTests(unittest.TestCase):
+    setUp=FeedbackTests.setUp
+    def probe_stage(self):
+        binary=self.root/'synthetic-runner';binary.write_bytes(b'not executed')
+        build=self.root/'analysis/native-build-stage.json'
+        build.write_text(json.dumps({'binary':str(binary),'sha256':lab.digest(binary)}))
+        stage={'log':str(self.log.resolve()),'log_sha256':lab.digest(self.log),'build_stage_sha256':lab.digest(build),
+            'binary_sha256':lab.digest(binary),'executable_sha256':lab.digest(self.elf),
+            'toolchain_lock_sha256':lab.digest(lab.ROOT/'toolchain.lock.json'),'probe_qualified':False}
+        path=self.root/'analysis/boot-probe-stage.json';path.write_text(json.dumps(stage))
+        return path,binary
+
+    def test_bound_probe_automatically_prepares_idempotent_candidates(self):
+        stage,_=self.probe_stage();before=self.base.read_bytes()
+        result=f.plan_boot_recovery(self.profile,self.root,'analysis/boot-probe-stage.json')
+        self.assertEqual(result['status'],'candidates_prepared')
+        self.assertEqual(len(result['candidates']),1)
+        self.assertFalse(result['automatic_translation_allowed'])
+        self.assertFalse(result['runtime_code_identity_verified'])
+        self.assertEqual(result['probe_sha256'],lab.digest(stage))
+        again=f.plan_boot_recovery(self.profile,self.root,'analysis/boot-probe-stage.json')
+        self.assertEqual(again['feedback_name'],result['feedback_name']);self.assertTrue(again['reused'])
+        self.assertEqual(self.base.read_bytes(),before)
+
+    def test_changed_bound_probe_inputs_are_rejected_before_candidate_creation(self):
+        for which in ('log','binary','elf','build'):
+            with self.subTest(which=which):
+                _,binary=self.probe_stage()
+                path={'log':self.log,'binary':binary,'elf':self.elf,'build':self.root/'analysis/native-build-stage.json'}[which]
+                old=path.read_bytes();path.write_bytes(old+b'changed')
+                with self.assertRaises(ValueError):f.plan_boot_recovery(self.profile,self.root,'analysis/boot-probe-stage.json')
+                path.write_bytes(old)
+                self.assertFalse((self.root/'analysis/runtime-feedback').exists())
+
+    def test_overlay_or_nonexecutable_target_stays_blocked_from_translation(self):
+        self.log.write_text('[guest-branch:missing-target] JAL target=0x200000 caller=0x100004\n')
+        self.probe_stage()
+        result=f.plan_boot_recovery(self.profile,self.root,'analysis/boot-probe-stage.json')
+        self.assertEqual(result['status'],'no_safe_static_candidates')
+        self.assertEqual(result['candidates'],[]);self.assertEqual(len(result['rejected']),1)
+        self.assertFalse(result['automatic_translation_allowed'])
+        again=f.plan_boot_recovery(self.profile,self.root,'analysis/boot-probe-stage.json')
+        self.assertTrue(again['reused'])
+        with self.assertRaises(ValueError):f.consume(self.profile,self.root,result['feedback_name'])
+
+    def test_clean_or_outside_probe_does_not_seed_feedback(self):
+        stage,_=self.probe_stage();value=json.loads(stage.read_text());value['probe_qualified']=True
+        stage.write_text(json.dumps(value))
+        with self.assertRaisesRegex(ValueError,'no failed'):f.plan_boot_recovery(self.profile,self.root,'analysis/boot-probe-stage.json')
+        value['probe_qualified']=False;value['log']=str(self.root.parent/'outside.log');stage.write_text(json.dumps(value))
+        with self.assertRaisesRegex(ValueError,'outside'):f.plan_boot_recovery(self.profile,self.root,'analysis/boot-probe-stage.json')
+
+    def test_native_probe_failure_automatically_writes_recovery_candidates(self):
+        import native
+        self.probe_stage()
+        before=self.base.read_bytes()
+        def observed(command,log,**kwargs):
+            Path(log).write_text(self.log.read_text())
+            return 'success'
+        with patch.object(native.lab,'SOURCE',self.root/'empty'), \
+             patch.object(native,'assert_idle'),patch.object(native,'cd_image',return_value=None), \
+             patch.object(native,'runtime_environment',return_value={}),patch.object(native,'logged',side_effect=observed):
+            with self.assertRaisesRegex(RuntimeError,'runtime qualification'):
+                native.boot_probe(self.profile,self.root)
+        plan=json.loads((self.root/'analysis/boot-probe-recovery.json').read_text())
+        self.assertEqual(plan['status'],'candidates_prepared')
+        self.assertFalse(plan['automatic_translation_allowed'])
+        self.assertEqual(plan['candidates'][0]['address'],'00100000')
+        self.assertEqual(self.base.read_bytes(),before)
+
+    def test_later_boot_log_does_not_destroy_prior_candidate_evidence(self):
+        self.probe_stage()
+        result=f.plan_boot_recovery(self.profile,self.root,'analysis/boot-probe-stage.json')
+        original=self.log.read_bytes();self.log.write_text('later unrelated probe\n')
+        _,receipt=f.consume(self.profile,self.root,result['feedback_name'])
+        self.assertEqual(receipt['candidates'],1)
+        evidence=self.root/result['probe_evidence']
+        self.assertEqual((evidence/'run.log').read_bytes(),original)
+        self.assertEqual(f.digest((evidence/'probe.json').read_bytes()),result['probe_sha256'])

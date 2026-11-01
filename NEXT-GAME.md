@@ -57,6 +57,63 @@ The runner holds a shared workflow lock and checks for running game/build/GPU
 processes. It does not interrupt another worker. Direct legacy commands and
 external tools do not yet participate in the lock; keep those idle yourself.
 
+## Before the first native build (stripped executables)
+
+Lessons from the second title. All three steps are generic; none needs retail bytes
+or title addresses in public files.
+
+**Sector image.** Some titles read the ISO9660 filesystem by logical block number
+(`sceCdRead` from the primary volume descriptor), which a file tree cannot answer.
+Give intake the raw disc device or an existing `.iso` as well:
+
+```sh
+python3 run.py --profile .private/profiles/next-title.json next-game \
+  --source /Volumes/DISC_NAME --image /dev/rdiskN --name first --through translate --execute
+python3 run.py --profile .private/profiles/next-title.json import-image /path/to/disc.iso
+```
+
+`import-image` copies the source to private `cd-image/disc.iso`, trims raw-device
+padding to the volume size in the primary volume descriptor, and accepts the image
+only if every file extent inside it hashes to the `import` manifest
+(`analysis/cd-image-stage.json`). An image already in private `cd-image/` that is
+exactly volume-sized is verified in place. `boot-probe`, `diagnose` and
+`package-local` pass the accepted image to the runtime as `PS2_PORT_CD_IMAGE`
+(the debug launcher reads it from `RunConfiguration.plist`).
+
+**Pointer-only function starts.** Without symbols the analyzer can merge a function
+into its predecessor after `jr ra`. After `analyze` and before `translate`:
+
+```sh
+python3 run.py --profile .private/profiles/next-title.json scan-pointer-entries
+```
+
+This collects aligned data words and code `lui`+`addiu`/`ori` pairs that point into
+executable file bytes, keeps targets that follow `jr ra` + delay slot + alignment
+`nop`s or open with `addiu sp,sp,-N`, skips addresses already listed or translated,
+and merges the rest into `general.entry_points` as `ptr_XXXXXXXX@0xXXXXXXXX` hints
+(the analyzer's file is kept once as `recomp.toml.analyzer-original`). `--report-only`
+writes `analysis/pointer-entry-hints.json` without changing the config. Hints are
+candidates, not verified functions; `collect-runtime-targets` + `translate
+--feedback` covers stragglers found at run time.
+
+**Memory contract from crt0.** `build-native` needs a passing `engine_memory` gate
+(`memory-audit`). For a stripped executable, read the crt0 immediates rather than
+guessing: `SetupThread(gp, stack, stack_size, args, root)` gives the main stack
+(`stack` = -1 means the top of RAM minus `stack_size`), and `SetupHeap(start, size)`
+gives the heap start; `size` = -1 means "up to the main stack". Declare in the private
+layout:
+
+- title heap: SetupHeap start .. EndOfHeap;
+- runtime guest heap reserve: the top 1 MiB below the main stack. The shared runtime
+  (`runtime-title-conformance.patch`) gives its own guest allocations (SIF and GS
+  packets, default thread stacks) that slice, and `EndOfHeap` reports its start, so
+  the title's malloc never overlaps it;
+- main stack: stack base .. base + size;
+- any other ranges the title owns.
+
+Runtime RPC/TLS/BootMode pools are read from the patched `Helpers/State.h`. They now
+sit in EE kernel space (0x40000-0x71000), below the 0x100000 user load address.
+
 ## From translation to a playable app
 
 Generated C++ is a static translation, not recovered original authoring source.

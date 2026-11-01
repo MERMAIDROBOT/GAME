@@ -1,0 +1,23 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -1896,6 +1896,19 @@
+ 
+         for (ScheduledEvent &scheduled : due)
+         {
++            // Native service work consumes host time even when translated guest
++            // instruction estimates are small. Display deadlines and EE/IOP clocks
++            // must cover the same elapsed field, without advancing an ahead clock.
++            if (scheduled.event.type == EeEventType::VBlankStart || scheduled.event.type == EeEventType::VBlankEnd)
++            {
++                uint64_t remaining = scheduled.deadlineCycle > m_eeCycle ? scheduled.deadlineCycle - m_eeCycle : 0u;
++                while (remaining != 0u)
++                {
++                    const uint32_t step = static_cast<uint32_t>(std::min<uint64_t>(remaining, std::numeric_limits<uint32_t>::max()));
++                    accountCycles(step);
++                    remaining -= step;
++                }
++            }
+             if (scheduled.event.type == EeEventType::VBlankStart)
+             {
+                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,

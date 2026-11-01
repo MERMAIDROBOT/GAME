@@ -20,7 +20,18 @@
 
 static std::array<bool, 512> down{};
 static std::deque<int> presses;
+struct GLFWwindow {};
+using GLFWkeyfun=void (*)(GLFWwindow*,int,int,int,int);
+static GLFWwindow fakeWindow;
+static bool hostEvents=false;
+static GLFWkeyfun hostCallback=nullptr;
+static unsigned forwardedEvents=0;
+static void previousHostKey(GLFWwindow*,int,int,int,int){++forwardedEvents;}
 extern "C" {
+GLFWwindow *glfwGetCurrentContext(void){return hostEvents?&fakeWindow:nullptr;}
+GLFWkeyfun glfwSetKeyCallback(GLFWwindow*,GLFWkeyfun callback){auto old=hostCallback;hostCallback=callback;return old;}
+void *glfwGetCocoaWindow(GLFWwindow*){return &fakeWindow;}
+void *GetWindowHandle(void){return &fakeWindow;}
 bool IsGamepadAvailable(int) { return false; }
 bool IsGamepadButtonDown(int, int) { return false; }
 float GetGamepadAxisMovement(int, int) { return 0; }
@@ -45,6 +56,25 @@ static uint16_t buttons(const std::array<uint8_t,32>& s) {
 }
 static void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+static void testEventOrderedChords() {
+    down.fill(false);presses.clear();hostCallback=previousHostKey;hostEvents=true;
+    ps2PortPollHostInput();
+    auto consume=[] {std::array<uint8_t,32> state{};require(pad.readState(0,0,state.data(),state.size()),"Pad read failed");return state;};
+    for(unsigned i=0;i<64;++i)consume();
+    auto emit=[](int key,int action){down[key]=action==1;if(action==1)presses.push_back(key);require(hostCallback!=nullptr,"Host callback not installed");hostCallback(&fakeWindow,key,0,action,0);};
+    emit(KEY_LEFT,1);emit(KEY_C,1);emit(KEY_LEFT,0);emit(KEY_C,0);
+    ps2PortPollHostInput();
+    for(auto expected:{0x2080,0x2000,0})require(buttons(consume())==expected,"Between-poll chord order lost");
+    require(forwardedEvents==4,"Previous host callback did not receive every event");
+    emit(KEY_C,1);emit(KEY_C,0);emit(KEY_Z,1);emit(KEY_Z,0);
+    ps2PortPollHostInput();
+    for(auto expected:{0x2000,0,0x8000,0})require(buttons(consume())==expected,"Between-poll independent taps merged");
+    emit(KEY_X,1);emit(KEY_SPACE,1);emit(KEY_X,0);emit(KEY_SPACE,0);
+    ps2PortPollHostInput();
+    require(buttons(consume())==0x4000 && buttons(consume())==0,"Keyboard alias release lost held action");
+    std::cout<<"PASS: event-ordered between-poll chords, release barriers, aliases and callback chaining"<<std::endl;
 }
 
 // Reproduce the real scenario failure: GPU diagnostics can arrive between
@@ -81,8 +111,22 @@ static void testConcurrentCommandAcknowledgments() {
 #endif
 }
 
-int main() {
+static void testRemoteDirections() {
+    setenv("PS2_PORT_TOUCH_ASSIST","1",1);
+    hostEvents=true;hostCallback=previousHostKey;ps2PortPollHostInput();
+    auto event=[](int key,int action) {down[key]=action==1;hostCallback(&fakeWindow,key,0,action,0);};
+    event(KEY_LEFT,1);event(KEY_X,1);require(buttons(read())==0x4080,"Remote chord missing");
+    event(KEY_X,0);require(buttons(read())==0x80,"Action release changed direction");
+    event(KEY_LEFT,0);require(buttons(read())==0x80,"Linked touchscreen dropout not recovered");
+    std::this_thread::sleep_for(std::chrono::milliseconds(310));
+    require(buttons(read())==0,"Recovered direction failed to expire");
+    event(KEY_LEFT_SHIFT,1);require(buttons(read())==0x0100,"Unrequested L2 combo enabled");
+    event(KEY_LEFT_SHIFT,0);read();
+    std::cout<<"PASS: actual host backend remote dropout, expiry and native L2\n";
+}
+int main(int argc,char** argv) {
     try {
+        if(argc==2 && std::string(argv[1])=="--touch") {testRemoteDirections();return 0;}
         for (auto [key,mask] : {std::pair{KEY_LEFT,0x80},std::pair{KEY_RIGHT,0x20},
                                std::pair{KEY_UP,0x10},std::pair{KEY_DOWN,0x40}}) {
             down[key]=true; presses.push_back(key);
@@ -113,7 +157,42 @@ int main() {
         presses.push_back(KEY_F1); read();
         require(ps2PortConsumeControlsToggle(),"Guide event was lost");
         require(!ps2PortConsumeControlsToggle(),"Guide event was delivered twice");
+        // Preserve a chord's direction at the press, even if the whole
+        // chord is released before the game next polls its controller.
+        auto consume=[] { std::array<uint8_t,32> s{}; require(pad.readState(0,0,s.data(),s.size()),"Pad read failed"); return s; };
+        for(int face:{KEY_C,KEY_Z}) {
+            const uint16_t direction=face==KEY_C?0x80:0x90, action=face==KEY_C?0x2000:0x8000;
+            down[KEY_LEFT]=true;down[KEY_UP]=face==KEY_Z;
+            presses.push_back(KEY_LEFT);if(face==KEY_Z)presses.push_back(KEY_UP);
+            require(buttons(read())==direction,"Direction setup failed");
+            down[face]=true;presses.push_back(face);ps2PortPollHostInput();
+            down.fill(false);ps2PortPollHostInput();
+            require(buttons(consume())==(direction|action),"Quick face press lost its held direction");
+            require(buttons(consume())==0,"Chord release was lost");
+        }
+        // Host presses can accumulate between two game polls. Deliver a
+        // growing arrow/action chord on the first read, without artificial
+        // frame-by-frame Left -> Up+Left -> Up+Left+Square latency.
+        down[KEY_LEFT]=true;presses.push_back(KEY_LEFT);ps2PortPollHostInput();
+        down[KEY_UP]=true;presses.push_back(KEY_UP);ps2PortPollHostInput();
+        down[KEY_Z]=true;presses.push_back(KEY_Z);ps2PortPollHostInput();
+        require(buttons(consume())==0x8090,"Expanding chord delayed across guest polls");
+        down.fill(false);ps2PortPollHostInput();
+        require(buttons(consume())==0,"Expanding chord did not release");
+        // Distinct action taps must not merge into a synthetic combination.
+        down[KEY_C]=true;presses.push_back(KEY_C);ps2PortPollHostInput();
+        down[KEY_C]=false;ps2PortPollHostInput();
+        down[KEY_Z]=true;presses.push_back(KEY_Z);ps2PortPollHostInput();
+        down[KEY_Z]=false;ps2PortPollHostInput();
+        for(auto expected:{0x2000,0,0x8000,0})require(buttons(consume())==expected,"Distinct taps merged or reordered");
+        // Analog steering belongs to the same event snapshot too.
+        down[KEY_W]=down[KEY_A]=down[KEY_Z]=true;presses.push_back(KEY_Z);ps2PortPollHostInput();
+        down.fill(false);ps2PortPollHostInput();auto chord=consume();
+        require(buttons(chord)==0x8000 && chord[6]==1 && chord[7]==1,"Analog chord lost its steering");
+        require(buttons(consume())==0 && consume()[6]==128,"Analog chord did not release");
+        std::cout<<"PASS: quick keyboard chords retain digital/analog directions and separate action ordering\n";
         testConcurrentCommandAcknowledgments();
+        testEventOrderedChords();
         std::cout << "PASS: arrow directions, single tap/hold/release, independent WASD stick and guide events\n";
     } catch(const std::exception& e) { std::cerr<<e.what()<<'\n';return 1; }
 }

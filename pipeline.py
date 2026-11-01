@@ -19,13 +19,13 @@ DEFAULT_WORK = ROOT.parent.parent/'work' if ROOT.parent.name=='outputs' else ROO
 WORK = Path(os.environ.get('PS2_PORT_LAB_WORK', str(DEFAULT_WORK))).resolve()
 SOURCE = WORK / 'dependencies/PS2Recomp'
 BUILD = WORK / 'build/ps2recomp'
-ENV = WORK / 'toolchain'
+ENV = Path(os.environ.get('PS2_PORT_LAB_TOOLCHAIN',str(WORK/'toolchain'))).resolve()
 LOCK = json.loads((ROOT / 'toolchain.lock.json').read_text())
 NETWORK_APIS = re.compile(r'\b(?:socket|connect|sendto|sendmsg|curl_\w*|WinHttp\w*|InternetOpen\w*|popen|system)\s*\(|#include[^\n]*(?:curl|socket|http|asio|winsock)', re.I)
-SOURCE_FILES = ('pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTROLS.md', 'PRIVACY.md',
+SOURCE_FILES = ('patches/native-callback-context-lifetime.patch',) + ('patches/host-clock-accounting.patch',) + ('audio_evidence.py','tests/test_audio_evidence.py',) + ('runtime/host_input/direction_recovery.hpp','patches/touch-direction-recovery.patch','tests/direction_recovery.cpp','tests/test_direction_recovery.py',) + ('replay_receipt_versions.json','tests/test_runtime_capabilities.py','bundle_assets.py','tests/test_bundle_assets.py','cmake/BundleConfiguration.h','runtime/host_environment/storage_paths.hpp','patches/native-save-root.patch','tests/test_storage_paths.py','preserved_disc.py','tests/test_preserved_disc.py','offline_toolchain.py','tests/test_offline_toolchain.py','platform_sdks.py','tests/test_platform_sdks.py','source_corrections.py','tests/test_source_corrections.py','runtime/gpu/host-adapter/alpha_cut_rule.hpp','tests/alpha_cut_rule.cpp','tests/test_alpha_cut_rule.py','tests/mac_vulkan_surface.cpp','tests/test_mac_vulkan_surface.py','tests/mac_surface_presenter.cpp','tests/mac_surface_producer.cpp','tests/test_mac_surface_presenter.py','tests/surface_owner.cpp','tests/test_surface_owner.py','tests/test_surface_transport.py','surface_transport.py','runtime/presentation/mac_surface_presenter.hpp','runtime/presentation/surface_token.hpp','runtime/presentation/surface_consumer.hpp','tests/surface_consumer.cpp','tests/test_surface_consumer.py','runtime/gpu/src/surface_leases.h','runtime/gpu/include/ps2gpu/surface_api.h','tests/gpu_surface_leases.cpp','tests/test_gpu_surface_leases.py','runtime/host_input/ORIGIN.json','patches/host-input-events.patch','patches/mpeg-stream-callbacks.patch','runtime/host_environment/ORIGIN.json','runtime/host_environment/env_cache.c','tests/host_environment.c','tests/test_host_environment.py','runtime/gpu/host-model/include/ps2rt/types.h','runtime/gpu/host-model/include/ps2rt/generated.h','runtime/gpu/host-model/include/ps2rt/lifted.h','graph_amend.py','tests/test_graph_amend.py','runtime/gpu/native-plugin/gs_register_addr.hpp','patches/gif-image2.patch','tests/test_image2_patch.py','native_components.py','tests/test_native_components.py','tests/native_plugin.cpp','tests/test_native_plugin.py','runtime/gpu/native-plugin/CMakeLists.txt','runtime/gpu/native-plugin/COPYING.LGPLv3','runtime/gpu/native-plugin/ORIGIN.json','runtime/gpu/native-plugin/field_publisher.hpp','runtime/gpu/native-plugin/field_readiness.hpp','runtime/gpu/native-plugin/gs_registers.hpp','runtime/gpu/native-plugin/hw_owner.hpp','runtime/gpu/native-plugin/image_stamp.hpp','runtime/gpu/native-plugin/native_registers.hpp','runtime/gpu/native-plugin/plugin.cpp','runtime/gpu/native-plugin/queued_owner.hpp','runtime/gpu/native-plugin/raw_backend.hpp','runtime/gpu/native-plugin/raw_field.hpp','runtime/gpu/native-plugin/scanout_latch.hpp','runtime/gpu/native-plugin/serial_queue.hpp','runtime/gpu/native-plugin/staging.hpp','runtime/gpu/host-adapter/cache_hash.hpp','runtime/gpu/host-adapter/hwgs_capi.cpp','runtime/gpu/host-adapter/host_services.cpp','runtime/gpu/host-adapter/host_defaults.cpp','runtime/gpu/host-model/src/gs_thread.cpp','runtime/gpu/host-model/src/profile.cpp','runtime/gpu/third_party/stb/stb_image.h','runtime/gpu/third_party/stb/stb_image_write.h','runtime/gpu/third_party/stb/LICENSE','link_recipe.py','tests/test_link_recipe.py','sdk_policy.py','tests/test_sdk_audit.py','tool_state.py','tests/test_tool_state.py','compute_slot.py','tests/test_compute_slot.py','abi_layouts.py','tests/test_abi_layouts.py','object_symbols.py','tests/test_object_symbols.py','runtime/abi/sdk_policy.h','patches/sdk-audio-policy.patch','tests/test_sdk_policy.py','make_plan.py','tests/test_make_plan.py','archive_selection.py','tests/test_archive_selection.py','object_controls.py','tests/test_object_controls.py','patches/ee64-varargs.patch','runtime/abi/Support.h','runtime/abi/ORIGIN.json','tests/ee64_varargs.cpp','tests/test_ee64_varargs.py','merge_graphs.py','tests/test_merge_graphs.py','launch_config.py','tests/test_launch_config.py','compile_recipe.py','tests/test_compile_recipe.py','native_graph.py','tests/test_native_graph.py','archive_sources.py','tests/test_archive_sources.py','source_graph.py','tests/test_source_graph.py','tests/test_field_trace.py','clean_build.py','build_closure.py','CLEAN-BUILD.md','tests/test_clean_build.py','tests/test_build_closure.py','tests/gs_touch.cpp','tests/test_gs_touch.py','runtime/gpu/host-adapter/vram_ranges.hpp','runtime/gpu/host-model/CMakeLists.txt','runtime/gpu/host-model/include/ps2host/disc.h','runtime/gpu/host-model/include/ps2host/dma.h','runtime/gpu/host-model/include/ps2host/gs.h','runtime/gpu/host-model/include/ps2host/host.h','runtime/gpu/host-model/include/ps2host/iop_vm.h','runtime/gpu/host-model/include/ps2host/ipu.h','runtime/gpu/host-model/include/ps2host/mc2.h','runtime/gpu/host-model/include/ps2host/memory.h','runtime/gpu/host-model/include/ps2host/path3.h','runtime/gpu/host-model/include/ps2host/profile.h','runtime/gpu/host-model/include/ps2host/run.h','runtime/gpu/host-model/include/ps2host/settings.h','runtime/gpu/host-model/include/ps2host/texture_pack.h','runtime/gpu/host-model/include/ps2host/timeline.h','runtime/gpu/host-model/include/ps2host/vif.h','runtime/gpu/host-model/include/ps2host/vu.h','runtime/gpu/host-model/include/ps2host/vu_core.h','runtime/gpu/host-model/src/gs.cpp','runtime/gpu/host-model/src/gs_draw.cpp','runtime/gpu/host-model/src/gs_memory.cpp','runtime/gpu/host-adapter/texpack/hw_runtime_pack.hpp','runtime/gpu/host-adapter/texpack/claude_tex_pack_core.hpp','runtime/gpu/host-adapter/texpack/blob_prefetch.hpp','runtime/presentation/completed_field.hpp','tests/frame_ownership.cpp','tests/test_frame_ownership.py','tests/test_release.py','tests/test_gpu_components.py','runtime/gpu/CMakeLists.txt','runtime/gpu/LICENSE','runtime/gpu/ORIGIN.json','runtime/gpu/host-adapter/gpu_bridge.cpp','runtime/gpu/host-adapter/runtime_mips.hpp','runtime/gpu/include/ps2gpu/display.h','runtime/gpu/include/ps2gpu/gs_renderer.h','runtime/gpu/shaders/date.frag','runtime/gpu/shaders/date.vert','runtime/gpu/shaders/decode.comp','runtime/gpu/shaders/depth_load.frag','runtime/gpu/shaders/downsample.comp','runtime/gpu/shaders/fxaa.comp','runtime/gpu/shaders/gs.frag','runtime/gpu/shaders/gs.vert','runtime/gpu/shaders/gs_address.glsl','runtime/gpu/shaders/patch.comp','runtime/gpu/shaders/smaa_blend.comp','runtime/gpu/shaders/smaa_common.glsl','runtime/gpu/shaders/smaa_edges.comp','runtime/gpu/shaders/smaa_weights.comp','runtime/gpu/shaders/swizzle.comp','runtime/gpu/src/gpu.cpp','runtime/gpu/src/gpu_internal.h','runtime/gpu/src/gs_renderer.cpp','runtime/gpu/src/threaded_renderer.cpp','runtime/gpu/src/vulkan_display.cpp','runtime/gpu/tests/display_smoke.cpp','runtime/gpu/tests/renderer_tests.cpp','runtime/gpu/third_party/smaa/AreaTex.h','runtime/gpu/third_party/smaa/LICENSE.txt','runtime/gpu/third_party/smaa/README.md','runtime/gpu/third_party/smaa/SMAA.glsl','runtime/gpu/third_party/smaa/SearchTex.h','tests/gpu_residency.cpp','patches/host-input.patch','runtime/host_input/ps2_pad.cpp','patches/native-pcm.patch','runtime/native_audio/ps2_audio.cpp','runtime/native_audio/ps2_audio.h','runtime/native_audio/ORIGIN.json','tests/native_audio_drift.cpp','tests/reference/raylib/raylib.h','tests/test_native_audio.py','gif_packets.py', 'tests/test_gif_packets.py', 'branches.py', 'port_checks.py', 'upstreams.py', 'tests/test_branches.py', 'tests/test_port_checks.py', 'tests/test_upstreams.py', 'PORT-QUALIFICATION.md', 'UPSTREAM-REVIEW-2026-10-24.md', 'pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTROLS.md', 'PRIVACY.md',
                 'STATUS.md', 'RUNTIME_COMPARISON.md', '.gitignore', 'toolchain.lock.json',
                 'profiles/example-game.json', 'cmake/AttachGame.cmake', 'cmake/LocalLauncher.m',
-                'patches/runtime-diagnostics.patch', 'tests/test_pipeline.py',
+                'patches/runtime-diagnostics.patch', 'patches/ps2xIOP-port-lab.patch', 'tests/test_iop_patch.py', 'tests/test_pipeline.py',
                 'tests/test_native.py', 'tests/test_scenarios.py', 'tests/runtime_timer.cpp',
                 'vectors.py', 'tools/vu1_recomp.cpp', 'tools/PS2Recomp-LICENSE', 'tests/test_vectors.py',
                 'tests/host_pad.cpp', 'tests/host_presentation.cpp', 'rawgs.py', 'tests/test_rawgs.py',
@@ -45,7 +45,7 @@ SOURCE_FILES = ('pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTRO
                 'CONTRIBUTING.md', 'LICENSE', 'UPSTREAM-NOTICES.md',
                 '.github/workflows/both-targets.yml', '.github/PULL_REQUEST_TEMPLATE.md',
                 'source_freeze.py', 'tests/test_source_freeze.py', 'requirements.txt', 'platform_adapter.py', 'tests/test_platform_adapter.py', 'PLATFORMS.md', 'run.py', 'tests/test_entrypoint.py', 'tests/test_engine_fixes.py',
-                'mmi.py', 'tests/test_mmi.py', 'texture_seams.py', 'tests/test_texture_seams.py',
+                'mmi.py', 'tests/test_mmi.py', 'vu0_macro.py', 'tests/test_vu0_macro.py', 'texture_seams.py', 'tests/test_texture_seams.py',
                 'feedback.py', 'tests/test_feedback.py', 'RUNTIME-FEEDBACK.md',
                 'recovery.py', 'tests/test_recovery.py', 'tests/fixtures/integer-oracle.json', 'tools/recovery_runner.hpp', 'FUNCTION-RECOVERY.md', 'recovery_core/__init__.py', 'recovery_core/emu.py', 'recovery_core/vu0.py', 'recovery_core/layout.py', 'recovery_core/r5900.py', 'recovery_core/symexec.py', 'recovery_core/LICENSE', 'recovery_core/ORIGIN.json',
                 'vu_dependencies.py', 'vu_dependency_core.py', 'tests/test_vu_dependencies.py', 'VU-DEPENDENCIES.md',
@@ -54,9 +54,30 @@ SOURCE_FILES = ('pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTRO
                 'tools/reference/ps2float.c', 'tools/reference/ps2float.h',
                 'tools/reference/COPYING.LESSER', 'tools/reference/COPYING.GPLv3',
                 'patches/scalar-fpu.patch', 'FPU.md',
+                'patches/runtime-title-conformance.patch', 'tests/test_title_conformance.py', 'tests/test_runtime_patch_stack.py',
+                'cdimage.py', 'pointer_entries.py', 'tests/test_cdimage.py', 'tests/test_pointer_entries.py',
                 'cadence.py', 'tests/test_cadence.py', 'NEW-REPOSITORIES-2026-10-17.md', 'CADENCE.md',
-                'platforms/macos/adapter.json', 'platforms/macos/macos_adapter.py')
+                'platforms/macos/adapter.json', 'platforms/macos/macos_adapter.py',
+                'ab_check.py', 'tests/test_ab_check.py',
+                'patches/scalar-fpu-compare.patch', 'patches/runtime-hotpaths.patch',
+                'tests/runtime_lazy_timer.cpp', 'tests/runtime_vif_unpack.cpp',
+                'tests/test_runtime_hotpaths.py', 'runtime_hotpaths.py', 'RUNTIME-HOTPATHS.md',
+                'tests/test_fpu_compare_emission.py', 'tests/fpu_translator_probe.cpp', 'tests/fpu-translator-support/ps2recomp/code_generator.h', 'tests/reference/fpu-translator/ORIGIN.json', 'tests/reference/fpu-translator/fmt/LICENSE', 'tests/reference/fpu-translator/fmt/include/fmt/base.h', 'tests/reference/fpu-translator/fmt/include/fmt/format-inl.h', 'tests/reference/fpu-translator/fmt/include/fmt/format.h', 'tests/reference/fpu-translator/ps2xRecomp/include/ps2recomp/Translators/fpu_translator.h', 'tests/reference/fpu-translator/ps2xRecomp/include/ps2recomp/codegen_helpers.h', 'tests/reference/fpu-translator/ps2xRecomp/include/ps2recomp/instructions.h', 'tests/reference/fpu-translator/ps2xRecomp/include/ps2recomp/types.h', 'tests/reference/fpu-translator/ps2xRecomp/src/lib/fpu_translator.cpp')
 
+
+SOURCE_FILES = ('cmake/SourceInventory.cmake', 'runtime/gpu/host-adapter/target_freshness.hpp', 'runtime/gpu/host-adapter/adaptive_scale_rule.hpp', 'tests/renderer_carryforward_rules.cpp', 'tests/hw_owner_live_scale.cpp', 'tests/test_renderer_carryforward.py') + SOURCE_FILES
+
+
+SOURCE_FILES = ('tests/test_native_component_provision.py',) + SOURCE_FILES
+
+
+SOURCE_FILES = ('translation_graph.py','tests/test_translation_graph.py') + SOURCE_FILES
+
+
+SOURCE_FILES = ('runtime_header_replay.py','tests/test_runtime_header_replay.py') + SOURCE_FILES
+
+
+SOURCE_FILES = ('source_inventory.py','tests/test_source_inventory.py','tests/test_source_reuse.py','asset_intake.py','tests/test_asset_intake.py') + SOURCE_FILES
 
 def package_source(root=ROOT):
     """Explicit public-source whitelist; never recurse into game/work directories."""
@@ -102,7 +123,7 @@ def safe_relative(value):
 
 
 PRIVATE_ROOT = ROOT / '.private'
-PROFILE_COMMANDS_WITHOUT_PROFILE = {'doctor', 'bootstrap', 'bootstrap-runtime', 'source-package',
+PROFILE_COMMANDS_WITHOUT_PROFILE = {'compare-source-objects','merge-source-graphs','revise-source-graph','recover-compile-settings','audit-archive','stage-source-graph','analyze-field-trace','audit-build','build-source','convert-disc','qualify-port','review-upstreams','doctor', 'bootstrap', 'bootstrap-runtime', 'source-package',
                                     'knowledge-add', 'package-accepted-app', 'new-profile', 'instruction-check', 'oracle-check'}
 
 
@@ -263,7 +284,7 @@ def import_disc(source, profile, private):
         target = dest / safe_relative(rel)
         previous = known.get(rel)
         size = p.stat().st_size
-        if previous and previous['bytes'] == size and target.exists() and digest(target) == previous['sha256']:
+        if previous and previous['bytes'] == size and target.exists() and digest(target) == previous['sha256'] and digest(p) == previous['sha256']:
             records.append(previous)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -332,6 +353,8 @@ def run(command, log, offline=False, cwd=None):
         revision = subprocess.check_output(['git', '-C', str(SOURCE), 'rev-parse', 'HEAD'], text=True).strip()
         if revision != LOCK['ps2recomp']['revision']:
             raise RuntimeError('Tool source revision differs from lock')
+        from tool_state import ensure
+        ensure(sys.modules[__name__])
         for directory in [SOURCE / 'ps2xAnalyzer/src', SOURCE / 'ps2xRecomp/src']:
             for source in directory.rglob('*'):
                 if source.suffix in {'.cpp', '.c', '.h', '.hpp'} and NETWORK_APIS.search(source.read_text(errors='replace')):
@@ -380,15 +403,17 @@ def bootstrap():
         subprocess.run(['git', '-C', str(SOURCE), 'checkout', '--detach', ref['revision']], check=True)
     from native import apply_runtime_patch
     apply_runtime_patch()
-    run([bindir / 'cmake', '-S', SOURCE, '-B', BUILD, '-G', 'Ninja',
-         f'-DCMAKE_MAKE_PROGRAM={bindir / "ninja"}', '-DCMAKE_BUILD_TYPE=Release',
-         '-DPS2X_BUILD_RUNTIME=OFF', '-DPS2X_BUILD_TEST=OFF', '-DPS2X_BUILD_STUDIO=OFF'], WORK / 'build-logs/configure.log')
+    from tool_state import configure_command
+    run(configure_command(sys.modules[__name__]), WORK / 'build-logs/configure.log')
     for name, expected in LOCK.get('resolved_dependencies', {}).items():
         source = BUILD / '_deps' / f'{name}-src'
         actual = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
         if actual != expected:
             raise RuntimeError(f'Dependency {name} differs from the locked revision')
+    from tool_state import inputs as compiler_inputs,record as record_compiler
+    expected_compiler_inputs=compiler_inputs(sys.modules[__name__])
     run([bindir / 'cmake', '--build', BUILD, '--target', 'ps2_analyzer', 'ps2_recomp', '-j', '4'], WORK / 'build-logs/build.log')
+    record_compiler(sys.modules[__name__],expected_compiler_inputs)
     print('Pinned analyzer and recompiler built; no game data used during setup')
 
 
@@ -428,11 +453,14 @@ def generated_sources(directory):
     if not directory.is_dir():
         raise ValueError('No generated source directory; run translate first')
     top, unsupported = [], []
+    from clean_build import filesystem_metadata
     for path in directory.rglob('*'):
         if path.suffix.lower() not in CPP_SUFFIXES:
             continue
         if path.is_symlink():
             raise ValueError(f'Generated C++ must not be a symlink: {path.name}')
+        if path.is_file() and filesystem_metadata(path):
+            continue
         if path.parent == directory and path.suffix == '.cpp':
             top.append(path)
         else:
@@ -477,6 +505,10 @@ def require_accepted_translation(private):
     stage = json.loads(path.read_text())
     if stage.get('accepted') is not True:
         raise ValueError('Translation was not accepted: ' + '; '.join(stage.get('blockers') or ['legacy record without acceptance; retranslate']))
+    generated=Path(private)/'generated'
+    if generated.is_dir():
+        from sdk_policy import audit_generated
+        if not audit_generated(generated)['passed']:raise ValueError('Generated output still contains incomplete stateful SDK substitutions; retranslate with current compiler policy')
     return stage
 
 
@@ -514,8 +546,16 @@ def translate(profile, private, feedback=None):
     if not files:
         raise RuntimeError('Tool exited successfully but emitted no C++ files')
     acceptance = translation_acceptance((private / 'logs/translate.log').read_text(errors='replace'))
+    from sdk_policy import audit_generated
+    sdk=audit_generated(output)
+    save(private/'analysis/sdk-policy-stage.json',sdk)
+    if not sdk['passed']:
+        acceptance['accepted']=False
+        acceptance['blockers'].append('Incomplete stateful SDK substitutions remain in generated output')
     save(private / 'analysis/translation-stage.json', {'success': acceptance['accepted'], **acceptance,
          'cpp_files': len(files), 'cpp_bytes': sum(p.stat().st_size for p in files),
+         'generated_sources': {p.name:digest(p) for p in files},
+         'translation_rule_implementation': __import__('knowledge').translation_implementation(),
          'tool_revision': LOCK['ps2recomp']['revision'],
          'native_build_verified': False, 'runtime_verified': False,
          'runtime_target_feedback': feedback_receipt,
@@ -583,6 +623,11 @@ def main(target=None):
     feedback.add_argument('--log', required=True, help='Path relative to private game storage')
     feedback.add_argument('--name', required=True)
     sub.add_parser('import').add_argument('source')
+    preserved=sub.add_parser('import-preserved-copy',help='Import exactly a pinned original extracted-disc file set; leave saves and test extras at source')
+    for option in ('source','manifest','sha256'):preserved.add_argument('--'+option,required=True)
+    sub.add_parser('import-image', help='Copy, trim and verify a sector image (raw disc device or .iso) against the disc manifest').add_argument('source')
+    pointers = sub.add_parser('scan-pointer-entries', help='Optional pre-build scan: pointer-only function starts as entry_points hints')
+    pointers.add_argument('--report-only', action='store_true', help='Write the hint report without changing recomp.toml')
     sub.add_parser('source-package')
     oracle = sub.add_parser('oracle-check', help='Run fixed expected integer/RAM original-execution regressions')
     recovery = sub.add_parser('recover-function', help='Recover, compile and compare a bounded integer leaf against original instructions')
@@ -610,12 +655,14 @@ def main(target=None):
     next_game.add_argument('--source', help='Mounted disc directory; omit after import')
     next_game.add_argument('--title', help='Create a missing profile, discover BOOT2 and pin the executable revision')
     next_game.add_argument('--name', required=True)
+    next_game.add_argument('--image', help='Raw disc device or .iso; intake also produces a verified sector image')
     next_game.add_argument('--through', choices=('intake', 'translate'), default='intake')
     next_game.add_argument('--execute', action='store_true', help='Execute fixed local stages; default only plans')
     next_game.add_argument('--resume', action='store_true')
     release = sub.add_parser('package-accepted-app', help='Wrap a preserved accepted GPU build in a normal local Mac app')
     for option in ['source', 'destination', 'title', 'version', 'bundle-id', 'icon', 'log']:
         release.add_argument('--'+option, required=True)
+    release.add_argument('--bundle-assets',action='store_true',help='Include verified disc/texture assets; require source-verified separate saves')
     memory = sub.add_parser('memory-audit', help='Reject runtime pools overlapping declared game memory')
     memory.add_argument('--runtime-header', required=True, help='Local runtime Helpers/State.h used for this build')
     memory.add_argument('--layout', required=True, help='Private JSON layout path, relative to game storage')
@@ -654,11 +701,144 @@ def main(target=None):
     comparison.add_argument('baseline', help='Baseline local run name')
     comparison.add_argument('candidate', help='Candidate local run name')
     comparison.add_argument('--name', required=True, help='Unique local comparison name')
+    ab = sub.add_parser('ab-check', help='Build this title on two lab stacks in isolation and compare (regression evidence)')
+    ab.add_argument('--name', required=True, help='Unique run name; output defaults to <work>/ab-checks/<name>')
+    ab.add_argument('--baseline-lab', default=str(ROOT), help='Lab tree before the change (default: this lab)')
+    ab.add_argument('--candidate-lab', default=str(ROOT), help='Lab tree with the change (default: this lab)')
+    ab.add_argument('--baseline-patches', help='Directory of *.patch overlaid on the baseline lab (an applied-stack record works)')
+    ab.add_argument('--candidate-patches', help='Directory of *.patch overlaid on the candidate lab')
+    ab.add_argument('--baseline-knowledge', help='knowledge.json overlaid on the baseline lab')
+    ab.add_argument('--candidate-knowledge', help='knowledge.json overlaid on the candidate lab')
+    ab.add_argument('--scenario', help='Optional scenario JSON inside the title private directory, run on both sides')
+    ab.add_argument('--boot-seconds', type=int, default=30, help='Headless boot gate limit')
+    ab.add_argument('--reuse-generated', action='store_true', help='Copy the title generated code instead of retranslating (runtime-only changes)')
+    ab.add_argument('--output', help='Output directory outside the title private directory and the lab')
+    ab.add_argument('--allow-busy', action='store_true', help='Run even while a ps2EntryRunner is running elsewhere')
+    ab.add_argument('--jobs', type=int, default=4)
     new = sub.add_parser('new-profile', help='Create a per-game profile under .private/profiles (never inside public profiles/)')
     new.add_argument('id')
     new.add_argument('--title', required=True)
     new.add_argument('--source', help='Mounted disc directory; pins BOOT2 executable and SHA-256')
     new.add_argument('--output', help='Profile path (default .private/profiles/<id>.json); filename must be <id>.json')
+    convert = sub.add_parser('convert-disc', help='Automatically discover BOOT2, import, verify, analyze, translate and qualify a mounted disc')
+    convert.add_argument('source')
+    convert.add_argument('--id', required=True)
+    convert.add_argument('--title', required=True)
+    convert.add_argument('--name', default='conversion')
+    convert.add_argument('--plan', action='store_true')
+    convert.add_argument('--resume', action='store_true')
+    convert.add_argument('--through', choices=('translate','native','package'))
+    qualify = sub.add_parser('qualify-port', help='Audit real app, generated code, pinned receipts and runtime logs')
+    qualify.add_argument('--app')
+    qualify.add_argument('--receipt')
+    qualify.add_argument('--log')
+    qualify.add_argument('--generated')
+    qualify.add_argument('--gif')
+    qualify.add_argument('--acceptance')
+    qualify.add_argument('--expected-audio-wav',action='append',help='Local decoded PCM WAV from a scene expected to be audible; silence fails, sound quality still requires review')
+    qualify.add_argument('--require-scenario', action='append', default=[], help='Required reviewed scenario ID; repeat for each release acceptance gate')
+    qualify.add_argument('--report', required=True)
+    upstream = sub.add_parser('review-upstreams', help='Read public GitHub updates; never installs or activates code')
+    upstream.add_argument('--repository', action='append', required=True)
+    upstream.add_argument('--since', required=True)
+    upstream.add_argument('--until', required=True)
+    upstream.add_argument('--report', required=True)
+    source_build = sub.add_parser('build-source', help='Build a hash-pinned source graph, rejecting historical objects/archives')
+    source_build.add_argument('recipe')
+    source_build.add_argument('--output', required=True)
+    source_build.add_argument('--jobs', type=int, default=2)
+    source_build.add_argument('--target', action='append', help='Build selected targets and their complete transitive source dependencies')
+    source_build.add_argument('--unit', action='append', help='Compile only selected units without linking, for bounded source controls')
+    source_build.add_argument('--execute', action='store_true', help='Without this flag, validate and plan only')
+    source_build.add_argument('--reuse-build', help='Explicit incremental reuse of receipt-pinned source objects')
+    source_build.add_argument('--reuse-recipe', help='Original pinned recipe for --reuse-build; complete source inventory must be unchanged')
+    audit_build = sub.add_parser('audit-build', help='Classify native link inputs and derive clean-rebuild blockers')
+    audit_build.add_argument('--link-argv', required=True, help='JSON array of actual native linker argv')
+    audit_build.add_argument('--compile-db', required=True)
+    audit_build.add_argument('--directory', required=True)
+    audit_build.add_argument('--report', required=True)
+    field_trace = sub.add_parser('analyze-field-trace', help='Detect completed-field stalls hidden behind smooth host swaps')
+    field_trace.add_argument('capture')
+    field_trace.add_argument('--seconds', type=float, default=60)
+    field_trace.add_argument('--report', required=True)
+    isolated = sub.add_parser('isolate-tool-sources', help='Reconstruct locked public tool sources from local Git objects without working-tree edits')
+    isolated.add_argument('--output', required=True)
+    relocated = sub.add_parser('relocate-source-graph', help='Move a verified source inventory to a fresh workspace without historical binaries')
+    relocated.add_argument('recipe')
+    relocated.add_argument('--staging', required=True)
+    relocated.add_argument('--output', required=True)
+    source_graph = sub.add_parser('stage-source-graph', help='Collect declared sources into a relocatable pinned build recipe')
+    source_graph.add_argument('config')
+    source_graph.add_argument('--output', required=True)
+    archive = sub.add_parser('audit-archive', help='Resolve static archive members against exact recorded compiler outputs')
+    archive.add_argument('archive')
+    archive.add_argument('--compiler-record', action='append', default=[])
+    archive.add_argument('--object-root', action='append', default=[], help='Search retained object bytes and suggest source candidates; never accepts equivalence')
+    archive.add_argument('--report', required=True)
+    sub.add_parser('bootstrap-native-graphics', help='Fetch only locked public source dependencies for the native hardware adapter')
+    graphics = sub.add_parser('build-native-graphics', help='Build the hardware renderer/adapter from source without game assets or old objects')
+    graphics.add_argument('--output', required=True)
+    graphics.add_argument('--source', action='append', default=[], help='Existing locked public source: name=/absolute/path')
+    graphics.add_argument('--execute', action='store_true')
+    link_recipe = sub.add_parser('recover-link-target', help='Replace actual historical link inputs with pinned source-unit/target mappings')
+    link_recipe.add_argument('argv')
+    link_recipe.add_argument('--directory', required=True)
+    link_recipe.add_argument('--mappings', required=True)
+    link_recipe.add_argument('--name', required=True)
+    link_recipe.add_argument('--report', required=True)
+    abi = sub.add_parser('audit-abi-layouts', help='Compile shared type layout probes across pinned source components')
+    abi.add_argument('config')
+    abi.add_argument('--output', required=True)
+    make_plan = sub.add_parser('recover-make-plan', help='Parse compiler/archive targets from a dry-run transcript without executing it')
+    make_plan.add_argument('transcript')
+    make_plan.add_argument('--directory', required=True)
+    make_plan.add_argument('--report', required=True)
+    selection = sub.add_parser('select-archive-sources', help='Resolve archive candidates using completed independent source controls')
+    selection.add_argument('audit')
+    selection.add_argument('--recipe', required=True)
+    selection.add_argument('--build', required=True)
+    selection.add_argument('--controls', required=True)
+    selection.add_argument('--candidates', required=True)
+    selection.add_argument('--report', required=True)
+    controls = sub.add_parser('compare-source-objects', help='Compare completed source units against pinned historical object controls, never link them')
+    controls.add_argument('recipe')
+    controls.add_argument('--build', required=True)
+    controls.add_argument('--references', required=True)
+    controls.add_argument('--output', required=True)
+    controls.add_argument('--native-text', action='store_true')
+    merged = sub.add_parser('merge-source-graphs', help='Combine pinned source graphs and ledgers into one isolated build root')
+    merged.add_argument('config')
+    merged.add_argument('--output', required=True)
+    merged.add_argument('--resume', action='store_true', help='Resume a failed source merge; changed existing source files are rejected')
+    amended = sub.add_parser('amend-source-graph', help='Apply pinned literal source corrections in a new source graph')
+    amended.add_argument('config')
+    amended.add_argument('--output', required=True)
+    retained = sub.add_parser('retain-source-corrections', help='Retain revision-pinned private source corrections for automatic replay')
+    retained.add_argument('config')
+    retained.add_argument('--bank', required=True)
+    captured = sub.add_parser('capture-source-corrections', help='Capture every changed source file between pinned graphs for private replay')
+    captured.add_argument('--executable', required=True)
+    captured.add_argument('--before', required=True)
+    captured.add_argument('--staging', required=True)
+    captured.add_argument('--after', required=True)
+    captured.add_argument('--output', required=True)
+    captured.add_argument('--bank')
+    corrections = sub.add_parser('apply-source-corrections', help='Select and replay a unique private correction set by executable/source identity')
+    corrections.add_argument('--bank', required=True)
+    corrections.add_argument('--executable', required=True)
+    corrections.add_argument('--recipe', required=True)
+    corrections.add_argument('--staging', required=True)
+    corrections.add_argument('--output', required=True)
+    revision = sub.add_parser('revise-source-graph', help='Revise pinned compiler settings and carry forward a matching staging ledger')
+    revision.add_argument('recipe')
+    revision.add_argument('--ledger', required=True)
+    revision.add_argument('--updates', required=True)
+    revision.add_argument('--recipe-output', required=True)
+    revision.add_argument('--ledger-output', required=True)
+    recovered = sub.add_parser('recover-compile-settings', help='Recover declarative settings from a recorded compile database without executing it')
+    recovered.add_argument('database')
+    recovered.add_argument('--report', required=True)
+    recovered.add_argument('--source-pch', action='store_true', help='Reconstruct only the exact recorded CMake PCH/source-header pair, never load old PCH binaries')
     args = parser.parse_args()
     # A next-game parent passes its resolved tool/work root. A mismatch means this
     # child would use different tools than the parent's resume contract pinned.
@@ -671,6 +851,164 @@ def main(target=None):
         from target_cli import check_target
         try: check_target(target, args.command)
         except ValueError as error: parser.error(str(error))
+    if args.command=='bootstrap-native-graphics':
+        from native_components import bootstrap
+        print(json.dumps(bootstrap(sys.modules[__name__]),indent=2))
+        return
+    if args.command=='amend-source-graph':
+        from graph_amend import amend
+        report=amend(args.config,args.output)
+        print(json.dumps(report,indent=2))
+        return
+    if args.command=='retain-source-corrections':
+        from source_corrections import retain
+        print(json.dumps(retain(args.config,args.bank),indent=2))
+        return
+    if args.command=='capture-source-corrections':
+        from source_corrections import capture
+        print(json.dumps(capture(args.executable,args.before,args.staging,args.after,args.output,bank=args.bank),indent=2))
+        return
+    if args.command=='apply-source-corrections':
+        from source_corrections import apply
+        print(json.dumps(apply(args.bank,args.executable,args.recipe,args.staging,args.output),indent=2))
+        return
+    if args.command=='build-native-graphics':
+        from native_components import build
+        sources={}
+        for value in args.source:
+            if '=' not in value:raise ValueError('Source override needs name=path')
+            name,path=value.split('=',1)
+            if name in sources:raise ValueError('Duplicate source override')
+            sources[name]=path
+        report=build(sys.modules[__name__],args.output,overrides=sources,execute=args.execute)
+        print(json.dumps({k:v for k,v in report.items() if k not in {'engine_sources','commands'}},indent=2))
+        return
+    if args.command=='recover-link-target':
+        from link_recipe import recover
+        report=recover(json.loads(Path(args.argv).read_text()),args.directory,args.mappings,args.name)
+        with Path(args.report).open('x') as f:json.dump(report,f,indent=2)
+        print(json.dumps({k:v for k,v in report.items() if k not in {'mapped_inputs','recorded_argv'}},indent=2))
+        if report['blocked']:raise SystemExit(1)
+        return
+    if args.command=='audit-abi-layouts':
+        from abi_layouts import audit
+        report=audit(args.config,args.output)
+        print(json.dumps({k:v for k,v in report.items() if k!='probes'},indent=2))
+        if report['status']=='abi_layouts_mismatch':raise SystemExit(1)
+        return
+    if args.command=='recover-make-plan':
+        from make_plan import recover
+        report=recover(args.transcript,args.directory)
+        with Path(args.report).open('x') as f:json.dump(report,f,indent=2)
+        print(json.dumps(dict(status=report['status'],units=len(report['units']),targets=len(report['targets']),blocked=report['blocked']),indent=2))
+        if report['blocked']:raise SystemExit(1)
+        return
+    if args.command=='select-archive-sources':
+        from archive_selection import select
+        report=select(args.audit,args.recipe,args.build,args.controls,args.candidates,args.report)
+        print(json.dumps({k:v for k,v in report.items() if k not in {'selected','unresolved','input_pins'}},indent=2))
+        if report['unresolved']:raise SystemExit(1)
+        return
+    if args.command=='compare-source-objects':
+        from object_controls import compare
+        report=compare(args.recipe,args.build,args.references,args.output,native=args.native_text)
+        print(json.dumps({k:v for k,v in report.items() if k!='objects'},indent=2))
+        if report['status']=='controls_mismatch':raise SystemExit(1)
+        return
+    if args.command=='merge-source-graphs':
+        from merge_graphs import merge
+        report=merge(args.config,args.output,resume=args.resume)
+        print(json.dumps({k:v for k,v in report.items() if k!='files'},indent=2))
+        return
+    if args.command=='revise-source-graph':
+        from source_graph import revise
+        report=revise(args.recipe,args.ledger,json.loads(Path(args.updates).read_text()),args.recipe_output,args.ledger_output)
+        print(json.dumps(report,indent=2))
+        return
+    if args.command=='recover-compile-settings':
+        from compile_recipe import recover
+        report=recover(args.database,source_pch=args.source_pch)
+        with Path(args.report).open('x') as f:json.dump(report,f,indent=2)
+        print(json.dumps(dict(accepted=len(report['accepted']),blocked=len(report['blocked']),source_equivalence_verified=False)))
+        return
+    if args.command=='audit-archive':
+        from archive_sources import audit as audit_archive,compiler_records,discover_records
+        records=compiler_records(args.compiler_record)
+        if args.object_root: records+=discover_records(args.archive,args.object_root)
+        report=audit_archive(args.archive,records)
+        with Path(args.report).open('x') as f: json.dump(report,f,indent=2)
+        print(json.dumps({k:v for k,v in report.items() if k!='members'},indent=2))
+        return
+    if args.command=='isolate-tool-sources':
+        from offline_toolchain import stage
+        print(json.dumps(stage(sys.modules[__name__],args.output),indent=2))
+        return
+    if args.command=='relocate-source-graph':
+        from source_graph import relocate
+        print(json.dumps(relocate(args.recipe,args.staging,args.output),indent=2))
+        return
+    if args.command=='stage-source-graph':
+        from source_graph import stage as stage_source_graph
+        report=stage_source_graph(args.config,args.output)
+        print(json.dumps({k:v for k,v in report.items() if k!='files'},indent=2))
+        return
+    if args.command=='analyze-field-trace':
+        from cadence import analyze_field_trace
+        report=analyze_field_trace(args.capture,args.seconds)
+        with Path(args.report).open('x') as f: json.dump(report,f,indent=2)
+        print(json.dumps(report,indent=2))
+        return
+    if args.command=='audit-build':
+        from build_closure import audit as audit_build_inputs
+        report=audit_build_inputs(json.loads(Path(args.link_argv).read_text()),args.compile_db,args.directory)
+        with Path(args.report).open('x') as f: json.dump(report,f,indent=2)
+        print(json.dumps(report,indent=2))
+        return
+    if args.command=='build-source':
+        from clean_build import run as build_source
+        report=build_source(args.recipe,args.output,jobs=args.jobs,execute=args.execute,only_units=args.unit,only_targets=args.target,reuse_build=args.reuse_build,reuse_recipe=args.reuse_recipe)
+        print(json.dumps({k:v for k,v in report.items() if k not in {'commands','dependencies','toolchain_headers','objects'}},indent=2))
+        return
+    if args.command=='convert-disc':
+        if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*',args.id):
+            raise ValueError('Use a lowercase title id')
+        source=Path(args.source).resolve()
+        if not source.is_dir():
+            raise ValueError('Supply a mounted disc directory (mount ISO read-only first)')
+        through=args.through or ('package' if target=='macos' else 'translate')
+        if through in {'native','package'} and target!='macos':
+            raise ValueError('Native build/package requires --target macos')
+        from next_game import create_profile,run as convert_disc
+        profile=ROOT/'.private/profiles'/(args.id+'.json')
+        if not profile.exists():
+            profile.parent.mkdir(parents=True,exist_ok=True)
+            create_profile(profile,args.title,source)
+        report=convert_disc(profile,args.name,source=source,through=through,
+                            execute=not args.plan,resume=args.resume)
+        print(json.dumps(report,indent=2))
+        if report['status']=='blocked':
+            raise RuntimeError('Conversion stopped at an explicit unsupported contract; inspect report ticket')
+        return
+    if args.command in {'qualify-port','review-upstreams'}:
+        report_path=Path(args.report)
+        if report_path.exists() or report_path.is_symlink():
+            raise ValueError('Report already exists; preserve previous evidence')
+        if args.command=='qualify-port':
+            if not any([args.app,args.generated,args.log,args.gif,args.expected_audio_wav]):
+                raise ValueError('Supply an app, generated directory or runtime log')
+            from port_checks import audit
+            report=audit(app=args.app,receipt=args.receipt,log=args.log,generated=args.generated,acceptance=args.acceptance,gif=args.gif,required_scenarios=args.require_scenario,expected_audio_wavs=args.expected_audio_wav)
+        else:
+            from upstreams import collect
+            report=collect(args.repository,since=args.since,until=args.until)
+        report_path.parent.mkdir(parents=True,exist_ok=True)
+        with report_path.open('x') as handle: json.dump(report,handle,indent=2)
+        print(json.dumps(report,indent=2))
+        if args.command=='qualify-port' and not report['structural_checks_passed']:
+            raise RuntimeError('Port qualification found errors; inspect report')
+        if args.command=='review-upstreams' and any(r['status']=='unavailable' for r in report['repositories']):
+            raise RuntimeError('Some upstream sources unavailable; report preserves partial coverage')
+        return
     if args.command == 'source-package':
         package_source()
         return
@@ -699,7 +1037,7 @@ def main(target=None):
         return
     if args.command == 'package-accepted-app':
         from release import package
-        report = package(args.source, args.destination, args.title, args.version, args.bundle_id, args.icon, args.log)
+        report = package(args.source, args.destination, args.title, args.version, args.bundle_id, args.icon, args.log,bundle_assets=args.bundle_assets)
         print(json.dumps(report, indent=2))
         return
     if args.command == 'next-game':
@@ -716,7 +1054,7 @@ def main(target=None):
             existing, _ = load_profile(args.profile)
             if existing.get('title') != args.title:
                 raise ValueError(f'Profile {args.profile} belongs to {existing.get("title")!r}; use a separate profile for another title')
-        report = run(args.profile, args.name, args.source, args.through, args.execute, args.resume)
+        report = run(args.profile, args.name, args.source, args.through, args.execute, args.resume, image=args.image)
         print(json.dumps({'status':report['status'], 'playable_certified':False,
                           'remaining_gates':report['remaining_gates']}, indent=2))
         if report['status'] == 'blocked': sys.exit(2)
@@ -785,8 +1123,17 @@ def main(target=None):
         report = plan(profile, private)
         print(json.dumps(report, indent=2))
         if report.get('memory') and not report['memory']['accepted']: sys.exit(2)
+    elif args.command == 'import-preserved-copy':
+        from preserved_disc import import_copy
+        print(json.dumps(import_copy(args.source,args.manifest,args.sha256,profile,private),indent=2))
     elif args.command == 'import':
         import_disc(args.source, profile, private)
+    elif args.command == 'import-image':
+        from cdimage import import_image
+        import_image(args.source, private)
+    elif args.command == 'scan-pointer-entries':
+        from pointer_entries import apply
+        apply(profile, private, write_config=not args.report_only)
     elif args.command == 'enhance-textures':
         from textures import enhance
         report = enhance(profile, private, args.manifest, args.name)
@@ -839,6 +1186,14 @@ def main(target=None):
         from scenarios import compare_scenarios
         report=compare_scenarios(private, args.baseline, args.candidate, args.name)
         if not report['eligible_for_timing_comparison']:
+            sys.exit(2)
+    elif args.command == 'ab-check':
+        from ab_check import run_ab_check
+        report = run_ab_check(args.profile, args.name, args.baseline_lab, args.candidate_lab,
+                              args.baseline_patches, args.candidate_patches, args.baseline_knowledge,
+                              args.candidate_knowledge, args.scenario, args.boot_seconds,
+                              args.reuse_generated, args.output, args.allow_busy, args.jobs)
+        if report['comparison']['status'] != 'no_regression':
             sys.exit(2)
     elif args.command == 'translate':
         translate(profile, private, args.feedback)

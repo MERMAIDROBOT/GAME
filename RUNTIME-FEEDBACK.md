@@ -45,3 +45,17 @@ and [exploration loop](https://github.com/snuri00/ps2-web-recomp/blob/c628ae8432
 This is an original adaptation of the workflow concept; no upstream implementation
 was copied. Synthetic tests cover rejection/drift, both log formats, config
 preservation and the real shared translation dispatch retaining failure gates.
+
+## Automatic failed-boot recovery candidates
+
+A native boot probe with missing translated targets now prepares bounded main-ELF
+compilation hints automatically. The recovery code rechecks the probe's binary,
+build receipt, executable revision, log and toolchain lock. It archives the log
+and probe record before preparing hints, so later probes do not overwrite their
+evidence. Equivalent inputs reuse a validated candidate rather than replacing it.
+Targets outside executable file-backed ELF bytes, including data/BSS and possible
+overlays, remain rejected. This is candidate preparation, not proof of runtime
+code identity. Automatic translation remains disabled; the existing explicit
+`translate --feedback NAME` validates every input again before using hints.
+`analysis/boot-probe-recovery.json` names the candidate or records why recovery
+was blocked. No build or boot loop is started automatically.

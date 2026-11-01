@@ -1,0 +1,41 @@
+{
+  "ps2recomp_revision": "2c5fbb9389e11dd95693385969490c9e8e6f57b4",
+  "ps2recomp_license": "GPL-3.0; see ../../../tools/PS2Recomp-LICENSE",
+  "fmt_revision": "407c905e45ad75fc29bf0f9bb7c5c2fd3475976f",
+  "fmt_license": "MIT; fmt/LICENSE",
+  "purpose": "Compile the actual pinned FPU translator with minimal CodeGenerator error plumbing; no compare-emission substitute.",
+  "files": [
+    {
+      "path": "ps2xRecomp/src/lib/fpu_translator.cpp",
+      "sha256": "8675ddde6b708dd2d06a680f7d62b41c286776fee3340d530b56271fdc281726"
+    },
+    {
+      "path": "ps2xRecomp/include/ps2recomp/Translators/fpu_translator.h",
+      "sha256": "238b4bb5d0ce1bbf334ef05edd01e15c6c08eb26f3fe605c32a2a2bb90884b69"
+    },
+    {
+      "path": "ps2xRecomp/include/ps2recomp/types.h",
+      "sha256": "2f42f723235ed09b6040fcb248e501903f53d679b174f782e5b94475932dcaad"
+    },
+    {
+      "path": "ps2xRecomp/include/ps2recomp/instructions.h",
+      "sha256": "f2679f70ca7c4c5b4805539e28f11ab4a8ac321ba0ded0feeb8deb7da6afa621"
+    },
+    {
+      "path": "ps2xRecomp/include/ps2recomp/codegen_helpers.h",
+      "sha256": "11547e4298b60d64756441967e81eba855778fd9768b7062eda8aa015921c076"
+    },
+    {
+      "path": "fmt/include/fmt/base.h",
+      "sha256": "73ba80ca15c02d6826a611d1651ca6f1495ec127815e257a5d6552d6f6ad313e"
+    },
+    {
+      "path": "fmt/include/fmt/format.h",
+      "sha256": "b4c65350362bf40e76a8e6b450587d912c7081b6eafeafaf3d7bcf53153e17fc"
+    },
+    {
+      "path": "fmt/include/fmt/format-inl.h",
+      "sha256": "e7baf108b84e89b29915bb35733540f8f4262cd8f4b41c15754eed4d2f185f61"
+    }
+  ]
+}

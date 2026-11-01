@@ -1,3 +1,4 @@
+#include "BundleConfiguration.h"
 // Local playback shell. Game engine and asset paths are supplied by the package.
 #import <AppKit/AppKit.h>
 #include <unistd.h>
@@ -17,8 +18,7 @@ int main(void) {
     @autoreleasepool {
         NSBundle *app = NSBundle.mainBundle;
         NSString *bundle = app.bundlePath;
-        NSDictionary *c = [NSDictionary dictionaryWithContentsOfFile:
-            [bundle stringByAppendingPathComponent:@"Contents/Resources/RunConfiguration.plist"]];
+        NSDictionary *c = PortRunConfiguration(NSBundle.mainBundle);
         NSFileManager *fm = NSFileManager.defaultManager;
         NSString *elf = c[@"Executable"], *disc = c[@"DiscDirectory"], *log = c[@"LogFile"];
         if (!elf.isAbsolutePath || !disc.isAbsolutePath || !log.isAbsolutePath)
@@ -46,12 +46,26 @@ int main(void) {
         setenv("PS2_PORT_PRIVATE_GIF_BATCH", [c[@"RendererPacketBatch"] boolValue] ? "1" : "0", 1);
         NSString *deinterlace = [c[@"RendererDeinterlace"] stringValue] ?: @"1";
         setenv("PS2_PORT_PRIVATE_DEINTERLACE", deinterlace.UTF8String, 1);
+        NSString *image = c[@"CdImage"];
+        if (image && (![image isKindOfClass:NSString.class] || !image.isAbsolutePath || ![fm fileExistsAtPath:image]))
+            return fail(@"The local disc image is missing or invalid.");
+        if (image) setenv("PS2_PORT_CD_IMAGE", image.fileSystemRepresentation, 1);
         NSString *frameworks = [bundle stringByAppendingPathComponent:@"Contents/Frameworks"];
-        for (NSArray *library in @[@[@"PS2_PORT_PRIVATE_GS_PLUGIN", @"liblocal-parallel-gs-plugin.dylib"],
-                                   @[@"PS2_PORT_PRIVATE_MOLTENVK", @"libMoltenVK.dylib"]]) {
-            NSString *path = [frameworks stringByAppendingPathComponent:library[1]];
+        NSDictionary *bindings = c[@"FrameworkEnvironment"];
+        // Old accepted packages did not have a declaration; preserve their
+        // split-renderer defaults. New packages name their source-built provider.
+        if (!bindings) bindings = @{@"PS2_PORT_PRIVATE_GS_PLUGIN":@"liblocal-parallel-gs-plugin.dylib",
+                                   @"PS2_PORT_PRIVATE_MOLTENVK":@"libMoltenVK.dylib"};
+        if (![bindings isKindOfClass:NSDictionary.class]) return fail(@"The bundled graphics configuration is invalid.");
+        for (NSString *key in bindings) {
+            NSString *name = bindings[key];
+            if (!([key isEqualToString:@"PS2_PORT_PRIVATE_GS_PLUGIN"] || [key isEqualToString:@"PS2_PORT_PRIVATE_MOLTENVK"]) ||
+                ![name isKindOfClass:NSString.class] || ![name isEqualToString:name.lastPathComponent] ||
+                ![name hasPrefix:@"lib"] || ![name hasSuffix:@".dylib"])
+                return fail(@"The bundled graphics configuration is invalid.");
+            NSString *path = [frameworks stringByAppendingPathComponent:name];
             if (![fm fileExistsAtPath:path]) return fail(@"A bundled graphics library is missing. Recreate the app from the preserved release manifest.");
-            setenv([library[0] UTF8String], path.fileSystemRepresentation, 1);
+            setenv(key.UTF8String, path.fileSystemRepresentation, 1);
         }
         int fd = open(log.fileSystemRepresentation, O_CREAT | O_WRONLY | O_TRUNC, 0600);
         if (fd < 0) return fail(@"The game log cannot be opened.");

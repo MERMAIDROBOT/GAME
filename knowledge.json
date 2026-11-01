@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": 3,
+  "revision": 6,
   "rules": [
     {
       "id": "ee-sqrt-ft",
@@ -121,6 +121,68 @@
         {
           "word": "46041896",
           "emission": "corrected"
+        }
+      ]
+    },
+    {
+      "id": "vu0-vcallmsr-cmsar0",
+      "revision": 1,
+      "scope": "shared",
+      "status": "active",
+      "kind": "vu0_vcallmsr",
+      "evidence": "SSX 3 terrain collision/culling investigation 2026-10-18: pinned translator emitted ctx->vi[27] (vi holds VI0-VI15) while CTC2 vi27 stores ctx->vu0_cmsar0; EE Core/VU manuals: VCALLMSR starts at CMSAR0. Dev build proof: course drawn and collision restored",
+      "fixtures": [
+        {
+          "word": "4a00d839",
+          "emission": "legacy"
+        },
+        {
+          "word": "4a00d839",
+          "emission": "corrected"
+        }
+      ]
+    },
+    {
+      "id": "vu0-macro-vu-memory",
+      "revision": 1,
+      "scope": "shared",
+      "status": "active",
+      "kind": "vu0_vu_memory",
+      "evidence": "SSX 3 bezier terrain investigation 2026-10-18: the VU0 patch classifier (microprogram 0xDB8) reads its clip matrix from VU0 data qw64-67, uploaded by macro VSQI (ctc2 vi1=0x40; vsqi vfN,(vi1++)); the pinned translator emitted main-RAM WRITE128(vi*16) with VF/VI fields swapped, so the matrix never reached VU0 memory and every patch was classified as culled. EE Core/VU manuals: macro LQI/SQI/LQD/SQD/ILWR/ISWR address VU0 data memory in quadwords",
+      "fixtures": [
+        {
+          "word": "4be1137d",
+          "emission": "legacy"
+        },
+        {
+          "word": "4be1137d",
+          "emission": "corrected"
+        },
+        {
+          "word": "4be10b7c",
+          "emission": "legacy"
+        },
+        {
+          "word": "4be10b7c",
+          "emission": "corrected"
+        }
+      ]
+    },
+    {
+      "id": "ee-signed-branch-64",
+      "revision": 1,
+      "scope": "shared",
+      "status": "active",
+      "kind": "ee_signed_branch",
+      "evidence": "R5900 signed scalar branches compare low 64-bit GPR; zero-extended QMFC2 sign bit reproduced false polygon collisions; independently bounded opcode rewrite.",
+      "fixtures": [
+        {
+          "before": "// 0x1000: 0x1d000001 bgtz\nconst bool take = (GPR_S32(ctx, 8) > 0);\n",
+          "after": "// 0x1000: 0x1d000001 bgtz\nconst bool take = (GPR_S64(ctx, 8) > 0);\n"
+        },
+        {
+          "before": "// 0x1000: 0x1d000001 bgtz\nconst bool take = (GPR_S64(ctx, 8) > 0);\n",
+          "after": "// 0x1000: 0x1d000001 bgtz\nconst bool take = (GPR_S64(ctx, 8) > 0);\n"
         }
       ]
     }

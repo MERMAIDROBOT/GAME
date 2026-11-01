@@ -12,3 +12,6 @@ class Targets(unittest.TestCase):
     def test_mac_target_platform_gate(self):
         check_target('macos','build-native','Darwin')
         with self.assertRaises(ValueError): check_target('macos','build-native','Linux')
+    def test_source_recovery_commands_belong_to_both_products(self):
+        for command in ['relocate-source-graph','recover-compile-settings','revise-source-graph','amend-source-graph','capture-source-corrections','retain-source-corrections','apply-source-corrections']:
+            check_target('cpp',command,'Linux');check_target('macos',command,'Darwin')

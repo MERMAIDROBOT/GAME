@@ -1,0 +1,18 @@
+{
+  "license": "GPL-3.0; upstream raylib API header separately zlib licensed",
+  "source": "native PCM implementation and drift control qualified in native host stream, October20-23,2026",
+  "original_component_sha256": "2039b2079b185e05fea98057293065880fad8392961590f8174de5120e4ec032",
+  "adaptations": [
+    "retain guest-memory constants required for VAG compatibility",
+    "direct raylib API header",
+    "native PCM on by default, legacy clip duplicate route off by default",
+    "connect IopHost submit/reset PCM API to host backend"
+  ],
+  "base_file_sha256": {
+    "ps2xRuntime/src/lib/ps2_audio.cpp": "00baeae2f761812539297bce306e299c49ff94857f4ff12271d1bfd604d469c9",
+    "ps2xRuntime/include/runtime/ps2_audio.h": "1c587b41853d76c5cb10c52571049412f4bfb1a89a7e426928f70fc6e1bc5e27",
+    "ps2xRuntime/src/lib/ps2_iop_host.h": "5116812cb61fd5be00c002f98d0b19f4f138ba10248e9e24cb9d91425b197704",
+    "ps2xRuntime/src/lib/ps2_iop_host.cpp": "17a35b99e8535f38b47097361fb7bfedb30966c9d85b04e83f4e97a86d8ae0f6"
+  },
+  "game_assets_or_generated_game_code": false
+}

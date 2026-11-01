@@ -1,0 +1,123 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+@@ -19,6 +19,7 @@
+ #include <cstdlib>
+ #include <deque>
+ #include <memory>
++#include <optional>
+ 
+ #include "Syscalls/Helpers/State.h"
+ 
+@@ -1488,7 +1489,7 @@
+             {
+                 const uint32_t curAddr = addr + static_cast<uint32_t>(copied);
+                 const uint32_t offset = curAddr & PS2_RAM_MASK;
+-                size_t chunk = std::min<size_t>(size - copied, PS2_RAM_SIZE - offset);
++                size_t chunk = std::min<size_t>({size - copied, PS2_RAM_SIZE - offset, 4096u});
+                 if (chunk == 0u)
+                 {
+                     break;
+@@ -1508,6 +1509,7 @@
+                     curAddr,
+                     callbackEvents);
+                 copied += chunk;
++                if (!callbackEvents.empty() || mpegDemuxBackpressured(playback)) break;
+             }
+             return copied;
+         }
+@@ -1546,6 +1548,7 @@
+                         return copied;
+                     }
+ 
++                    if (!callbackEvents.empty() || mpegDemuxBackpressured(playback)) return copied;
+                     const uint32_t remaining = byteCount - first;
+                     if (remaining != 0u)
+                     {
+@@ -1608,7 +1611,7 @@
+             return true;
+         }
+ 
+-        void dispatchGuestStreamCallback(uint8_t *rdram,
++        std::optional<GuestInvocation> dispatchGuestStreamCallback(uint8_t *rdram,
+                                          R5900Context *callerCtx,
+                                          PS2Runtime *runtime,
+                                          const MpegStreamCallbackEvent &event,
+@@ -1616,7 +1619,7 @@
+         {
+             if (!rdram || !callerCtx || !runtime || callback.func == 0u || !runtime->hasFunction(callback.func))
+             {
+-                return;
++                return std::nullopt;
+             }
+ 
+             static unsigned callbackTraceCount = 0;
+@@ -1627,12 +1630,12 @@
+             const uint32_t cbDataAddr = acquireMpegCallbackData(runtime);
+             if (cbDataAddr == 0u)
+             {
+-                return;
++                return std::nullopt;
+             }
+             if (!writeMpegCallbackData(rdram, cbDataAddr, event))
+             {
+                 releaseMpegCallbackData(cbDataAddr);
+-                return;
++                return std::nullopt;
+             }
+ 
+             R5900Context callbackCtx = *callerCtx;
+@@ -1652,7 +1655,7 @@
+                 if (trace) std::cerr << "[MPEG:Callback:RETURN] result=" << getRegU32(&result, 2) << std::endl;
+                 releaseMpegCallbackData(cbDataAddr);
+             };
+-            runtime->eeScheduler().queueInvocation(std::move(invocation));
++            return invocation;
+         }
+ 
+         void dispatchStreamCallbacks(uint8_t *rdram,
+@@ -1665,13 +1668,19 @@
+                 return;
+             }
+ 
++            std::vector<GuestInvocation> invocations;
+             for (const MpegStreamCallbackEvent &event : events)
+             {
+                 for (const MpegRegisteredCallback &callback : event.callbacks)
+                 {
+-                    dispatchGuestStreamCallback(rdram, ctx, runtime, event, callback);
+-                }
+-            }
++                    if (auto invocation=dispatchGuestStreamCallback(rdram,ctx,runtime,event,callback))
++                        invocations.push_back(std::move(*invocation));
++                }
++            }
++            // Consume callbacks before the caller can reuse the source ring.
++            // The scheduler preserves the caller continuation and callback order.
++            if (!invocations.empty())
++                runtime->eeScheduler().invokeCurrentSequence(std::move(invocations));
+         }
+ 
+         void dispatchStreamCallbacksUnlocked(uint8_t *rdram,
+@@ -2232,8 +2241,9 @@
+             });
+         }
+ 
++        // Publish before the scheduler transfers without returning.
++        setReturnS32(ctx, static_cast<int32_t>(consumed));
+         dispatchStreamCallbacksUnlocked(rdram, ctx, runtime, callbackEvents);
+-        setReturnS32(ctx, static_cast<int32_t>(consumed));
+     }
+ 
+     void sceMpegDemuxPssRing(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+@@ -2326,8 +2336,9 @@
+             });
+         }
+ 
++        // Publish before the scheduler transfers without returning.
++        setReturnS32(ctx, static_cast<int32_t>(consumed));
+         dispatchStreamCallbacksUnlocked(rdram, ctx, runtime, callbackEvents);
+-        setReturnS32(ctx, static_cast<int32_t>(consumed));
+     }
+ 
+     void sceMpegDispCenterOffX(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

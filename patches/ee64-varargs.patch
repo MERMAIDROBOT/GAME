@@ -1,0 +1,36 @@
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -773,6 +773,17 @@
+         return out;
+     }
+ 
++    // Opt-out: PS2_PORT_EE64_VARARGS=0 restores the 32-bit pair reading.
++    inline bool ee64RegisterArgs()
++    {
++        static const bool on = []
++        {
++            const char *v = std::getenv("PS2_PORT_EE64_VARARGS");
++            return !(v && v[0] == '0');
++        }();
++        return on;
++    }
++
+     class Ps2VarArgCursor
+     {
+     public:
+@@ -799,6 +810,15 @@
+ 
+         uint64_t nextU64()
+         {
++            // Claude 2026-10-25: the EE compiler passes a 64-bit value (double, long long) whole in one 64-bit
++            // argument register, not split over a pair; "x%.1f" of 6.5 printed 0.0 (low word of a2, stale a3).
++            if (m_slotIndex < 8u && ee64RegisterArgs())
++            {
++                uint64_t value = 0;
++                std::memcpy(&value, &m_ctx->r[4 + m_slotIndex], sizeof(value));
++                ++m_slotIndex;
++                return value;
++            }
+             // O32 ABI aligns 64-bit variadic values on even 32-bit slots.
+             if ((m_slotIndex & 1u) != 0u)
+             {

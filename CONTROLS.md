@@ -44,3 +44,11 @@ prompts to finish before sending the next action. F1 hides or restores the guide
 The installed Debug app and a separate GPU Test candidate can use different
 runtimes. Performance and playability results apply only to the tested build;
 the engineering plan records the current acceptance status.
+
+Optional remote touchscreen direction recovery: set `PS2_PORT_TOUCH_ASSIST=1`
+only for a stream client that emits keyboard events and drops a held direction
+within 100 ms after releasing another button. The direction survives for at most
+300 ms, ending on a real repress, reversal or backend change. Each axis expires
+independently. Default input is unchanged, and L2 is never remapped. This policy
+is not an automatic missed-trick fix for physical controllers or ordinary
+keyboard users; remote player acceptance is still required.
