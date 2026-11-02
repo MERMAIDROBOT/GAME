@@ -7,6 +7,11 @@ code `lui`+`addiu`/`ori` address pairs) and keep targets that look like function
 * the target follows `jr ra`, its delay slot and only alignment `nop`s, or
 * the target opens with a stack prologue `addiu sp,sp,-N`.
 
+Independently of pointers, the first instruction of each executable section (after alignment
+`nop`s) is a candidate when it is a stack prologue: compiled sections begin with a function, and
+one placed first has no preceding `jr ra` for the analyzer to split on. The prologue requirement
+keeps non-EE code sections (VU microcode) out.
+
 Accepted targets become `general.entry_points` hints in the private analyzer config. Hints are
 compilation candidates, not verified functions; `collect-runtime-targets` covers the stragglers.
 """
@@ -79,12 +84,33 @@ def classify(raw, target, spans):
     return None
 
 
+def _section_starts(raw):
+    """First non-padding word address of each SHF_EXECINSTR section, when it is a stack prologue."""
+    shoff, = struct.unpack_from('<I', raw, 32)
+    shentsize, shnum = struct.unpack_from('<HH', raw, 46)
+    if not shoff or shentsize < 40:
+        return set()
+    starts = set()
+    for i in range(shnum):
+        _, kind, flags, addr, offset, size = struct.unpack_from('<6I', raw, shoff + shentsize * i)
+        if kind != 1 or not flags & 4 or size < 4 or addr & 3 or offset + size > len(raw):
+            continue  # PROGBITS with SHF_EXECINSTR only
+        for k in range(min(MAX_PADDING_WORDS + 1, size // 4)):
+            word = struct.unpack_from('<I', raw, offset + 4 * k)[0]
+            if word:
+                if _is_prologue(word):
+                    starts.add(addr + 4 * k)
+                break
+    return starts
+
+
 def scan(raw):
     """Sorted [(address, reason)] of pointer-only function start candidates in an ELF image."""
     spans = executable_spans(raw)
     accepted = []
-    for target in sorted(_pointers(raw, spans)):
-        reason = classify(raw, target, spans)
+    sections = _section_starts(raw)
+    for target in sorted(_pointers(raw, spans) | sections):
+        reason = classify(raw, target, spans) if target not in sections else 'section_start'
         if reason:
             accepted.append((target, reason))
     if len(accepted) > MAX_HINTS:
@@ -123,7 +149,7 @@ def apply(profile, private, write_config=True):
                   implementation_sha256=digest(Path(__file__).read_bytes()),
                   analyzer_config_sha256=digest(text.encode()), local_only=True, functions_verified=False,
                   already_known=len(found) - len(candidates),
-                  counts={r: sum(1 for _, x in candidates if x == r) for r in ('after_return', 'stack_prologue')},
+                  counts={r: sum(1 for _, x in candidates if x == r) for r in ('after_return', 'stack_prologue', 'section_start')},
                   candidates=[dict(address=f'{at:08x}', reason=r) for at, r in candidates],
                   config_updated=bool(write_config and rendered != text))
     if write_config and rendered != text:

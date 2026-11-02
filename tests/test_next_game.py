@@ -120,6 +120,9 @@ class NextGameTests(unittest.TestCase):
             elif command=='knowledge-plan':
                 from knowledge import plan
                 plan(profile, private)
+            elif command=='code-census':
+                from code_census import census
+                census(private, profile)
             else: getattr(lab,command)(profile,private)
         with patch.object(lab,'WORK',self.root/'work'),contextlib.redirect_stdout(io.StringIO()):
             r=next_game.run(self.profile,'first',source=source,execute=True,runner=actual)
@@ -215,3 +218,20 @@ class NativeResumeContract(unittest.TestCase):
     def test_revoked_runtime_verdict_invalidates_runtime_stage(self):
         analysis=self.private/'analysis';analysis.mkdir();lab.save(analysis/'native-build-stage.json',dict(source_graph_recipe_sha256='a'*64,runtime_verified=False));lab.save(analysis/'runtime-tests-stage.json',dict(success=True))
         with self.assertRaisesRegex(ValueError,'conformance before packaging'):next_game.outputs(self.private,'test-runtime','analysis/runtime-tests-stage.json')
+
+
+
+class StagePlan(unittest.TestCase):
+    def test_translate_plan_keeps_every_stage_through_the_syntax_check(self):
+        import next_game
+        names = [c for c, _ in next_game.stages_through('translate')]
+        self.assertEqual(names, [c for c, _ in next_game.STAGES])
+        self.assertEqual(names[-1], 'check-generated')
+        self.assertIn('code-census', names)
+
+    def test_intake_plan_ends_with_the_knowledge_plan(self):
+        import next_game
+        names = [c for c, _ in next_game.stages_through('intake')]
+        self.assertEqual(names[-1], 'knowledge-plan')
+        self.assertIn('code-census', names)
+        self.assertNotIn('translate', names)

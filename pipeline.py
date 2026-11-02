@@ -55,7 +55,7 @@ SOURCE_FILES = ('patches/native-callback-context-lifetime.patch',) + ('patches/h
                 'tools/reference/COPYING.LESSER', 'tools/reference/COPYING.GPLv3',
                 'patches/scalar-fpu.patch', 'FPU.md',
                 'patches/runtime-title-conformance.patch', 'tests/test_title_conformance.py', 'tests/test_runtime_patch_stack.py',
-                'cdimage.py', 'pointer_entries.py', 'tests/test_cdimage.py', 'tests/test_pointer_entries.py',
+                'cdimage.py', 'pointer_entries.py', 'code_census.py', 'tests/test_cdimage.py', 'tests/test_pointer_entries.py', 'tests/test_code_census.py',
                 'cadence.py', 'tests/test_cadence.py', 'NEW-REPOSITORIES-2026-10-17.md', 'CADENCE.md',
                 'platforms/macos/adapter.json', 'platforms/macos/macos_adapter.py',
                 'ab_check.py', 'tests/test_ab_check.py',
@@ -436,7 +436,18 @@ def analyze(profile, private):
         else:
             text = text.replace('[general]', f'[general]\n{key} = {value}', 1)
     config.write_text(text)
-    save(private / 'analysis/analyzer-stage.json', {'success': True, 'config': str(config), 'tool_revision': LOCK['ps2recomp']['revision']})
+    # Stripped executables: the analyzer can merge a function only reached through a pointer into its
+    # predecessor. Add the generic pointer-entry hints here so every title gets them without a manual
+    # step and this stage's recorded output is the final configuration. Profile opt-out:
+    # "pointer_entry_hints": false.
+    pointer_hints = None
+    if profile.get('pointer_entry_hints', True) is not False:
+        from pointer_entries import apply as apply_pointer_hints
+        report = apply_pointer_hints(profile, private, write_config=True)
+        pointer_hints = {'candidates': len(report['candidates']), 'counts': report['counts'],
+                         'already_known': report['already_known'], 'config_updated': report['config_updated']}
+    save(private / 'analysis/analyzer-stage.json', {'success': True, 'config': str(config), 'tool_revision': LOCK['ps2recomp']['revision'],
+                                                    'pointer_entry_hints': pointer_hints})
     print('Analyzer finished; configuration saved locally')
 
 
@@ -615,7 +626,7 @@ def main(target=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile', help='Explicit per-game profile JSON (required for game processing)')
     sub = parser.add_subparsers(dest='command', required=True)
-    for cmd in ['doctor', 'bootstrap', 'bootstrap-runtime', 'build-native', 'test-runtime', 'boot-probe', 'diagnose', 'package-local', 'verify', 'inspect', 'analyze', 'check-generated', 'prepare', 'status']:
+    for cmd in ['doctor', 'bootstrap', 'bootstrap-runtime', 'build-native', 'test-runtime', 'boot-probe', 'diagnose', 'package-local', 'verify', 'inspect', 'code-census', 'analyze', 'check-generated', 'prepare', 'status']:
         sub.add_parser(cmd)
     translation = sub.add_parser('translate')
     translation.add_argument('--feedback', help='Explicit private runtime-feedback run name; revalidates fingerprints')
@@ -1114,6 +1125,9 @@ def main(target=None):
                           'probe_matches_reference':report.get('probe_matches_reference'),
                           'whole_game_clean_build':False},indent=2))
         if report['status']!='passed': sys.exit(2)
+    elif args.command == 'code-census':
+        from code_census import census
+        census(private, profile)
     elif args.command == 'enhancement-plan':
         from enhancements import schedule
         report=schedule(profile,private)
