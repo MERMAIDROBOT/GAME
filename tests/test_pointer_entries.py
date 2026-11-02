@@ -122,6 +122,30 @@ class SectionStartEntries(unittest.TestCase):
         self.assertEqual(pointer_entries._section_starts(elf()), set())
 
 
+class PrologueAfterReturn(unittest.TestCase):
+    def _raw(self, code):
+        body = struct.pack(f'<{len(code)}I', *code)
+        header = struct.pack('<16sHHIIIIIHHHHHH', b'\x7fELF\x01\x01\x01' + bytes(9), 2, 8, 1, 0x100000, 52, 0, 0, 52, 32, 1, 40, 0, 0)
+        load = struct.pack('<8I', 1, 0x100, 0x100000, 0, len(body), len(body), 5, 4)
+        raw = bytearray(0x100 + len(body)); raw[:52] = header; raw[52:84] = load; raw[0x100:] = body
+        return bytes(raw)
+
+    def test_unreferenced_prologue_after_return_is_a_start(self):
+        code = [0x27BDFFF0, 0x34020001, JR_RA, 0x27BD0010,   # f1 ends: jr ra, delay slot restores sp
+                0x27BDFFE0, 0x34020002, JR_RA, 0x27BD0020,   # 0x100010 f2: nothing points here
+                0x27BDFFD0, JR_RA, NOP, NOP, NOP,            # 0x100020 f3 after f2's delay slot
+                0x27BDFFC0, JR_RA, NOP]                       # 0x100034 f4 after jr ra, nop delay, two padding nops
+        found = dict(pointer_entries.scan(self._raw(code)))
+        self.assertEqual(found.get(0x100010), 'prologue_after_return')
+        self.assertEqual(found.get(0x100020), 'prologue_after_return')
+        self.assertEqual(found.get(0x100034), 'prologue_after_return')
+
+    def test_prologue_without_a_preceding_return_is_not_a_start(self):
+        code = [0x27BDFFF0, 0x34020001, 0x10400002, NOP,     # beqz: not a function end
+                0x27BDFFE0, JR_RA, NOP]
+        self.assertNotIn(0x100010, dict(pointer_entries.scan(self._raw(code))))
+
+
 class AnalyzeStageAddsPointerHints(unittest.TestCase):
     """The analyze stage merges pointer-entry hints itself (no manual step); profiles may opt out."""
 

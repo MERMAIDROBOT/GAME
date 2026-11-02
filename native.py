@@ -138,6 +138,7 @@ def build_native(profile, private):
             f'-DPS2_PORT_TEST_SOURCE={lab.ROOT / "tests/runtime_timer.cpp"}',
             f'-DPS2_PORT_VU_COMPILER_SOURCE={lab.ROOT / "tools/vu1_recomp.cpp"}',
             f'-DPS2_PORT_VU_COMPILED_DIR={vu_directory}',
+            f'-DPS2_PORT_OVERLAY_DIR={overlay_build_directory(profile, private)}',
             '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=16']
         record = private / 'analysis/native-build-stage.json'
         record.unlink(missing_ok=True)
@@ -251,13 +252,25 @@ def test_runtime(profile, private):
     print('Synthetic runtime in synchronous/worker modes, IOP imports, host input/presentation, 43 VU and 45 texture, palette and VRAM checks passed; no retail code executed.')
 
 
+def overlay_build_directory(profile, private):
+    """private/overlays when the profile opts in (`overlay_build: true`) and overlays were registered; else ''."""
+    if profile.get('overlay_build', False) is not True:
+        return ''
+    record = Path(private) / 'analysis/overlay-translation.json'
+    if not record.is_file() or not json.loads(record.read_text()).get('accepted_overlays'):
+        raise ValueError('overlay_build is set but no overlays were registered; run translate-overlays')
+    if not json.loads(record.read_text()).get('syntax_sample', {}).get('success'):
+        raise ValueError('Overlay sources have not passed the syntax sample; run translate-overlays')
+    return str(Path(private) / 'overlays')
+
+
 # Applied in order over the pinned PS2Recomp revision. The IOP patch carries the SPU2 device,
 # scheduler conformance (RPC servers honour thread priority, blocking RPC, alarms), AutoDMA and
 # their CTest suites; it stacks on the diagnostics patch. Title conformance carries the generic
 # kernel/IOP/CD/GS/MPEG behaviour a second title needed (see ENGINE.md "Runtime title conformance").
 RUNTIME_PATCHES = ('patches/runtime-diagnostics.patch', 'patches/ps2xIOP-port-lab.patch', 'patches/scalar-fpu.patch',
                    'patches/runtime-title-conformance.patch', 'patches/scalar-fpu-compare.patch',
-                   'patches/runtime-hotpaths.patch', 'patches/native-pcm.patch','patches/host-input.patch','patches/ee64-varargs.patch','patches/sdk-audio-policy.patch','patches/gif-image2.patch', 'patches/mpeg-stream-callbacks.patch','patches/host-input-events.patch','patches/touch-direction-recovery.patch','patches/native-save-root.patch','patches/host-clock-accounting.patch','patches/native-callback-context-lifetime.patch')
+                   'patches/runtime-hotpaths.patch', 'patches/native-pcm.patch','patches/host-input.patch','patches/ee64-varargs.patch','patches/sdk-audio-policy.patch','patches/gif-image2.patch', 'patches/mpeg-stream-callbacks.patch','patches/host-input-events.patch','patches/touch-direction-recovery.patch','patches/native-save-root.patch','patches/host-clock-accounting.patch','patches/native-callback-context-lifetime.patch','patches/overlay-dispatch.patch')
 
 
 def private_source_patches(profile, private):

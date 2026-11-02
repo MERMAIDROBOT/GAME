@@ -73,7 +73,7 @@ class NextGameTests(unittest.TestCase):
         (self.private/'generated/a.cpp').write_text('corrupted')
         self.called.clear()
         self.run_workflow(execute=True, through='translate', resume=True)
-        self.assertEqual(self.called, ['verify', 'translate', 'check-generated'])
+        self.assertEqual(self.called, ['verify', 'translate', 'check-generated', 'translate-overlays'])
     def test_changed_disc_revision_refuses_resume(self):
         self.run_workflow()
         (self.disc/'TEST.ELF').write_bytes(minimal_elf(entry=0x200008))
@@ -222,11 +222,11 @@ class NativeResumeContract(unittest.TestCase):
 
 
 class StagePlan(unittest.TestCase):
-    def test_translate_plan_keeps_every_stage_through_the_syntax_check(self):
+    def test_translate_plan_keeps_every_stage_through_overlay_translation(self):
         import next_game
         names = [c for c, _ in next_game.stages_through('translate')]
         self.assertEqual(names, [c for c, _ in next_game.STAGES])
-        self.assertEqual(names[-1], 'check-generated')
+        self.assertEqual(names[-2:], ['check-generated', 'translate-overlays'])
         self.assertIn('code-census', names)
 
     def test_intake_plan_ends_with_the_knowledge_plan(self):

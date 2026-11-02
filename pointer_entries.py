@@ -7,8 +7,9 @@ code `lui`+`addiu`/`ori` address pairs) and keep targets that look like function
 * the target follows `jr ra`, its delay slot and only alignment `nop`s, or
 * the target opens with a stack prologue `addiu sp,sp,-N`.
 
-Independently of pointers, the first instruction of each executable section (after alignment
-`nop`s) is a candidate when it is a stack prologue: compiled sections begin with a function, and
+Independently of pointers, a stack prologue right after `jr ra`, its delay slot and alignment
+`nop`s is a candidate (both sides of the boundary are visible), and the first instruction of each
+executable section (after alignment `nop`s) is a candidate when it is a stack prologue: compiled sections begin with a function, and
 one placed first has no preceding `jr ra` for the analyzer to split on. The prologue requirement
 keeps non-EE code sections (VU microcode) out.
 
@@ -104,13 +105,41 @@ def _section_starts(raw):
     return starts
 
 
+def _prologues_after_return(raw, spans):
+    """Stack prologues that directly follow `jr ra`, its delay slot and only alignment `nop`s.
+
+    Both halves of the boundary are visible, so these are function starts even when nothing in
+    the image points at them (callers in other programs, tables built at run time)."""
+    found = set()
+    for a, b, pos in spans:
+        words = struct.unpack_from(f'<{(b - a) // 4}I', raw, pos)
+        for i, word in enumerate(words):
+            if not _is_prologue(word):
+                continue
+            k = i - 1
+            while k >= 0 and i - k <= MAX_PADDING_WORDS and words[k] == 0:
+                k -= 1
+            # words[k] is the last non-nop before the prologue: the delay slot, or `jr ra` when the
+            # delay slot itself is a nop.
+            if (k >= 1 and words[k - 1] == JR_RA) or (k >= 0 and words[k] == JR_RA and i - k >= 2):
+                found.add(a + 4 * i)
+    return found
+
+
 def scan(raw):
-    """Sorted [(address, reason)] of pointer-only function start candidates in an ELF image."""
+    """Sorted [(address, reason)] of function start candidates the analyzer can miss in an ELF image."""
     spans = executable_spans(raw)
     accepted = []
     sections = _section_starts(raw)
-    for target in sorted(_pointers(raw, spans) | sections):
-        reason = classify(raw, target, spans) if target not in sections else 'section_start'
+    pointers = _pointers(raw, spans)
+    structural = _prologues_after_return(raw, spans) - pointers - sections
+    for target in sorted(pointers | sections | structural):
+        if target in sections:
+            reason = 'section_start'
+        elif target in structural:
+            reason = 'prologue_after_return'
+        else:
+            reason = classify(raw, target, spans)
         if reason:
             accepted.append((target, reason))
     if len(accepted) > MAX_HINTS:
@@ -149,7 +178,7 @@ def apply(profile, private, write_config=True):
                   implementation_sha256=digest(Path(__file__).read_bytes()),
                   analyzer_config_sha256=digest(text.encode()), local_only=True, functions_verified=False,
                   already_known=len(found) - len(candidates),
-                  counts={r: sum(1 for _, x in candidates if x == r) for r in ('after_return', 'stack_prologue', 'section_start')},
+                  counts={r: sum(1 for _, x in candidates if x == r) for r in ('after_return', 'stack_prologue', 'section_start', 'prologue_after_return')},
                   candidates=[dict(address=f'{at:08x}', reason=r) for at, r in candidates],
                   config_updated=bool(write_config and rendered != text))
     if write_config and rendered != text:

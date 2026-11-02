@@ -55,7 +55,7 @@ SOURCE_FILES = ('patches/native-callback-context-lifetime.patch',) + ('patches/h
                 'tools/reference/COPYING.LESSER', 'tools/reference/COPYING.GPLv3',
                 'patches/scalar-fpu.patch', 'FPU.md',
                 'patches/runtime-title-conformance.patch', 'tests/test_title_conformance.py', 'tests/test_runtime_patch_stack.py',
-                'cdimage.py', 'pointer_entries.py', 'code_census.py', 'tests/test_cdimage.py', 'tests/test_pointer_entries.py', 'tests/test_code_census.py',
+                'cdimage.py', 'pointer_entries.py', 'code_census.py', 'overlays.py', 'tests/test_overlays.py', 'runtime/overlays/overlay_dispatch.hpp', 'patches/overlay-dispatch.patch', 'tests/overlay_dispatch.cpp', 'tests/test_overlay_dispatch.py', 'tests/test_cdimage.py', 'tests/test_pointer_entries.py', 'tests/test_code_census.py',
                 'cadence.py', 'tests/test_cadence.py', 'NEW-REPOSITORIES-2026-10-17.md', 'CADENCE.md',
                 'platforms/macos/adapter.json', 'platforms/macos/macos_adapter.py',
                 'ab_check.py', 'tests/test_ab_check.py',
@@ -579,6 +579,21 @@ def translate(profile, private, feedback=None):
     print('Native build and gameplay remain unverified.')
 
 
+def syntax_check_command(*include_dirs):
+    """clang++ syntax-only command for generated C++ against the runtime headers."""
+    compiler = shutil.which('clang++')
+    if not compiler:
+        raise RuntimeError('Native clang++ is missing')
+    flags = [compiler, '-std=c++20', '-fsyntax-only', '-ferror-limit=8',
+             '-I', str(SOURCE / 'ps2xRuntime/include'), '-I', str(SOURCE / 'ps2xRuntime/src/lib/Kernel'),
+             '-I', str(SOURCE / 'ps2xIOP/include')]
+    for directory in include_dirs:
+        flags += ['-I', str(directory)]
+    if platform.machine() == 'arm64':
+        flags += ['-DUSE_SSE2NEON', '-I', str(BUILD / '_deps/sse2neon-src')]
+    return flags
+
+
 def check_generated(profile, private):
     """Check representative generated source with the native compiler, not a game build."""
     directory = private / 'generated'
@@ -589,14 +604,7 @@ def check_generated(profile, private):
     # Spread a general sample across the inventory and include largest functions.
     sample = {files[0], files[-1], *files[::max(1, len(files) // 8)]}
     sample.update(sorted(files, key=lambda p: p.stat().st_size, reverse=True)[:2])
-    compiler = shutil.which('clang++')
-    if not compiler:
-        raise RuntimeError('Native clang++ is missing')
-    flags = [compiler, '-std=c++20', '-fsyntax-only', '-ferror-limit=8',
-             '-I', str(SOURCE / 'ps2xRuntime/include'), '-I', str(SOURCE / 'ps2xRuntime/src/lib/Kernel'),
-             '-I', str(SOURCE / 'ps2xIOP/include'), '-I', str(directory)]
-    if platform.machine() == 'arm64':
-        flags += ['-DUSE_SSE2NEON', '-I', str(BUILD / '_deps/sse2neon-src')]
+    flags = syntax_check_command(directory)
     records = []
     for p in sorted(sample):
         log = private / 'logs/native-syntax' / (p.name + '.log')
@@ -626,7 +634,7 @@ def main(target=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile', help='Explicit per-game profile JSON (required for game processing)')
     sub = parser.add_subparsers(dest='command', required=True)
-    for cmd in ['doctor', 'bootstrap', 'bootstrap-runtime', 'build-native', 'test-runtime', 'boot-probe', 'diagnose', 'package-local', 'verify', 'inspect', 'code-census', 'analyze', 'check-generated', 'prepare', 'status']:
+    for cmd in ['doctor', 'bootstrap', 'bootstrap-runtime', 'build-native', 'test-runtime', 'boot-probe', 'diagnose', 'package-local', 'verify', 'inspect', 'code-census', 'translate-overlays', 'analyze', 'check-generated', 'prepare', 'status']:
         sub.add_parser(cmd)
     translation = sub.add_parser('translate')
     translation.add_argument('--feedback', help='Explicit private runtime-feedback run name; revalidates fingerprints')
@@ -1128,6 +1136,10 @@ def main(target=None):
     elif args.command == 'code-census':
         from code_census import census
         census(private, profile)
+    elif args.command == 'translate-overlays':
+        from overlays import translate_overlays, check_overlays
+        translate_overlays(profile, private)
+        check_overlays(private)
     elif args.command == 'enhancement-plan':
         from enhancements import schedule
         report=schedule(profile,private)

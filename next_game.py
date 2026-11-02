@@ -18,7 +18,8 @@ STAGES = [('verify', 'verification.json'), ('inspect', 'analysis/elf.json'),
           ('code-census', 'analysis/code-census.json'),
           ('knowledge-plan', 'analysis/knowledge-plan.json'),
           ('analyze', 'analysis/analyzer-stage.json'), ('translate', 'analysis/translation-stage.json'),
-          ('check-generated', 'analysis/native-syntax-stage.json')]
+          ('check-generated', 'analysis/native-syntax-stage.json'),
+          ('translate-overlays', 'analysis/overlay-translation.json')]
 
 INTAKE_LAST = 'knowledge-plan'
 
@@ -278,6 +279,11 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
             census = json.loads(census_path.read_text())
             report['code_outside_boot_executable'] = {k: census.get(k) for k in ('scanned', 'ee_candidate_regions', 'ee_candidate_bytes',
                                                        'unlisted_sector_bytes', 'iop_module_bytes', 'boot_executable_bytes')}
+        overlay_path = Path(private)/'analysis/overlay-translation.json'
+        if through != 'intake' and overlay_path.is_file():
+            overlay = json.loads(overlay_path.read_text())
+            report['overlay_translation'] = {k: overlay.get(k) for k in ('translated_overlays', 'accepted_overlays', 'functions',
+                                             'decode_failures', 'errors', 'native_build_verified', 'runtime_verified')}
         from enhancements import schedule
         graph=schedule(profile,private)
         report['enhancement_stages']={'qualified':graph['completed'],'total':graph['total'],
