@@ -45,6 +45,12 @@ def emit(word):
             f'ctx->f[{fd}] = FPU_DIV_S(ctx->f[{fs}], ctx->f[{ft}]); }}')
 
 
+def reference_call(word):
+    """The call the patched recompiler emits (patches/fpu-reference-flags.patch); already correct."""
+    fd,fs,ft=registers(word)
+    return f'ctx->f[{fd}] = ps2_fpu::{VALUES[word&MASK]}(ctx, ctx->f[{fs}], ctx->f[{ft}]);'
+
+
 def rewrite(text):
     records=list(re.finditer(r'// 0x[0-9a-fA-F]+: 0x([0-9a-fA-F]{8})[^\n]*\n',text))
     edits=[];count=0;finite_block=finite_helper_block(text)
@@ -56,7 +62,7 @@ def rewrite(text):
         start=record.end()
         prefix=re.match(r'\s*(?:ctx->pc\s*=\s*0x[0-9a-fA-F]+u?;\s*)?',text[start:end])
         start+=prefix.end();body=text[start:end]
-        if shape(emit(word)).match(body): continue
+        if shape(emit(word)).match(body) or shape(reference_call(word)).match(body): continue
         old=shape(legacy(word)).match(body)
         if not old and VALUES[word&MASK]=='div' and finite_block:
             fd,fs,ft=registers(word)

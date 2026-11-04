@@ -88,20 +88,30 @@ def capture_images(private,capture):
     private=Path(private).resolve();capture=Path(capture).resolve()
     if not capture.is_relative_to(private) or not capture.is_dir():
         raise ValueError('Keep captured vector images inside private game storage')
-    images=sorted(capture.glob('vu1_*.bin'))
+    # VU1 micro memory (16 KiB) and VU0 microprograms run by VCALLMS (4 KiB).
+    images=sorted(capture.glob('vu1_*.bin'))+sorted(capture.glob('vu0_*.bin'))
     if not images or len(images)>MAX_IMAGES:
-        raise ValueError(f'Expected 1 to {MAX_IMAGES} captured VU1 images')
+        raise ValueError(f'Expected 1 to {MAX_IMAGES} captured VU images')
     for path in images:
-        if path.is_symlink() or not path.is_file() or path.stat().st_size!=16384:
-            raise ValueError('Expected complete 16 KiB images without symlinks')
+        size=4096 if path.name.startswith('vu0_') else 16384
+        if path.is_symlink() or not path.is_file() or path.stat().st_size!=size:
+            raise ValueError('Expected complete VU images (16 KiB VU1, 4 KiB VU0) without symlinks')
     return images
+
+
+def analyze_named(name,data):
+    """The dependency report for one captured image; the analysis covers VU1 programs only."""
+    if name.startswith('vu0_'):
+        return dict(schema=1,image_sha256=sha(data),bytes=len(data),unit='vu0',status='not_analyzed',
+                    runtime_optimization_eligible=False)
+    return analyze_image(data)
 
 
 def analyze_capture(private,capture,name):
     if not re.fullmatch('[a-z0-9][a-z0-9_-]*',name):
         raise ValueError('Invalid dependency report name')
     paths=capture_images(private,capture)
-    images={p.name:analyze_image(p.read_bytes()) for p in paths}
+    images={p.name:analyze_named(p.name,p.read_bytes()) for p in paths}
     target=Path(private)/'analysis/vu-dependencies'/name
     # Resolve containment before creation as well as checking each image.
     if not target.resolve().is_relative_to(Path(private).resolve()):

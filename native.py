@@ -7,6 +7,8 @@ import os
 import subprocess
 import time
 import plistlib
+import platform
+import sys
 import shutil
 import pipeline as lab
 from compute_slot import exclusive,assert_idle,slot
@@ -92,6 +94,44 @@ def bootstrap_runtime():
     print('Public runtime library built; no game data involved')
 
 
+GRAPHICS_PLUGIN = 'liblocal-native-gs-plugin.dylib'
+
+
+def build_native_graphics(profile, private):
+    """Build the GPU GS renderer (runtime/gpu/native-plugin) beside the game when the profile asks for it.
+
+    Every input is in this repository (vendored Vulkan headers, generated loader, committed SPIR-V) or pinned in
+    the profile (MoltenVK, a platform SDK staged in private storage), so nothing is fetched. Returns the frameworks
+    to bundle: the plugin and MoltenVK, bound by native_launch.framework_bindings."""
+    spec = profile.get('native_graphics')
+    if not spec:
+        return {}
+    if not isinstance(spec, dict) or set(spec) - {'platform_sdks'}:
+        raise ValueError('native_graphics takes only platform_sdks')
+    from platform_sdks import frameworks as sdk_frameworks
+    sdks = sdk_frameworks(spec, private)
+    if 'libMoltenVK.dylib' not in sdks and platform.system() == 'Darwin':
+        raise ValueError('native_graphics on macOS needs a pinned MoltenVK platform SDK')
+    for check in (['tools/gen_vk_loader.py', '--check'], ['tools/gen_shaders.py', '--check']):
+        subprocess.run([sys.executable, str(lab.ROOT / check[0]), check[1]], check=True)
+    build = private / 'native-graphics-build'
+    command = [lab.ENV / 'bin/cmake', '-S', lab.ROOT / 'runtime/gpu/native-plugin', '-B', build, '-G', 'Ninja',
+               f'-DCMAKE_MAKE_PROGRAM={lab.ENV / "bin/ninja"}', '-DCMAKE_BUILD_TYPE=Release',
+               f'-DPS2_RUNTIME_SOURCE={lab.SOURCE / "ps2xRuntime"}', '-DFETCHCONTENT_FULLY_DISCONNECTED=ON']
+    logged(command, private / 'logs/native-graphics-configure.log')
+    logged([lab.ENV / 'bin/cmake', '--build', build, '--target', 'ps2_native_plugin', '-j', '2'],
+           private / 'logs/native-graphics-build.log')
+    plugin = build / GRAPHICS_PLUGIN
+    if not plugin.is_file():
+        raise RuntimeError('GPU renderer build reported success without the plugin')
+    from native_components import binary_dependencies
+    binary_dependencies(plugin)  # system frameworks only; no reference backend
+    sources = {name: lab.digest(lab.ROOT / name) for name in lab.SOURCE_FILES if name.startswith('runtime/gpu/')}
+    import hashlib
+    inventory = hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()
+    return {GRAPHICS_PLUGIN: {'path': str(plugin), 'sha256': lab.digest(plugin), 'engine_sources_sha256': inventory}, **sdks}
+
+
 def build_native(profile, private):
     # Refuse active play before expensive source validation; builders retain their own locks.
     assert_runtime_slot_idle()
@@ -148,7 +188,8 @@ def build_native(profile, private):
         binary = build / 'ps2xRuntime/ps2EntryRunner'
         if not binary.exists():
             raise RuntimeError('Native build reported success without the runner binary')
-        lab.save(record, {'success': True, 'binary': str(binary), 'sha256': lab.digest(binary),
+        frameworks = build_native_graphics(profile, private)
+        lab.save(record, {'success': True, 'binary': str(binary), 'sha256': lab.digest(binary), 'frameworks': frameworks,
                          'runtime_verified': False, 'built_at': time.time(),
                          'vu_execution_supported':True,'compiled_vu':vu_record,
                          'runtime_patches': {name: lab.digest(lab.ROOT / name) for name in RUNTIME_PATCHES},
@@ -270,7 +311,7 @@ def overlay_build_directory(profile, private):
 # kernel/IOP/CD/GS/MPEG behaviour a second title needed (see ENGINE.md "Runtime title conformance").
 RUNTIME_PATCHES = ('patches/runtime-diagnostics.patch', 'patches/ps2xIOP-port-lab.patch', 'patches/scalar-fpu.patch',
                    'patches/runtime-title-conformance.patch', 'patches/scalar-fpu-compare.patch',
-                   'patches/runtime-hotpaths.patch', 'patches/native-pcm.patch','patches/host-input.patch','patches/ee64-varargs.patch','patches/sdk-audio-policy.patch','patches/gif-image2.patch', 'patches/mpeg-stream-callbacks.patch','patches/host-input-events.patch','patches/touch-direction-recovery.patch','patches/native-save-root.patch','patches/host-clock-accounting.patch','patches/native-callback-context-lifetime.patch','patches/overlay-dispatch.patch')
+                   'patches/runtime-hotpaths.patch', 'patches/native-pcm.patch','patches/host-input.patch','patches/ee64-varargs.patch','patches/sdk-audio-policy.patch','patches/gif-image2.patch', 'patches/mpeg-stream-callbacks.patch','patches/host-input-events.patch','patches/touch-direction-recovery.patch','patches/native-save-root.patch','patches/host-clock-accounting.patch','patches/native-callback-context-lifetime.patch','patches/overlay-dispatch.patch','patches/stub-interior-entries.patch','patches/mmi-reference-forms.patch','patches/vu0-reference-forms.patch','patches/link-branch-reference.patch','patches/fpu-reference-flags.patch','patches/vu-micro-reference.patch','patches/gs-host-rounding.patch','patches/vu-run-to-end.patch','patches/vu-vf0-constant.patch','patches/iop-shared-pool.patch','patches/presentation-fidelity.patch','patches/gpu-renderer-host.patch','patches/window-thread-failure.patch','patches/hd-frame-stride.patch','patches/vsync-setting.patch')
 
 
 def private_source_patches(profile, private):
@@ -503,7 +544,10 @@ def stage_runtime_disc(private, destination):
         temporary = target.with_name(target.name + '.staging')
         if temporary.is_symlink():
             raise ValueError('Unsafe runtime staging temporary file')
-        shutil.copy2(original, temporary)
+        # An APFS clone shares the original's blocks (no extra space); any other volume gets a real copy.
+        if platform.system() != 'Darwin' or subprocess.run(['/bin/cp', '-c', str(original), str(temporary)],
+                                                           capture_output=True).returncode:
+            shutil.copy2(original, temporary)
         if temporary.stat().st_size != record['bytes'] or lab.digest(temporary) != record['sha256']:
             temporary.unlink()
             raise ValueError('Runtime copy differs from preserved disc manifest')
@@ -587,8 +631,16 @@ def package_local(profile, private):
     if type(application_storage) is not bool:
         raise ValueError('Profile application_support_storage must be a boolean')
     runtime_disc = private / 'disc-root'
+    # An app opened from Finder is its own privacy subject: reading or writing ~/Documents waits on a permission
+    # prompt. Application Support storage keeps the disc, log, graphics history and GPU cache outside it.
+    storage = private
     if application_storage:
-        runtime_disc = stage_runtime_disc(private, Path.home() / 'Library/Application Support/PS2 Port Lab' / profile['id'] / 'disc-root')
+        storage = Path.home() / 'Library/Application Support/PS2 Port Lab' / profile['id']
+        runtime_disc = stage_runtime_disc(private, storage / 'disc-root')
+        for folder in ('logs', 'cache/gpu-pipelines'):
+            (storage / folder).mkdir(parents=True, exist_ok=True)
+        if 'PS2_PORT_HW_GS_PIPELINE_CACHE_DIR' in launch['Environment']:
+            launch['Environment']['PS2_PORT_HW_GS_PIPELINE_CACHE_DIR'] = str(storage / 'cache/gpu-pipelines')
     macos = app / 'Contents/MacOS'
     resources = app / 'Contents/Resources'
     macos.mkdir(parents=True, exist_ok=True)
@@ -601,10 +653,10 @@ def package_local(profile, private):
     shutil.copy2(binary, staged_runner)
     staged_runner.replace(macos / 'ps2EntryRunner')
     config = {'Executable': str(lab.boot_executable(runtime_disc, profile)),
-              'DiscDirectory': str(runtime_disc), 'LogFile': str(private / 'logs/finder-launch.log'),
+              'DiscDirectory': str(runtime_disc), 'LogFile': str(storage / 'logs/finder-launch.log'),
               'BuildIdentifier': stage['sha256'][:16], 'LocalDiagnostics': True,
               'RendererWorker': renderer_worker, 'AsyncPresentation': async_presentation, 'GraphicsHistoryEnabled': graphics_history,
-              'GraphicsHistory': str(private / 'logs/window-graphics-history.jsonl')}
+              'GraphicsHistory': str(storage / 'logs/window-graphics-history.jsonl')}
     config.update({key:value for key,value in launch.items() if key!='assets'})
     capabilities={}
     declared_capabilities=stage.get('runtime_capabilities',{})

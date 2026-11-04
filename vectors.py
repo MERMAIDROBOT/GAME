@@ -59,7 +59,7 @@ def compile_vu(profile,private,capture):
         # Diagnose the exact snapshots supplied to this compilation, without
         # changing generated code selection or declaring parallel eligibility.
         evidence=dict(schema=1,implementation=analysis_model,local_only=True,retail_derived=True,
-                      images={name:deps.analyze_image(data) for name,data in snapshots.items()},
+                      images={name:deps.analyze_named(name,data) for name,data in snapshots.items()},
                       runtime_optimization_eligible=False)
         lab.save(temporary/'vu-dependencies.json',evidence)
         if any(lab.digest(path)!=inputs[path.name] for path in images):

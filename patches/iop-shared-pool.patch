@@ -1,0 +1,152 @@
+diff --git a/ps2xIOP/CMakeLists.txt b/ps2xIOP/CMakeLists.txt
+index 9b10fac..a591cde 100644
+--- a/ps2xIOP/CMakeLists.txt
++++ b/ps2xIOP/CMakeLists.txt
+@@ -58,6 +58,11 @@ if(PS2X_IOP_BUILD_TESTS)
+     target_link_libraries(ps2_iop_compatibility_tests PRIVATE ps2_iop)
+     add_test(NAME ps2_iop_compatibility_tests COMMAND ps2_iop_compatibility_tests)
+ 
++    add_executable(ps2_iop_shared_pool_test tests/iop_shared_pool_test.cpp)
++    target_link_libraries(ps2_iop_shared_pool_test PRIVATE ps2_iop)
++    target_include_directories(ps2_iop_shared_pool_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
++    add_test(NAME ps2_iop_shared_pool_test COMMAND ps2_iop_shared_pool_test)
++
+     add_executable(ps2_iop_import_version_tests tests/iop_import_version_tests.cpp)
+     target_link_libraries(ps2_iop_import_version_tests PRIVATE ps2_iop)
+     target_include_directories(ps2_iop_import_version_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.h b/ps2xIOP/src/emulator/core/iop_memory.h
+index 8a8860f..2a37f78 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.h
++++ b/ps2xIOP/src/emulator/core/iop_memory.h
+@@ -25,7 +25,9 @@ namespace ps2x::iop::detail
+         static constexpr uint32_t Spu2End = 0x1FA00000u;
+         static constexpr uint32_t SifBase = 0x1D000000u;
+         static constexpr uint32_t SifEnd = 0x1D001000u;
+-        static constexpr uint32_t HeapBase = 0x00120000u;
++        // One pool for IRX images and AllocSysMemory, as SYSMEM manages it: modules are placed by the same
++        // first-fit allocator, so neither reserves a fixed slice the other cannot use.
++        static constexpr uint32_t HeapBase = 0x00010000u;
+         static constexpr uint32_t HeapLimit = 0x001F0000u;
+ 
+         struct Allocation
+diff --git a/ps2xIOP/src/emulator/services/iop_module_loader.cpp b/ps2xIOP/src/emulator/services/iop_module_loader.cpp
+index 80e59d6..087c421 100644
+--- a/ps2xIOP/src/emulator/services/iop_module_loader.cpp
++++ b/ps2xIOP/src/emulator/services/iop_module_loader.cpp
+@@ -431,8 +431,10 @@ namespace ps2x::iop::detail
+         int64_t delta = 0;
+         if (relocate)
+         {
+-            base = alignUp(moduleCursor, 0x100u);
+-            if (base + span >= IopMemory::HeapBase)
++            // The image takes its span from the shared IOP pool (first fit, 256-byte aligned).
++            (void)moduleCursor;
++            base = memory.allocate(span, 0x100u);
++            if (base == 0u)
+             {
+                 result.error = IopImageLoadError::ArenaExhausted;
+                 return result;
+@@ -443,6 +445,9 @@ namespace ps2x::iop::detail
+         else
+         {
+             base = minVaddr;
++            // A fixed-address image inside the pool claims its range so later allocations cannot overlap it.
++            if (base >= IopMemory::HeapBase && base < IopMemory::HeapLimit)
++                (void)memory.allocate(span, 16u, base);
+         }
+ 
+         if (hasLoad)
+diff --git a/ps2xIOP/tests/iop_shared_pool_test.cpp b/ps2xIOP/tests/iop_shared_pool_test.cpp
+new file mode 100644
+index 0000000..66be8d4
+--- /dev/null
++++ b/ps2xIOP/tests/iop_shared_pool_test.cpp
+@@ -0,0 +1,88 @@
++// IRX images and AllocSysMemory share one first-fit IOP pool, as SYSMEM manages it. A large driver buffer
++// requested after a few small modules must fit in the memory those modules left free; a fixed slice reserved for
++// module images (the old 0x120000 heap floor) left only 832 KiB and starved a 1.1 MiB sound buffer.
++#include "emulator/core/iop_memory.h"
++#include "emulator/services/iop_module_loader.h"
++
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <vector>
++
++using ps2x::iop::detail::IopImageLoadError;
++using ps2x::iop::detail::IopMemory;
++using ps2x::iop::detail::IopModuleLoader;
++
++namespace
++{
++    bool expect(bool condition, const char *message)
++    {
++        if (!condition)
++            std::fprintf(stderr, "FAIL: %s\n", message);
++        return condition;
++    }
++
++    void put16(std::vector<uint8_t> &b, size_t at, uint16_t v) { std::memcpy(b.data() + at, &v, 2); }
++    void put32(std::vector<uint8_t> &b, size_t at, uint32_t v) { std::memcpy(b.data() + at, &v, 4); }
++
++    // Relocatable IRX (type 0xFF80) with one PT_LOAD of `span` bytes at vaddr 0.
++    std::vector<uint8_t> irx(uint32_t span)
++    {
++        std::vector<uint8_t> b(52 + 32 + 16, 0);
++        b[0] = 0x7F; b[1] = 'E'; b[2] = 'L'; b[3] = 'F'; b[4] = 1; b[5] = 1; b[6] = 1;
++        put16(b, 16, 0xFF80u);       // type: SCE IOP relocatable
++        put16(b, 18, 8u);            // machine: MIPS
++        put32(b, 20, 1u);            // version
++        put32(b, 24, 0u);            // entry
++        put32(b, 28, 52u);           // phoff
++        put16(b, 40, 52u);           // ehsize
++        put16(b, 42, 32u);           // phentsize
++        put16(b, 44, 1u);            // phnum
++        put32(b, 52 + 0, 1u);        // PT_LOAD
++        put32(b, 52 + 4, 84u);       // offset
++        put32(b, 52 + 8, 0u);        // vaddr
++        put32(b, 52 + 16, 16u);      // filesz
++        put32(b, 52 + 20, span);     // memsz
++        put32(b, 52 + 24, 7u);       // flags
++        return b;
++    }
++
++    bool overlaps(uint32_t a, uint32_t as, uint32_t b, uint32_t bs) { return a < b + bs && b < a + as; }
++}
++
++int main()
++{
++    IopMemory memory;
++
++    // A few small modules, about 0x3B000 bytes in all (a typical boot set).
++    uint32_t bases[3]{}, spans[3]{0x20000u, 0x18000u, 0x3000u};
++    for (int i = 0; i < 3; ++i)
++    {
++        const auto image = irx(spans[i]);
++        const auto loaded = IopModuleLoader::load(image, memory, 0u);
++        if (!expect(static_cast<bool>(loaded), "small module must load")) return 1;
++        bases[i] = loaded.base;
++        if (!expect(memory.allocationContaining(loaded.base).has_value(), "module image must be owned by the pool")) return 1;
++    }
++    if (!expect(bases[0] >= 0x00010000u && bases[0] < 0x00020000u, "first module must load at the bottom of user memory")) return 1;
++
++    // The driver's buffer: 1146880 bytes, which the old fixed module slice could never provide.
++    const uint32_t buffer = memory.allocate(1146880u);
++    if (!expect(buffer != 0u, "1.1 MiB allocation must fit beside the loaded modules")) return 1;
++    for (int i = 0; i < 3; ++i)
++        if (!expect(!overlaps(buffer, 1146880u, bases[i], spans[i]), "allocation must not overlap a module image")) return 1;
++
++    // A module loaded after allocations must not land on them either.
++    const uint32_t small = memory.allocate(0x400u);
++    const auto later = IopModuleLoader::load(irx(0x8000u), memory, 0u);
++    if (!expect(static_cast<bool>(later), "module after allocations must load")) return 1;
++    if (!expect(!overlaps(later.base, 0x8000u, buffer, 1146880u) && !overlaps(later.base, 0x8000u, small, 0x400u),
++                "late module must not overlap allocations")) return 1;
++
++    // Exhaustion is still reported, not silently overlapped.
++    const auto huge = IopModuleLoader::load(irx(0x00180000u), memory, 0u);
++    if (!expect(!huge && huge.error == IopImageLoadError::ArenaExhausted, "oversized module must report exhaustion")) return 1;
++
++    std::puts("iop shared pool: ok");
++    return 0;
++}

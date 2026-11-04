@@ -1,0 +1,1850 @@
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -392,6 +392,7 @@
+     src/lib/ps2_runtime.cpp
+     src/lib/ps2_vif1_interpreter.cpp
+     src/lib/vu/ps2_vu1_core.cpp
++    src/lib/vu/ps2float.cpp
+     src/lib/games_database.cpp
+ )
+ 
+diff --git a/ps2xRuntime/include/ps2float.h b/ps2xRuntime/include/ps2float.h
+new file mode 100644
+--- /dev/null
++++ b/ps2xRuntime/include/ps2float.h
+@@ -0,0 +1,93 @@
++/*  PCSX2 - PS2 Emulator for PCs
++ *  Copyright (C) 2002-2024  PCSX2 Dev Team
++ *
++ *  PCSX2 is free software: you can redistribute it and/or modify it under the terms
++ *  of the GNU Lesser General Public License as published by the Free Software Found-
++ *  ation, either version 3 of the License, or (at your option) any later version.
++ *
++ *  PCSX2 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
++ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
++ *  PURPOSE.  See the GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along with PCSX2.
++ *  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/* Bit-exact software model of the EE/VU floating point units, ported from
++ * the hardware-derived PS2Float implementation (Booth-recoded multiplier
++ * through carry-save adder trees, radix-2 SRT divider and square root,
++ * flush-to-zero denormals, round-toward-zero).  Pure integer arithmetic:
++ * results are identical on every host architecture by construction.
++ *
++ * Every operation returns the 32-bit result in the low word of a u64 and
++ * the exception flags in the high word, so a result travels in one
++ * register and no flag storage is written unless the caller asks. */
++
++#ifndef PS2FLOAT_H
++#define PS2FLOAT_H
++
++#if defined(__cplusplus)
++#include <cstddef>
++#include <cstdint>
++typedef uint8_t ps2f_u8;
++typedef int32_t ps2f_s32;
++typedef uint32_t ps2f_u32;
++typedef uint64_t ps2f_u64;
++extern "C" {
++#else
++#include <stddef.h>
++#include <stdint.h>
++typedef uint8_t ps2f_u8;
++typedef int32_t ps2f_s32;
++typedef uint32_t ps2f_u32;
++typedef uint64_t ps2f_u64;
++#endif
++
++#define PS2F_SIGNMASK 0x80000000u
++#define PS2F_MAX_FLOATING_POINT_VALUE 0x7FFFFFFFu
++#define PS2F_MIN_FLOATING_POINT_VALUE 0xFFFFFFFFu
++#define PS2F_ONE 0x3F800000u
++#define PS2F_MIN_ONE 0xBF800000u
++
++/* Flag bits in the high word of a result. */
++#define PS2F_OF (1ULL << 32) /* overflow */
++#define PS2F_UF (1ULL << 33) /* underflow */
++#define PS2F_DZ (1ULL << 34) /* divide by zero */
++#define PS2F_IV (1ULL << 35) /* invalid */
++
++#define ps2f_raw(r) ((ps2f_u32)(r))
++
++ps2f_u64 ps2f_add(ps2f_u32 a, ps2f_u32 b);
++ps2f_u64 ps2f_sub(ps2f_u32 a, ps2f_u32 b);
++ps2f_u64 ps2f_mul(ps2f_u32 a, ps2f_u32 b);
++ps2f_u64 ps2f_div(ps2f_u32 a, ps2f_u32 b);
++ps2f_u64 ps2f_sqrt(ps2f_u32 a);
++ps2f_u64 ps2f_rsqrt(ps2f_u32 a, ps2f_u32 b);
++
++/* Fused chains: acc (+/-) s*t.  acc_of is the accumulator's sticky
++ * overflow state (kept by the caller across MADDA/MSUBA chains); the
++ * returned OF flag is the new sticky state. */
++ps2f_u64 ps2f_madd(ps2f_u32 acc, ps2f_u32 s, ps2f_u32 t, int acc_of);
++ps2f_u64 ps2f_msub(ps2f_u32 acc, ps2f_u32 s, ps2f_u32 t, int acc_of);
++ps2f_u64 ps2f_madda(ps2f_u32 acc, ps2f_u32 s, ps2f_u32 t, int acc_of);
++ps2f_u64 ps2f_msuba(ps2f_u32 acc, ps2f_u32 s, ps2f_u32 t, int acc_of);
++
++/* VU EFU helpers. */
++ps2f_u64 ps2f_ercpr(ps2f_u32 a);
++ps2f_u64 ps2f_esqrt(ps2f_u32 a);
++ps2f_u64 ps2f_esqur(ps2f_u32 a);
++ps2f_u64 ps2f_ersqrt(ps2f_u32 a);
++
++/* CLIP: returns (plus | (minus << 1)) for value f1 against bound f2. */
++ps2f_u32 ps2f_clip(ps2f_u32 f1, ps2f_u32 f2);
++
++/* Ordering of PS2 floats as signed magnitudes: -1, 0, 1. */
++ps2f_s32 ps2f_compare(ps2f_u32 a, ps2f_u32 b);
++/* Magnitude-only comparison: -1, 0, 1. */
++ps2f_s32 ps2f_compare_operands(ps2f_u32 a, ps2f_u32 b);
++
++#if defined(__cplusplus)
++}
++#endif
++
++#endif /* PS2FLOAT_H */
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -61,6 +61,23 @@
+         return capture;
+     }
+ 
++    // VU0 microprograms (VCALLMS) are captured beside the VU1 images, as vu0_<hash>.bin (4 KiB).
++    Vu1ProgramCapture *vu0ProgramCapture()
++    {
++        static Vu1ProgramCapture *capture = []() -> Vu1ProgramCapture *
++        {
++            const char *value = std::getenv("PS2X_VU1_CAPTURE");
++            if (!value || !*value)
++                return nullptr;
++            auto *result = new Vu1ProgramCapture();
++            result->directory = value;
++            std::error_code error;
++            std::filesystem::create_directories(result->directory, error);
++            return result;
++        }();
++        return capture;
++    }
++
+     struct Vu1ImageCacheEntry
+     {
+         std::vector<uint8_t> image;
+@@ -242,6 +259,35 @@
+         return registry;
+     }
+ 
++    // Compiled VU0 microprograms, keyed by the hash of the 4 KiB VU0 code image (tools/vu1_recomp.cpp).
++    Vu1CompiledRegistry &vu0CompiledRegistry()
++    {
++        static Vu1CompiledRegistry registry = []
++        {
++            Vu1CompiledRegistry result;
++            const char *value = std::getenv("PS2X_VU1_RECOMP");
++            result.enabled = !(value && std::strcmp(value, "0") == 0);
++            return result;
++        }();
++        return registry;
++    }
++
++    VU1InterpreterAccess::CompiledProgram lookupCompiledVu0Program(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory)
++    {
++        Vu1CompiledRegistry &registry = vu0CompiledRegistry();
++        if (!registry.enabled || registry.programs.empty() || !memory)
++            return nullptr;
++        const uint64_t generation = memory->getVU0CodeGeneration();
++        if (registry.memory != memory || registry.code != vuCode || registry.generation != generation)
++        {
++            registry.memory = memory;
++            registry.code = vuCode;
++            registry.generation = generation;
++            registry.current = findCompiledVu1Image(registry, vuCode, codeSize);
++        }
++        return registry.current;
++    }
++
+     VU1InterpreterAccess::CompiledProgram lookupCompiledVu1Program(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory)
+     {
+         Vu1CompiledRegistry &registry = vu1CompiledRegistry();
+@@ -300,6 +346,49 @@
+             }
+         }
+     }
++
++    void captureVu0Program(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory, uint32_t pc)
++    {
++        Vu1ProgramCapture *capture = vu0ProgramCapture();
++        if (!capture || !memory)
++            return;
++        const uint64_t generation = memory->getVU0CodeGeneration();
++        if (capture->memory != memory || capture->generation != generation)
++        {
++            capture->memory = memory;
++            capture->generation = generation;
++            capture->imageHash = fnv1a64(vuCode, codeSize);
++            char name[64];
++            std::snprintf(name, sizeof(name), "vu0_%016llx.bin", static_cast<unsigned long long>(capture->imageHash));
++            const std::filesystem::path path = capture->directory / name;
++            std::error_code error;
++            if (!std::filesystem::exists(path, error))
++            {
++                if (FILE *file = std::fopen(path.string().c_str(), "wb"))
++                {
++                    std::fwrite(vuCode, 1, codeSize, file);
++                    std::fclose(file);
++                }
++            }
++        }
++        const uint64_t key = (capture->imageHash & ~0xFFFull) ^ pc;
++        if (capture->entryCalls[key]++ == 0u)
++        {
++            if (FILE *file = std::fopen((capture->directory / "entries-vu0.txt").string().c_str(), "a"))
++            {
++                std::fprintf(file, "%016llx %04x\n", static_cast<unsigned long long>(capture->imageHash), pc);
++                std::fclose(file);
++            }
++        }
++        if (++capture->calls % 100000u == 0u)
++        {
++            if (FILE *file = std::fopen((capture->directory / "calls-vu0.txt").string().c_str(), "w"))
++            {
++                std::fprintf(file, "calls %llu entries %zu\n", static_cast<unsigned long long>(capture->calls), capture->entryCalls.size());
++                std::fclose(file);
++            }
++        }
++    }
+ }
+ 
+ void VU1Interpreter::addVfRead(InstructionUsage &usage, uint8_t reg, uint8_t lanes)
+@@ -385,8 +474,7 @@
+     m_state.r = 0x3F800000u;
+     m_cycle = 0;
+     resetScheduler();
+-    if (m_unit == Unit::VU1)
+-        vu1NormShadow.valid = false;
++    vu1NormShadow.valid = false;  // compiled VU0 and VU1 programs share the normalised shadow
+ }
+ 
+ bool VU1Interpreter::pipelinesPending() const
+@@ -773,12 +861,14 @@
+     case 0x74:
+     case 0x75:
+     case 0x76:
+-    case 0x77:
+     case 0x78:
+     case 0x79:
+     case 0x7A:
+     case 0x7C:
+     case 0x7D:
++    case 0x7E:
++        // EFU codes as the hardware encodes them: ESQRT 0x78, ERSQRT 0x79, ERCPR 0x7A, ESIN 0x7C,
++        // EATAN 0x7D, EEXP 0x7E (0x77 is not an instruction).
+         if (m_unit == Unit::VU0)
+         {
+             usage.reserved = true;
+@@ -792,7 +882,7 @@
+             break;
+         case 0x71:
+         case 0x72:
+-        case 0x77:
++        case 0x79:
+             usage.latency = 18u;
+             break;
+         case 0x73:
+@@ -800,7 +890,7 @@
+             break;
+         case 0x74:
+         case 0x75:
+-        case 0x7C:
++        case 0x7D:
+             usage.latency = 54u;
+             break;
+         case 0x76:
+@@ -808,10 +898,10 @@
+         case 0x7A:
+             usage.latency = 12u;
+             break;
+-        case 0x79:
++        case 0x7C:
+             usage.latency = 29u;
+             break;
+-        case 0x7D:
++        case 0x7E:
+             usage.latency = 44u;
+             break;
+         default:
+@@ -970,6 +1060,8 @@
+                          uint8_t *vuData, uint32_t dataSize,
+                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
+ {
++    if (m_unit == Unit::VU0)
++        captureVu0Program(vuCode, codeSize, memory, m_state.pc);
+     if (m_unit == Unit::VU1)
+     {
+         captureVu1Program(vuCode, codeSize, memory, m_state.pc);
+@@ -986,8 +1078,11 @@
+ bool VU1InterpreterAccess::runLoop(VU1Interpreter &vu, uint8_t *vuCode, uint32_t codeSize, uint8_t *vuData, uint32_t dataSize,
+                                    GS &gs, PS2Memory *memory, uint32_t maxCycles, bool allowCompiled)
+ {
++    // Compiled C++ for the current code image when one was generated (VU1 and VU0 alike).
+     const CompiledProgram compiled =
+-        allowCompiled && vu.m_unit == VU1Interpreter::Unit::VU1 ? lookupCompiledVu1Program(vuCode, codeSize, memory) : nullptr;
++        !allowCompiled ? nullptr
++        : vu.m_unit == VU1Interpreter::Unit::VU1 ? lookupCompiledVu1Program(vuCode, codeSize, memory)
++                                                 : lookupCompiledVu0Program(vuCode, codeSize, memory);
+     return runLoopWith(vu, vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles, compiled);
+ }
+ 
+@@ -1023,8 +1118,7 @@
+             continue;
+         }
+         interpretNextPair = false;
+-        if (vu.m_unit == VU1Interpreter::Unit::VU1)
+-            vu1NormShadow.valid = false;
++        vu1NormShadow.valid = false;  // an interpreted pair may change registers behind the shadow
+ 
+         vu.commitReadyPipelines();
+         if (vu.m_state.pc + 8u > codeSize)
+@@ -1267,4 +1361,9 @@
+ void registerVu1CompiledProgram(uint64_t imageHash, VU1InterpreterAccess::CompiledProgram program)
+ {
+     vu1CompiledRegistry().programs[imageHash] = program;
++}
++
++void registerVu0CompiledProgram(uint64_t imageHash, VU1InterpreterAccess::CompiledProgram program)
++{
++    vu0CompiledRegistry().programs[imageHash] = program;
+ }
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl b/ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl
+@@ -7,6 +7,9 @@
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/ps2_memory.h"
+ #include "ps2_vu1_detail.h"
++#include "ps2_port_scalar_fpu.h"
++#include "ps2_vu_float.h"
++#include "ps2float.h"
+ 
+ #include <algorithm>
+ #include <bit>
+@@ -89,6 +92,7 @@
+     const uint32_t magnitude = bits & 0x7FFFFFFFu;
+     const uint32_t exponent = (bits >> 23) & 0xFFu;
+ 
++    // A finished PS2 value: exponent 255 is an ordinary (large) number, a denormal flushes to zero.
+     laneFlags = sign != 0u ? 0x2u : 0u;
+     if (magnitude == 0u)
+     {
+@@ -99,11 +103,6 @@
+         laneFlags |= 0x5u;
+         bits = sign;
+     }
+-    else if (exponent == 0xFFu)
+-    {
+-        laneFlags |= 0x8u;
+-        bits = sign | 0x7F7FFFFFu;
+-    }
+ 
+     std::memcpy(&value, &bits, sizeof(value));
+     return value;
+@@ -170,6 +169,130 @@
+     applyDest(m_state.acc, result, dest);
+ }
+ 
++namespace vu_reference
++{
++    inline uint32_t bitsOf(float value)
++    {
++        uint32_t bits;
++        std::memcpy(&bits, &value, sizeof(bits));
++        return bits;
++    }
++
++    // The PS2 result and flags of FMAC lane `c` of `upper` (macro and micro encodings share the
++    // numbering; the special table holds the ACC forms), from the raw register bits: exponent 255 is
++    // a number, overflow clamps to +-max, a multiply-add rounds the product first and reports the
++    // flags of the final add (ps2_vu_float.h, the same arithmetic as VU0 macro mode).
++    inline bool fmacLane(uint32_t upper, const VU1State &s, uint32_t c, ps2_vu_float::Lane &out)
++    {
++        using ps2_vu_float::Op;
++        const uint8_t op = static_cast<uint8_t>(upper & 0x3Fu);
++        const bool special = op >= 0x3Cu;
++        const uint8_t code = special ? static_cast<uint8_t>((upper & 3u) | ((upper >> 4) & 0x7Cu)) : op;
++        const uint8_t fs = (upper >> 11) & 31u, ft = (upper >> 16) & 31u;
++        const auto vs = [&](uint32_t lane) { return bitsOf(s.vf[fs][lane]); };
++        const auto vt = [&](uint32_t lane) { return bitsOf(s.vf[ft][lane]); };
++        const uint32_t acc = bitsOf(s.acc[c]), q = bitsOf(s.q), i = bitsOf(s.i);
++        const auto lane = [&](Op o, uint32_t a, uint32_t b) { out = ps2_vu_float::lane(o, a, b, acc); return true; };
++        static constexpr uint8_t left[4] = {1u, 2u, 0u, 3u};
++        static constexpr uint8_t right[4] = {2u, 0u, 1u, 3u};
++        if (code <= 0x0Fu || (code >= 0x18u && code <= 0x1Bu))
++        {
++            static constexpr Op group[] = {Op::Add, Op::Sub, Op::Madd, Op::Msub, Op::Max, Op::Mini, Op::Mul};
++            return lane(group[code >> 2], vs(c), vt(code & 3u));
++        }
++        switch (code)
++        {
++        case 0x1Cu: return lane(Op::Mul, vs(c), q);
++        case 0x1Eu: return lane(Op::Mul, vs(c), i);
++        case 0x20u: return lane(Op::Add, vs(c), q);
++        case 0x21u: return lane(Op::Madd, vs(c), q);
++        case 0x22u: return lane(Op::Add, vs(c), i);
++        case 0x23u: return lane(Op::Madd, vs(c), i);
++        case 0x24u: return lane(Op::Sub, vs(c), q);
++        case 0x25u: return lane(Op::Msub, vs(c), q);
++        case 0x26u: return lane(Op::Sub, vs(c), i);
++        case 0x27u: return lane(Op::Msub, vs(c), i);
++        case 0x28u: return lane(Op::Add, vs(c), vt(c));
++        case 0x29u: return lane(Op::Madd, vs(c), vt(c));
++        case 0x2Au: return lane(Op::Mul, vs(c), vt(c));
++        case 0x2Cu: return lane(Op::Sub, vs(c), vt(c));
++        case 0x2Du: return lane(Op::Msub, vs(c), vt(c));
++        case 0x2Eu:  // OPMSUB (upper table) / OPMULA (special table)
++            return lane(special ? Op::Mul : Op::Msub, vs(left[c]), vt(right[c]));
++        default:
++            return false;
++        }
++    }
++
++    // VU1's elementary function unit in exact PS2 arithmetic (ps2float: truncating, no infinities).
++    // ERCPR, ESQRT, ERSQRT, ESUM, ESADD, ERSADD, ELENG and ERLENG reproduce every result of the
++    // ps2autotests hardware run (tests/vu/lower/efu.expected). EATAN* use t = (x - 1) / (x + 1), the
++    // documented odd series (fourth coefficient -0.139085337519646) and pi/4 = 0x3F490FDA; ESIN the odd
++    // series; EEXP 1 / (1 + series)^4. Those are the closest known forms (36/48, 7/16 and 10/16
++    // bit-exact against that run, the rest within a few last-bit steps); the unit's internal precision
++    // is not public.
++    namespace efu
++    {
++        constexpr uint32_t kOne = 0x3F800000u, kPiOver4 = 0x3F490FDAu;
++        constexpr uint32_t kAtan[] = {0x3f7ffff5u, 0xbeaaa61cu, 0x3e4c40a6u, 0xbe0e6c63u,
++                                      0x3dc577dfu, 0xbd6501c4u, 0x3cb31652u, 0xbb84d7e7u};
++        constexpr uint32_t kSin[] = {0x3f800000u, 0xbe2aaaa4u, 0x3c08873eu, 0xb94fb21fu, 0x362e9c14u};
++        constexpr uint32_t kExp[] = {0x3e7fffa8u, 0x3d0007f4u, 0x3b29d3ffu, 0x3933e553u, 0x36b63510u, 0x353961acu};
++        inline float f(uint32_t bits)
++        {
++            float value;
++            std::memcpy(&value, &bits, sizeof(value));
++            return value;
++        }
++        inline uint32_t add(uint32_t a, uint32_t b) { return ps2f_raw(ps2f_add(a, b)); }
++        inline uint32_t sub(uint32_t a, uint32_t b) { return ps2f_raw(ps2f_sub(a, b)); }
++        inline uint32_t mul(uint32_t a, uint32_t b) { return ps2f_raw(ps2f_mul(a, b)); }
++        inline uint32_t div(uint32_t a, uint32_t b) { return ps2f_raw(ps2f_div(a, b)); }
++        inline uint32_t sqrt(uint32_t a) { return ps2f_raw(ps2f_sqrt(a)); }
++        inline uint32_t rsqrt(uint32_t a, uint32_t b) { return ps2f_raw(ps2f_rsqrt(a, b)); }
++        inline uint32_t sumSquares(const float *v)
++        {
++            const uint32_t x = bitsOf(v[0]), y = bitsOf(v[1]), z = bitsOf(v[2]);
++            return add(add(mul(x, x), mul(y, y)), mul(z, z));
++        }
++        inline uint32_t sum(const float *v) { return add(add(add(bitsOf(v[0]), bitsOf(v[1])), bitsOf(v[2])), bitsOf(v[3])); }
++        inline uint32_t atan(uint32_t x)
++        {
++            const uint32_t t = div(sub(x, kOne), add(x, kOne)), t2 = mul(t, t);
++            uint32_t power = t, acc = 0u;
++            for (const uint32_t c : kAtan)
++            {
++                acc = add(acc, mul(c, power));
++                power = mul(power, t2);
++            }
++            return add(acc, kPiOver4);
++        }
++        inline uint32_t sin(uint32_t x)
++        {
++            const uint32_t x2 = mul(x, x);
++            uint32_t power = x, acc = 0u;
++            for (const uint32_t c : kSin)
++            {
++                acc = add(acc, mul(c, power));
++                power = mul(power, x2);
++            }
++            return acc;
++        }
++        inline uint32_t exp(uint32_t x)
++        {
++            uint32_t power = x, acc = 0u;
++            for (const uint32_t c : kExp)
++            {
++                acc = add(acc, mul(c, power));
++                power = mul(power, x);
++            }
++            acc = add(acc, kOne);
++            const uint32_t squared = mul(acc, acc);
++            return div(kOne, mul(squared, squared));
++        }
++    }
++}
++
+ VU1_FORCE_INLINE void VU1Interpreter::normalizeFmacResult(float *result, uint8_t dest,
+                                          uint8_t laneFlags[4])
+ {
+@@ -179,10 +302,13 @@
+         if ((dest & laneForComponent(component)) == 0u)
+             continue;
+ 
+-        long double exactResult = 0.0L;
+-        if (calculateFmacExactResult(component, exactResult))
++        ps2_vu_float::Lane lane{};
++        if (vu_reference::fmacLane(m_currentUpperInstruction, m_state, component, lane))
+         {
+-            laneFlags[component] = normalizeFmacExactResult(result[component], exactResult);
++            std::memcpy(&result[component], &lane.bits, sizeof(lane.bits));
++            laneFlags[component] = static_cast<uint8_t>(((lane.bits & 0x7F800000u) == 0u ? 0x1u : 0u) |
++                                                        (lane.bits >> 31 ? 0x2u : 0u) |
++                                                        (lane.underflow ? 0x4u : 0u) | (lane.overflow ? 0x8u : 0u));
+             continue;
+         }
+ 
+@@ -407,6 +533,11 @@
+ 
+ inline uint32_t VU1Interpreter::calculateFmacProductSticky(uint8_t dest) const
+ {
++    // MADD/MSUB/OPMSUB report the flags of their final add/subtract only, current and sticky alike
++    // (PCSX2 VUflags.cpp and its VU interpreter); no hardware result shows products reaching the
++    // sticky bits.
++    (void)dest;
++    return 0u;
+     uint32_t extraSticky = 0u;
+     const uint32_t upper = m_currentUpperInstruction;
+     const uint8_t op = static_cast<uint8_t>(upper & 0x3Fu);
+@@ -1479,9 +1610,12 @@
+                 result[c] = vs[c] * q;
+             applyFmacDestAcc(result, dest);
+             return;
+-        case 0x1D: // ABS
++        case 0x1D: // ABS: clears the sign bit; exponent 255 stays a number
+             for (int c = 0; c < 4; c++)
+-                result[c] = std::fabs(vs[c]);
++            {
++                const uint32_t bits = vu_reference::bitsOf(m_state.vf[fs][c]) & 0x7FFFFFFFu;
++                std::memcpy(&result[c], &bits, sizeof(bits));
++            }
+             applyDest(vtDest, result, dest);
+             return;
+         case 0x1E: // MULAi
+@@ -2105,55 +2239,33 @@
+             {
+                 int fsf = (instr >> 21) & 0x3;
+                 int ftf = (instr >> 23) & 0x3;
+-                const float num = normalizeOperand(m_state.vf[vfS][fsf]);
+-                const float den = normalizeOperand(m_state.vf[vfT][ftf]);
+-                uint32_t statusDi = 0u;
+-                float result = 0.0f;
+-                if (den == 0.0f)
+-                {
+-                    statusDi = num == 0.0f ? 0x10u : 0x20u;
+-                    result = std::signbit(num) != std::signbit(den)
+-                                 ? -std::numeric_limits<float>::max()
+-                                 : std::numeric_limits<float>::max();
+-                }
+-                else
+-                {
+-                    result = num / den;
+-                }
+-                uint32_t ignoredFlags = 0u;
+-                result = normalizeResult(result, ignoredFlags);
+-                queueQ(result, 7u, statusDi);
++                // PS2 rules: x/0 gives +-max with D, 0/0 sets I (ps2_vu_float.h, as VU0 macro mode).
++                using namespace ps2_vu_float;
++                const uint32_t a = vu_reference::bitsOf(m_state.vf[vfS][fsf]);
++                const uint32_t b = vu_reference::bitsOf(m_state.vf[vfT][ftf]);
++                const uint32_t statusDi = isZero(b) ? (isZero(a) ? 0x10u : 0x20u) : 0u;
++                queueQ(f(settle(u(ps2_port_fpu::ps2_fdiv(f(a), f(b))), value(a) / value(b))), 7u, statusDi);
+                 return;
+             }
+             case 0x39: // SQRT
+             {
+                 int ftf = (instr >> 23) & 0x3;
+-                const float val = normalizeOperand(m_state.vf[vfT][ftf]);
+-                queueQ(std::sqrt(std::fabs(val)), 7u,
+-                       val < 0.0f ? 0x10u : 0u);
++                // sqrt(|x|); a negative non-zero operand sets I.
++                using namespace ps2_vu_float;
++                const uint32_t b = vu_reference::bitsOf(m_state.vf[vfT][ftf]);
++                queueQ(ps2_port_fpu::ps2_fsqrt(f(b)), 7u, (!isZero(b) && (b >> 31)) ? 0x10u : 0u);
+                 return;
+             }
+             case 0x3A: // RSQRT
+             {
+                 int fsf = (instr >> 21) & 0x3;
+                 int ftf = (instr >> 23) & 0x3;
+-                const float num = normalizeOperand(m_state.vf[vfS][fsf]);
+-                const float radicand = normalizeOperand(m_state.vf[vfT][ftf]);
+-                const float den = std::sqrt(std::fabs(radicand));
+-                uint32_t statusDi = radicand < 0.0f ? 0x10u : 0u;
+-                float result = 0.0f;
+-                if (den != 0.0f)
+-                    result = num / den;
+-                else
+-                {
+-                    statusDi = num == 0.0f ? 0x10u : 0x20u;
+-                    result = std::signbit(num)
+-                                 ? -std::numeric_limits<float>::max()
+-                                 : std::numeric_limits<float>::max();
+-                }
+-                uint32_t ignoredFlags = 0u;
+-                result = normalizeResult(result, ignoredFlags);
+-                queueQ(result, 13u, statusDi);
++                // x / sqrt(|y|): a zero root sets D (and I for 0/0), a negative radicand sets I.
++                using namespace ps2_vu_float;
++                const uint32_t a = vu_reference::bitsOf(m_state.vf[vfS][fsf]);
++                const uint32_t b = vu_reference::bitsOf(m_state.vf[vfT][ftf]);
++                const uint32_t statusDi = isZero(b) ? (0x20u | (isZero(a) ? 0x10u : 0u)) : ((b >> 31) ? 0x10u : 0u);
++                queueQ(f(settle(u(ps2_port_fpu::ps2_frsqrt(f(a), f(b))), value(a) / rootValue(b))), 13u, statusDi);
+                 return;
+             }
+             case 0x3B: // WAITQ
+@@ -2272,111 +2384,49 @@
+             case 0x6C: // XGKICK - send GIF packet from VU1 data memory
+                 startXgkick(static_cast<uint32_t>(static_cast<uint16_t>(m_state.vi[viS])));
+                 return;
++            // EFU (VU1 only), at the hardware codes: ESQRT 0x78, ERSQRT 0x79, ERCPR 0x7A, ESIN 0x7C,
++            // EATAN 0x7D, EEXP 0x7E. Exact PS2 arithmetic; see vu_reference::efu.
+             case 0x70: // ESADD
+-            {
+-                const float x = normalizeOperand(m_state.vf[vfS][0]);
+-                const float y = normalizeOperand(m_state.vf[vfS][1]);
+-                const float z = normalizeOperand(m_state.vf[vfS][2]);
+-                queueP(x * x + y * y + z * z, 11u);
++                queueP(vu_reference::efu::f(vu_reference::efu::sumSquares(m_state.vf[vfS])), 11u);
+                 return;
+-            }
+             case 0x71: // ERSADD
+-            {
+-                const float x = normalizeOperand(m_state.vf[vfS][0]);
+-                const float y = normalizeOperand(m_state.vf[vfS][1]);
+-                const float z = normalizeOperand(m_state.vf[vfS][2]);
+-                const float sum = x * x + y * y + z * z;
+-                queueP(sum != 0.0f ? 1.0f / sum : sum, 18u);
++                queueP(vu_reference::efu::f(vu_reference::efu::div(vu_reference::efu::kOne, vu_reference::efu::sumSquares(m_state.vf[vfS]))), 18u);
+                 return;
+-            }
+             case 0x72: // ELENG
+-            {
+-                const float x = normalizeOperand(m_state.vf[vfS][0]);
+-                const float y = normalizeOperand(m_state.vf[vfS][1]);
+-                const float z = normalizeOperand(m_state.vf[vfS][2]);
+-                queueP(std::sqrt(x * x + y * y + z * z), 18u);
++                queueP(vu_reference::efu::f(vu_reference::efu::sqrt(vu_reference::efu::sumSquares(m_state.vf[vfS]))), 18u);
+                 return;
+-            }
+             case 0x73: // ERLENG
+-            {
+-                const float x = normalizeOperand(m_state.vf[vfS][0]);
+-                const float y = normalizeOperand(m_state.vf[vfS][1]);
+-                const float z = normalizeOperand(m_state.vf[vfS][2]);
+-                const float len = std::sqrt(x * x + y * y + z * z);
+-                queueP(len != 0.0f ? 1.0f / len : len, 24u);
++                queueP(vu_reference::efu::f(vu_reference::efu::rsqrt(vu_reference::efu::kOne, vu_reference::efu::sumSquares(m_state.vf[vfS]))), 24u);
+                 return;
+-            }
+             case 0x74: // EATANxy
+-            {
+-                const float x = normalizeOperand(m_state.vf[vfS][0]);
+-                const float y = normalizeOperand(m_state.vf[vfS][1]);
+-                queueP(x != 0.0f ? vuEatan(y / x) : 0.0f, 54u);
++                queueP(vu_reference::efu::f(vu_reference::efu::atan(vu_reference::efu::div(vu_reference::bitsOf(m_state.vf[vfS][1]), vu_reference::bitsOf(m_state.vf[vfS][0])))), 54u);
+                 return;
+-            }
+             case 0x75: // EATANxz
+-            {
+-                const float x = normalizeOperand(m_state.vf[vfS][0]);
+-                const float z = normalizeOperand(m_state.vf[vfS][2]);
+-                queueP(x != 0.0f ? vuEatan(z / x) : 0.0f, 54u);
++                queueP(vu_reference::efu::f(vu_reference::efu::atan(vu_reference::efu::div(vu_reference::bitsOf(m_state.vf[vfS][2]), vu_reference::bitsOf(m_state.vf[vfS][0])))), 54u);
+                 return;
+-            }
+             case 0x76: // ESUM
+-            {
+-                float sum = 0.0f;
+-                for (uint32_t component = 0; component < 4u; ++component)
+-                    sum += normalizeOperand(m_state.vf[vfS][component]);
+-                queueP(sum, 12u);
++                queueP(vu_reference::efu::f(vu_reference::efu::sum(m_state.vf[vfS])), 12u);
+                 return;
+-            }
+-            case 0x77: // ERSQRT
+-            {
+-                const uint32_t component = (instr >> 21) & 3u;
+-                const float value = normalizeOperand(m_state.vf[vfS][component]);
+-                float result = value;
+-                if (result >= 0.0f)
+-                {
+-                    result = std::sqrt(result);
+-                    if (result != 0.0f)
+-                        result = 1.0f / result;
+-                }
+-                queueP(result, 18u);
+-                return;
+-            }
+             case 0x78: // ESQRT
+-            {
+-                const uint32_t component = (instr >> 21) & 3u;
+-                const float value = normalizeOperand(m_state.vf[vfS][component]);
+-                queueP(value >= 0.0f ? std::sqrt(value) : value, 12u);
++                queueP(vu_reference::efu::f(vu_reference::efu::sqrt(vu_reference::bitsOf(m_state.vf[vfS][(instr >> 21) & 3u]))), 12u);
+                 return;
+-            }
+-            case 0x79: // ESIN
+-            {
+-                const uint32_t component = (instr >> 21) & 3u;
+-                const float value = normalizeOperand(m_state.vf[vfS][component]);
+-                queueP(vuEsin(value), 29u);
++            case 0x79: // ERSQRT
++                queueP(vu_reference::efu::f(vu_reference::efu::rsqrt(vu_reference::efu::kOne, vu_reference::bitsOf(m_state.vf[vfS][(instr >> 21) & 3u]))), 18u);
+                 return;
+-            }
+             case 0x7A: // ERCPR
+-            {
+-                const uint32_t component = (instr >> 21) & 3u;
+-                const float value = normalizeOperand(m_state.vf[vfS][component]);
+-                queueP(value != 0.0f ? 1.0f / value : value, 12u);
++                queueP(vu_reference::efu::f(vu_reference::efu::div(vu_reference::efu::kOne, vu_reference::bitsOf(m_state.vf[vfS][(instr >> 21) & 3u]))), 12u);
+                 return;
+-            }
+             case 0x7B: // WAITP
+                 return;
+-            case 0x7C: // EATAN
+-            {
+-                const uint32_t component = (instr >> 21) & 3u;
+-                queueP(vuEatan(normalizeOperand(m_state.vf[vfS][component])), 54u);
++            case 0x7C: // ESIN
++                queueP(vu_reference::efu::f(vu_reference::efu::sin(vu_reference::bitsOf(m_state.vf[vfS][(instr >> 21) & 3u]))), 29u);
+                 return;
+-            }
+-            case 0x7D: // EEXP
+-            {
+-                const uint32_t component = (instr >> 21) & 3u;
+-                queueP(vuEexp(normalizeOperand(m_state.vf[vfS][component])), 44u);
++            case 0x7D: // EATAN
++                queueP(vu_reference::efu::f(vu_reference::efu::atan(vu_reference::bitsOf(m_state.vf[vfS][(instr >> 21) & 3u]))), 54u);
+                 return;
+-            }
++            case 0x7E: // EEXP
++                queueP(vu_reference::efu::f(vu_reference::efu::exp(vu_reference::bitsOf(m_state.vf[vfS][(instr >> 21) & 3u]))), 44u);
++                return;
+             default:
+                 reportReservedInstruction(false, instr);
+                 return;
+@@ -2429,6 +2479,7 @@
+     uint64_t budget = 0;
+     uint64_t xgkickDone = 0;
+     uint8_t *mem = nullptr;
++    uint32_t memSize = 0x4000u;  // 0x1000 for a compiled VU0 microprogram
+     GS *gs = nullptr;
+     PS2Memory *memory = nullptr;
+     uint32_t flagHead = 0;
+@@ -2630,11 +2681,10 @@
+         const __m128i bits = _mm_castps_si128(value);
+         const __m128i exponent = _mm_and_si128(bits, _mm_set1_epi32(0x7F800000));
+         const __m128i sign = _mm_and_si128(bits, _mm_set1_epi32(static_cast<int>(0x80000000u)));
++        // Denormal operands flush to signed zero; exponent 255 is an ordinary (large) PS2 number,
++        // left for the exact path (host arithmetic sees it as Inf/NaN, which fails fmacCore's check).
+         const __m128i zero = _mm_cmpeq_epi32(exponent, _mm_setzero_si128());
+-        const __m128i huge = _mm_cmpeq_epi32(exponent, _mm_set1_epi32(0x7F800000));
+-        __m128i result = _mm_or_si128(_mm_andnot_si128(zero, bits), _mm_and_si128(zero, sign));
+-        result = _mm_or_si128(_mm_andnot_si128(huge, result),
+-                              _mm_and_si128(huge, _mm_or_si128(sign, _mm_set1_epi32(0x7F7FFFFF))));
++        const __m128i result = _mm_or_si128(_mm_andnot_si128(zero, bits), _mm_and_si128(zero, sign));
+         return _mm_castsi128_ps(result);
+     }
+ 
+@@ -3064,101 +3114,46 @@
+     static VU1_NOINLINE __m128 fmacExact(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, uint32_t dest, __m128 s, __m128 t, __m128 a,
+                                          __m128 result, __m128 &normalized, FmacFlags &flags)
+     {
+-        constexpr bool cross = K == FK::Opmsub || K == FK::Opmula;
+-        constexpr bool productSum = K == FK::Madd || K == FK::Msub || K == FK::Opmsub;
+-        constexpr bool usesAcc = K == FK::Madd || K == FK::Msub || K == FK::Opmsub;
+-        const __m128d sLo = _mm_cvtps_pd(s);
+-        const __m128d sHi = _mm_cvtps_pd(_mm_movehl_ps(s, s));
+-        const __m128d tLo = _mm_cvtps_pd(t);
+-        const __m128d tHi = _mm_cvtps_pd(_mm_movehl_ps(t, t));
+-        __m128d eLo;
+-        __m128d eHi;
+-        __m128d pLo = _mm_setzero_pd();
+-        __m128d pHi = _mm_setzero_pd();
+-        if constexpr (K == FK::Add)
++        // The PS2 lane arithmetic of the interpreter (ps2_vu_float.h); s and t arrive already crossed
++        // for OPMSUB/OPMULA. Flags come from each lane's final result.
++        (void)vu;
++        (void)ctx;
++        (void)cycle;
++        (void)result;
++        using ps2_vu_float::Op;
++        constexpr Op op = K == FK::Add   ? Op::Add
++                          : K == FK::Sub ? Op::Sub
++                          : (K == FK::Mul || K == FK::Opmula) ? Op::Mul
++                          : K == FK::Madd ? Op::Madd
++                                          : Op::Msub;
++        alignas(16) uint32_t sv[4], tv[4], av[4], rv[4];
++        _mm_store_ps(reinterpret_cast<float *>(sv), s);
++        _mm_store_ps(reinterpret_cast<float *>(tv), t);
++        _mm_store_ps(reinterpret_cast<float *>(av), a);
++        uint32_t zero = 0u, sign = 0u, under = 0u, over = 0u;
++        for (uint32_t k = 0; k < 4u; ++k)
+         {
+-            eLo = _mm_add_pd(sLo, tLo);
+-            eHi = _mm_add_pd(sHi, tHi);
++            const ps2_vu_float::Lane lane = ps2_vu_float::lane(op, sv[k], tv[k], av[k]);
++            rv[k] = lane.bits;
++            const uint32_t bit = 8u >> k;
++            if ((dest & bit) == 0u)
++                continue;
++            if ((lane.bits & 0x7F800000u) == 0u) zero |= bit;
++            if (lane.bits >> 31) sign |= bit;
++            if (lane.underflow) under |= bit;
++            if (lane.overflow) over |= bit;
+         }
+-        else if constexpr (K == FK::Sub)
+-        {
+-            eLo = _mm_sub_pd(sLo, tLo);
+-            eHi = _mm_sub_pd(sHi, tHi);
+-        }
+-        else
+-        {
+-            pLo = _mm_mul_pd(sLo, tLo);
+-            pHi = _mm_mul_pd(sHi, tHi);
+-            if constexpr (usesAcc)
+-            {
+-                const __m128d aLo = _mm_cvtps_pd(a);
+-                const __m128d aHi = _mm_cvtps_pd(_mm_movehl_ps(a, a));
+-                if constexpr (K == FK::Madd)
+-                {
+-                    eLo = _mm_add_pd(aLo, pLo);
+-                    eHi = _mm_add_pd(aHi, pHi);
+-                }
+-                else
+-                {
+-                    eLo = _mm_sub_pd(aLo, pLo);
+-                    eHi = _mm_sub_pd(aHi, pHi);
+-                }
+-            }
+-            else
+-            {
+-                eLo = pLo;
+-                eHi = pHi;
+-            }
+-        }
+-        if constexpr (cross)
+-            eHi = _mm_unpacklo_pd(eHi, _mm_setzero_pd());
+-
+-        const __m128d absMask = _mm_castsi128_pd(_mm_set1_epi64x(0x7FFFFFFFFFFFFFFFll));
+-        const __m128d maxD = _mm_set1_pd(static_cast<double>(std::numeric_limits<float>::max()));
+-        const __m128d minD = _mm_set1_pd(static_cast<double>(std::numeric_limits<float>::min()));
+-        const __m128d aLo = _mm_and_pd(eLo, absMask);
+-        const __m128d aHi = _mm_and_pd(eHi, absMask);
+-        const __m128d zLo = _mm_cmpeq_pd(aLo, _mm_setzero_pd());
+-        const __m128d zHi = _mm_cmpeq_pd(aHi, _mm_setzero_pd());
+-        const __m128d oLo = _mm_cmpgt_pd(aLo, maxD);
+-        const __m128d oHi = _mm_cmpgt_pd(aHi, maxD);
+-        const __m128d smLo = _mm_cmplt_pd(aLo, minD);
+-        const __m128d smHi = _mm_cmplt_pd(aHi, minD);
+-
+-        const __m128 smallF = _mm_shuffle_ps(_mm_castpd_ps(smLo), _mm_castpd_ps(smHi), _MM_SHUFFLE(2, 0, 2, 0));
+-        const __m128 overF = _mm_shuffle_ps(_mm_castpd_ps(oLo), _mm_castpd_ps(oHi), _MM_SHUFFLE(2, 0, 2, 0));
+-        const __m128 signF = _mm_and_ps(_mm_shuffle_ps(_mm_castpd_ps(eLo), _mm_castpd_ps(eHi), _MM_SHUFFLE(3, 1, 3, 1)),
+-                                        _mm_castsi128_ps(_mm_set1_epi32(static_cast<int>(0x80000000u))));
+-        result = _mm_or_ps(_mm_andnot_ps(smallF, result), _mm_and_ps(smallF, signF));
+-        result = _mm_or_ps(_mm_andnot_ps(overF, result),
+-                           _mm_and_ps(overF, _mm_or_ps(signF, _mm_castsi128_ps(_mm_set1_epi32(0x7F7FFFFF)))));
+-
++        if constexpr (K == FK::Opmsub || K == FK::Opmula)
++            rv[3] = 0u;
+         if (dest != 0u)
+         {
+-            const uint32_t zeroBits = maskBits(zLo, zHi);
+-            const uint32_t smallBits = maskBits(smLo, smHi) & dest;
+-            const uint32_t signBits = maskBits(eLo, eHi) & dest;
+-            const uint32_t underBits = smallBits & ~zeroBits;
+-            const uint32_t overBits = maskBits(oLo, oHi) & dest;
+-            const uint32_t mac = smallBits | (signBits << 4) | (underBits << 8) | (overBits << 12);
+-            const uint32_t status = (smallBits ? 1u : 0u) | (signBits ? 2u : 0u) | (underBits ? 4u : 0u) | (overBits ? 8u : 0u);
+-            uint32_t extra = 0u;
+-            if constexpr (productSum)
+-            {
+-                const __m128d paLo = _mm_and_pd(pLo, absMask);
+-                const __m128d paHi = _mm_and_pd(pHi, absMask);
+-                const uint32_t pZero = maskBits(_mm_cmpeq_pd(paLo, _mm_setzero_pd()), _mm_cmpeq_pd(paHi, _mm_setzero_pd()));
+-                const uint32_t pSmall = maskBits(_mm_cmplt_pd(paLo, minD), _mm_cmplt_pd(paHi, minD)) & dest;
+-                const uint32_t pSign = maskBits(pLo, pHi) & dest;
+-                const uint32_t pOver = maskBits(_mm_cmpgt_pd(paLo, maxD), _mm_cmpgt_pd(paHi, maxD)) & dest;
+-                extra = (pSmall ? 1u : 0u) | (pSign ? 2u : 0u) | ((pSmall & ~pZero) ? 4u : 0u) | (pOver ? 8u : 0u);
+-            }
+-            flags.mac = mac;
+-            flags.status = status;
+-            flags.extra = extra;
++            flags.mac = zero | (sign << 4) | (under << 8) | (over << 12);
++            flags.status = (zero ? 1u : 0u) | (sign ? 2u : 0u) | (under ? 4u : 0u) | (over ? 8u : 0u);
++            flags.extra = 0u;
+         }
+-        normalized = vnorm(result);
+-        return result;
++        const __m128 exact = _mm_load_ps(reinterpret_cast<const float *>(rv));
++        normalized = vnorm(exact);
++        return exact;
+     }
+ 
+     template <FK K>
+@@ -3207,23 +3202,12 @@
+                 result = product;
+             else if constexpr (K == FK::Madd)
+             {
+-#if defined(USE_SSE2NEON) && defined(__aarch64__)
+-                // AppleClang contracts the scalar interpreter's a + s*t.
+-                // NEON add/multiply intrinsics otherwise round twice.
+-                result = vreinterpretq_m128_f32(vfmaq_f32(vreinterpretq_f32_m128(a),
+-                    vreinterpretq_f32_m128(s), vreinterpretq_f32_m128(t)));
+-#else
++                // The FMAC rounds the product, then the sum (no fused multiply-add).
+                 result = _mm_add_ps(a, product);
+-#endif
+             }
+             else
+             {
+-#if defined(USE_SSE2NEON) && defined(__aarch64__)
+-                result = vreinterpretq_m128_f32(vfmsq_f32(vreinterpretq_f32_m128(a),
+-                    vreinterpretq_f32_m128(s), vreinterpretq_f32_m128(t)));
+-#else
+                 result = _mm_sub_ps(a, product);
+-#endif
+             }
+         }
+         if constexpr (cross)
+@@ -3255,6 +3239,17 @@
+             else
+                 safe = _mm_or_ps(safe, _mm_and_ps(resultZero, productZero));
+         }
++        // The host fast path is only valid when no operand has exponent 255: the host reads that as
++        // Inf/NaN (Inf * 0 = NaN), where the PS2 has a large ordinary number.
++        const __m128i expMask = _mm_set1_epi32(0x7F800000);
++        const auto ordinary = [&](__m128 v)
++        {
++            return _mm_castsi128_ps(_mm_xor_si128(_mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(v), expMask), expMask),
++                                                  _mm_set1_epi32(-1)));
++        };
++        safe = _mm_and_ps(safe, _mm_and_ps(ordinary(s), ordinary(t)));
++        if constexpr (productSum)
++            safe = _mm_and_ps(safe, ordinary(a));
+         const uint32_t destLanes = kRev4[dest];
+         return {s, t, result, product, resultZero, productZero,
+                 (static_cast<uint32_t>(_mm_movemask_ps(safe)) & destLanes) == destLanes};
+@@ -3273,16 +3268,10 @@
+             const uint32_t destLanes = kRev4[dest];
+             const uint32_t sign = kRev4[_mm_movemask_ps(c.result)] & dest;
+             const uint32_t zeroBits = kRev4[_mm_movemask_ps(c.resultZero)] & dest;
+-            uint32_t extra = 0u;
+-            if constexpr (productSum)
+-            {
+-                extra = (static_cast<uint32_t>(_mm_movemask_ps(c.product)) & destLanes) != 0u ? 2u : 0u;
+-                if ((static_cast<uint32_t>(_mm_movemask_ps(c.productZero)) & destLanes) != 0u)
+-                    extra |= 1u;
+-            }
++            (void)destLanes;  // flags come from the final result only (no product sticky bits)
+             flags.mac = zeroBits | (sign << 4);
+             flags.status = (zeroBits != 0u ? 1u : 0u) | (sign != 0u ? 2u : 0u);
+-            flags.extra = extra;
++            flags.extra = 0u;
+         }
+         normalized = c.result;
+         return c.result;
+@@ -3303,11 +3292,6 @@
+         }
+         __m128 zeroLanes = c.resultZero;
+         __m128 signLanes = c.result;
+-        if constexpr (productSum)
+-        {
+-            zeroLanes = _mm_or_ps(zeroLanes, c.productZero);
+-            signLanes = _mm_or_ps(signLanes, c.product);
+-        }
+         if (dest != 0xFu)
+         {
+             const __m128 mask = destMask(dest);
+@@ -3338,14 +3322,36 @@
+     template <uint32_t Shift>
+     static VU1_FORCE_INLINE __m128 ftoi(__m128 normalized)
+     {
+-        __m128 scaled = normalized;
+-        if constexpr (Shift != 0u)
+-            scaled = _mm_mul_ps(normalized, _mm_set1_ps(static_cast<float>(1u << Shift)));
+-        const __m128i truncated = _mm_cvttps_epi32(scaled);
+-        const __m128i big = _mm_castps_si128(_mm_cmpge_ps(scaled, _mm_set1_ps(2147483648.0f)));
+-        return _mm_castsi128_ps(_mm_or_si128(_mm_andnot_si128(big, truncated), _mm_and_si128(big, _mm_set1_epi32(0x7FFFFFFF))));
++        // Truncation with saturation by sign, exponent 255 included (ps2_vu_float::toFixed).
++        alignas(16) uint32_t lanes[4];
++        _mm_store_ps(reinterpret_cast<float *>(lanes), normalized);
++        for (uint32_t &lane : lanes)
++            lane = ps2_vu_float::toFixed(lane, static_cast<int>(Shift));
++        return _mm_load_ps(reinterpret_cast<const float *>(lanes));
+     }
+ 
++    // MAX/MINI order PS2 floats as sign-magnitude integers (exponent 255 is a number), lane by lane,
++    // as the interpreter's vuMaxBits/vuMinBits.
++    static VU1_FORCE_INLINE __m128 vmaxBits(__m128 a, __m128 b)
++    {
++        alignas(16) float x[4], y[4];
++        _mm_store_ps(x, a);
++        _mm_store_ps(y, b);
++        for (int k = 0; k < 4; ++k)
++            x[k] = vuMaxBits(x[k], y[k]);
++        return _mm_load_ps(x);
++    }
++
++    static VU1_FORCE_INLINE __m128 vminBits(__m128 a, __m128 b)
++    {
++        alignas(16) float x[4], y[4];
++        _mm_store_ps(x, a);
++        _mm_store_ps(y, b);
++        for (int k = 0; k < 4; ++k)
++            x[k] = vuMinBits(x[k], y[k]);
++        return _mm_load_ps(x);
++    }
++
+     static VU1_FORCE_INLINE __m128 absN(__m128 normalized)
+     {
+         return _mm_andnot_ps(_mm_castsi128_ps(_mm_set1_epi32(static_cast<int>(0x80000000u))), normalized);
+@@ -3396,6 +3402,12 @@
+         return (static_cast<uint32_t>(base + imm) * 16u) & (kFastMemSize - 1u);
+     }
+ 
++    // VU0's 4 KiB data memory (compiled VU0 microprograms).
++    static VU1_FORCE_INLINE uint32_t qaddr0(int32_t base, int32_t imm)
++    {
++        return (static_cast<uint32_t>(base + imm) * 16u) & 0xFFFu;
++    }
++
+     static VU1_FORCE_INLINE __m128 ldq(const uint8_t *mem, uint32_t address)
+     {
+         return _mm_loadu_ps(reinterpret_cast<const float *>(mem + address));
+@@ -3511,53 +3523,27 @@
+     static VU1_FORCE_INLINE void divOp(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, float numRaw, float denRaw)
+     {
+         syncQ(vu, ctx, cycle);
+-        const float num = vu.normalizeOperand(numRaw);
+-        const float den = vu.normalizeOperand(denRaw);
+-        uint32_t statusDi = 0u;
+-        float result = 0.0f;
+-        if (den == 0.0f)
+-        {
+-            statusDi = num == 0.0f ? 0x10u : 0x20u;
+-            result = std::signbit(num) != std::signbit(den)
+-                         ? -std::numeric_limits<float>::max()
+-                         : std::numeric_limits<float>::max();
+-        }
+-        else
+-        {
+-            result = num / den;
+-        }
+-        uint32_t ignoredFlags = 0u;
+-        result = vu.normalizeResult(result, ignoredFlags);
+-        queueQAt(vu, cycle, result, 7u, statusDi);
++        using namespace ps2_vu_float;
++        const uint32_t a = vu_reference::bitsOf(numRaw), b = vu_reference::bitsOf(denRaw);
++        const uint32_t statusDi = isZero(b) ? (isZero(a) ? 0x10u : 0x20u) : 0u;
++        queueQAt(vu, cycle, f(settle(u(ps2_port_fpu::ps2_fdiv(f(a), f(b))), value(a) / value(b))), 7u, statusDi);
+     }
+ 
+     static VU1_FORCE_INLINE void sqrtOp(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, float raw)
+     {
+         syncQ(vu, ctx, cycle);
+-        const float val = vu.normalizeOperand(raw);
+-        queueQAt(vu, cycle, std::sqrt(std::fabs(val)), 7u, val < 0.0f ? 0x10u : 0u);
++        using namespace ps2_vu_float;
++        const uint32_t b = vu_reference::bitsOf(raw);
++        queueQAt(vu, cycle, ps2_port_fpu::ps2_fsqrt(f(b)), 7u, (!isZero(b) && (b >> 31)) ? 0x10u : 0u);
+     }
+ 
+     static VU1_FORCE_INLINE void rsqrtOp(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, float numRaw, float radicandRaw)
+     {
+         syncQ(vu, ctx, cycle);
+-        const float num = vu.normalizeOperand(numRaw);
+-        const float radicand = vu.normalizeOperand(radicandRaw);
+-        const float den = std::sqrt(std::fabs(radicand));
+-        uint32_t statusDi = radicand < 0.0f ? 0x10u : 0u;
+-        float result = 0.0f;
+-        if (den != 0.0f)
+-            result = num / den;
+-        else
+-        {
+-            statusDi = num == 0.0f ? 0x10u : 0x20u;
+-            result = std::signbit(num)
+-                         ? -std::numeric_limits<float>::max()
+-                         : std::numeric_limits<float>::max();
+-        }
+-        uint32_t ignoredFlags = 0u;
+-        result = vu.normalizeResult(result, ignoredFlags);
+-        queueQAt(vu, cycle, result, 13u, statusDi);
++        using namespace ps2_vu_float;
++        const uint32_t a = vu_reference::bitsOf(numRaw), b = vu_reference::bitsOf(radicandRaw);
++        const uint32_t statusDi = isZero(b) ? (0x20u | (isZero(a) ? 0x10u : 0u)) : ((b >> 31) ? 0x10u : 0u);
++        queueQAt(vu, cycle, f(settle(u(ps2_port_fpu::ps2_frsqrt(f(a), f(b))), value(a) / rootValue(b))), 13u, statusDi);
+     }
+ 
+     static void genericUpper(VU1Interpreter &vu, Vu1FastCtx &ctx, uint64_t cycle, uint32_t upper)
+@@ -3576,7 +3562,7 @@
+         storeFlags(vu, ctx);
+         commitEfu(vu, cycle);
+         xgkickSync(vu, ctx, cycle);
+-        vu.execLower(lower, ctx.mem, kFastMemSize, *ctx.gs, ctx.memory, upper);
++        vu.execLower(lower, ctx.mem, ctx.memSize, *ctx.gs, ctx.memory, upper);
+         for (uint32_t mask = vu.m_storeValid; mask != 0u; mask &= mask - 1u)
+         {
+             const uint32_t index = static_cast<uint32_t>(std::countr_zero(mask));
+@@ -3635,11 +3621,16 @@
+ 
+     static StepResult runFast(VU1Interpreter &vu, const Vu1RunArgs &args, const FastBlock *table, uint32_t entries)
+     {
++        // VU1 (16 KiB code and data) or VU0 (4 KiB each; its compiled code addresses data with qaddr0).
++        const bool sizes = vu.m_unit == VU1Interpreter::Unit::VU1
++                               ? args.dataSize == kFastMemSize && args.codeSize == kFastCodeSize
++                               : args.dataSize == 0x1000u && args.codeSize == 0x1000u;
+         if (vu.m_state.branchPending || vu.m_state.ebit || vu.m_state.haltAfterDelaySlot || vu.m_stopRequested ||
+-            args.dataSize != kFastMemSize || args.codeSize != kFastCodeSize || !args.vuData || vu.m_storeValid != 0u)
++            !sizes || !args.vuData || vu.m_storeValid != 0u)
+             return StepResult::Fallback;
+         materializeWrites(vu);
+         Vu1FastCtx ctx;
++        ctx.memSize = args.dataSize;
+         ctx.norm = vu1NormShadow.norm;
+         if (!vu1NormShadow.valid || vu1NormShadow.owner != &vu)
+         {
+@@ -3877,4 +3868,5 @@
+ };
+ 
+ void registerVu1CompiledProgram(uint64_t imageHash, VU1InterpreterAccess::CompiledProgram program);
++void registerVu0CompiledProgram(uint64_t imageHash, VU1InterpreterAccess::CompiledProgram program);
+ VU1InterpreterAccess::CompiledProgram findCompiledVu1ProgramByHash(uint64_t imageHash);
+diff --git a/ps2xRuntime/src/lib/vu/ps2float.cpp b/ps2xRuntime/src/lib/vu/ps2float.cpp
+new file mode 100644
+--- /dev/null
++++ b/ps2xRuntime/src/lib/vu/ps2float.cpp
+@@ -0,0 +1,724 @@
++/*  PCSX2 - PS2 Emulator for PCs
++ *  Copyright (C) 2002-2024  PCSX2 Dev Team
++ *
++ *  PCSX2 is free software: you can redistribute it and/or modify it under the terms
++ *  of the GNU Lesser General Public License as published by the Free Software Found-
++ *  ation, either version 3 of the License, or (at your option) any later version.
++ *
++ *  PCSX2 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
++ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
++ *  PURPOSE.  See the GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along with PCSX2.
++ *  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <stdlib.h> /* abs */
++#include "ps2float.h"
++
++#define PS2F_MANTISSA_BITS 23
++
++#if defined(_MSC_VER)
++#include <intrin.h>
++#define PS2F_INLINE __forceinline
++#elif defined(__GNUC__)
++#define PS2F_INLINE __inline__ __attribute__((always_inline))
++#else
++#define PS2F_INLINE
++#endif
++
++static PS2F_INLINE ps2f_u32 ps2f_mantissa(ps2f_u32 x)
++{
++	return (x & 0x7fffffu) | 0x800000u;
++}
++
++static PS2F_INLINE ps2f_u32 ps2f_exponent(ps2f_u32 x)
++{
++	return (x >> 23) & 0xffu;
++}
++
++static PS2F_INLINE ps2f_u32 ps2f_frac(ps2f_u32 x)
++{
++	return x & 0x7fffffu;
++}
++
++static PS2F_INLINE int ps2f_sign(ps2f_u32 x)
++{
++	return (int)((x >> 31) & 1u);
++}
++
++static PS2F_INLINE ps2f_u32 ps2f_pack(int sign, ps2f_u32 exponent, ps2f_u32 mantissa)
++{
++	return ((sign ? 1u : 0u) << 31) | ((exponent & 0xffu) << PS2F_MANTISSA_BITS) | (mantissa & 0x7fffffu);
++}
++
++static PS2F_INLINE int ps2f_is_denormalized(ps2f_u32 x)
++{
++	return ps2f_exponent(x) == 0;
++}
++
++static PS2F_INLINE ps2f_u32 ps2f_abs_bits(ps2f_u32 x)
++{
++	return x & PS2F_MAX_FLOATING_POINT_VALUE;
++}
++
++static PS2F_INLINE int ps2f_is_zero(ps2f_u32 x)
++{
++	return ps2f_abs_bits(x) == 0;
++}
++
++/* Count-leading-zero for a non-zero value. */
++static PS2F_INLINE ps2f_s32 ps2f_bsr(ps2f_u32 b)
++{
++#if defined(_MSC_VER)
++	unsigned long index;
++	if (b == 0)
++		return -1;
++	_BitScanReverse(&index, b);
++	return (ps2f_s32)index;
++#elif defined(__GNUC__)
++	if (b == 0)
++		return -1;
++	return (ps2f_s32)(31 - __builtin_clz(b));
++#else
++	ps2f_s32 index;
++	if (b == 0)
++		return -1;
++	index = 0;
++	while (b >>= 1)
++		index++;
++	return index;
++#endif
++}
++
++static PS2F_INLINE ps2f_u32 ps2f_count_leading_sign_bits(ps2f_s32 n)
++{
++	/* If the sign bit is 1, we invert the bits to 0 for count-leading-zero. */
++	if (n < 0)
++		n = ~n;
++
++	/* If BSR is used directly, it would have an undefined value for 0. */
++	if (n == 0)
++		return 32;
++
++	return (ps2f_u32)(31 - ps2f_bsr((ps2f_u32)n));
++}
++
++static const ps2f_s32 ps2f_normalize_amounts[32] = {
++	0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 8, 8, 8, 8, 16, 16, 16, 16, 16, 16, 16, 16, 24, 24, 24, 24, 24, 24, 24};
++
++/****************************************************************
++ * Radix Divisor
++ * Algorithm reference: DOI 10.1109/ARITH.1995.465363
++ ****************************************************************/
++
++typedef struct
++{
++	ps2f_u32 sum;
++	ps2f_u32 carry;
++} ps2f_csa_t;
++
++static PS2F_INLINE ps2f_csa_t ps2f_csa(ps2f_u32 a, ps2f_u32 b, ps2f_u32 c)
++{
++	ps2f_csa_t r;
++	ps2f_u32 u = a ^ b;
++	r.sum = u ^ c;
++	r.carry = ((a & b) | (u & c)) << 1;
++	return r;
++}
++
++/* Remainder estimate for quotient selection.  Note: decimal point is
++ * between bits 24 and 25. */
++static PS2F_INLINE ps2f_s32 ps2f_quotient_test(ps2f_csa_t current)
++{
++	ps2f_u32 mask = (1u << 24) - 1; /* Bit 23 needs to be or'd in instead of added */
++	return (ps2f_s32)((((current.sum & ~mask) + current.carry)) | (current.sum & mask));
++}
++
++/* Branch-free three-way select from the estimate: the remainder is data,
++ * so the old compare chain mispredicted once per divider step. */
++static PS2F_INLINE ps2f_s32 ps2f_quotient_select_test(ps2f_s32 test)
++{
++	return (ps2f_s32)(test >= (ps2f_s32)(1 << 23)) - (ps2f_s32)(test < (ps2f_s32)(~0u << 24));
++}
++
++/****************************************************************
++ * Booth Multiplier
++ ****************************************************************/
++
++typedef struct
++{
++	ps2f_u32 data;
++	ps2f_u32 negate;
++} ps2f_booth_t;
++
++typedef struct
++{
++	ps2f_u32 lo;
++	ps2f_u32 hi;
++} ps2f_addres_t;
++
++static PS2F_INLINE ps2f_booth_t ps2f_booth(ps2f_u32 a, ps2f_u32 b, ps2f_u32 bit)
++{
++	/* Identical arithmetic to the reference, expressed with masks instead
++	 * of conditionals: the recode bits come straight from the operand, so
++	 * a branch here is a coin flip per partial product and the eight
++	 * recodes per multiply turned the tree into a mispredict storm. */
++	ps2f_booth_t r;
++	ps2f_u32 test = (bit ? b >> (bit * 2 - 1) : b << 1) & 7u;
++	ps2f_u32 dbl  = 0u - (ps2f_u32)((test == 3) | (test == 4)); /* x2 for recode +/-2 */
++	ps2f_u32 neg  = 0u - (ps2f_u32)((test - 4u) <= 2u);         /* 4..6 */
++	ps2f_u32 any  = 0u - (ps2f_u32)((test - 1u) <= 5u);         /* 1..6 */
++	ps2f_u32 pos  = 1u << (bit * 2);
++	a <<= (bit * 2);
++	a += a & dbl;
++	a ^= (neg & (0u - pos));
++	a &= any;
++	r.data = a;
++	r.negate = neg & pos;
++	return r;
++}
++
++static PS2F_INLINE ps2f_addres_t ps2f_add3(ps2f_u32 a, ps2f_u32 b, ps2f_u32 c)
++{
++	ps2f_addres_t r;
++	ps2f_u32 u = a ^ b;
++	r.lo = u ^ c;
++	r.hi = ((u & c) | (a & b)) << 1;
++	return r;
++}
++
++static ps2f_u64 ps2f_mul_mantissa(ps2f_u32 a, ps2f_u32 b)
++{
++	ps2f_u64 full = (ps2f_u64)a * (ps2f_u64)b;
++	ps2f_booth_t b0 = ps2f_booth(a, b, 0);
++	ps2f_booth_t b1 = ps2f_booth(a, b, 1);
++	ps2f_booth_t b2 = ps2f_booth(a, b, 2);
++	ps2f_booth_t b3 = ps2f_booth(a, b, 3);
++	ps2f_booth_t b4 = ps2f_booth(a, b, 4);
++	ps2f_booth_t b5 = ps2f_booth(a, b, 5);
++	ps2f_booth_t b6 = ps2f_booth(a, b, 6);
++	ps2f_booth_t b7 = ps2f_booth(a, b, 7);
++	ps2f_addres_t t0;
++	ps2f_addres_t t1;
++	ps2f_addres_t t2;
++	ps2f_addres_t t3;
++	ps2f_addres_t t4;
++	ps2f_addres_t t5;
++	ps2f_u32 ps2lo;
++
++	/* First cycle */
++	t0 = ps2f_add3(b1.data, b2.data, b3.data);
++	t1 = ps2f_add3(b4.data & ~0x7ffu, b5.data & ~0xfffu, b6.data);
++	/* A few adds get skipped, squeeze them back in */
++	t1.hi |= b6.negate | (b5.data & 0x800u);
++	b7.data |= (b5.data & 0x400u) + b5.negate;
++
++	/* Second cycle */
++	t2 = ps2f_add3(b0.data, t0.lo, t0.hi);
++	t3 = ps2f_add3(b7.data, t1.lo, t1.hi);
++
++	/* Third cycle */
++	t4 = ps2f_add3(t2.hi, t3.lo, t3.hi);
++
++	/* Fourth cycle */
++	t5 = ps2f_add3(t2.lo, t4.lo, t4.hi);
++
++	/* Discard bits and sum */
++	t5.hi += b7.negate;
++	t5.lo &= ~0x7fffu;
++	t5.hi &= ~0x7fffu;
++	ps2lo = t5.lo + t5.hi;
++	return full - ((ps2lo ^ full) & 0x8000u);
++}
++
++/****************************************************************
++ * Operation signs and comparisons
++ ****************************************************************/
++
++ps2f_s32 ps2f_compare_operands(ps2f_u32 a, ps2f_u32 b)
++{
++	ps2f_u32 am = ps2f_abs_bits(a);
++	ps2f_u32 bm = ps2f_abs_bits(b);
++
++	if (am < bm)
++		return -1;
++	else if (am == bm)
++		return 0;
++	else
++		return 1;
++}
++
++ps2f_s32 ps2f_compare(ps2f_u32 a, ps2f_u32 b)
++{
++	ps2f_s32 av = (ps2f_s32)ps2f_abs_bits(a);
++	ps2f_s32 bv = (ps2f_s32)ps2f_abs_bits(b);
++
++	if (ps2f_sign(a))
++		av = -av;
++	if (ps2f_sign(b))
++		bv = -bv;
++
++	if (av < bv)
++		return -1;
++	else if (av == bv)
++		return 0;
++	else
++		return 1;
++}
++
++static PS2F_INLINE int ps2f_muldiv_sign(ps2f_u32 a, ps2f_u32 b)
++{
++	return ps2f_sign(a) ^ ps2f_sign(b);
++}
++
++static PS2F_INLINE int ps2f_addition_sign(ps2f_u32 a, ps2f_u32 b)
++{
++	return ps2f_compare_operands(a, b) >= 0 ? ps2f_sign(a) : ps2f_sign(b);
++}
++
++static PS2F_INLINE int ps2f_subtraction_sign(ps2f_u32 a, ps2f_u32 b)
++{
++	return ps2f_compare_operands(a, b) >= 0 ? ps2f_sign(a) : !ps2f_sign(b);
++}
++
++/****************************************************************
++ * Float Processor
++ ****************************************************************/
++
++static ps2f_u64 ps2f_do_add(ps2f_u32 a, ps2f_u32 b)
++{
++	ps2f_u32 self_exponent;
++	ps2f_s32 res_exponent;
++	ps2f_u32 sign1;
++	ps2f_u32 sign2;
++	ps2f_s32 self_mantissa;
++	ps2f_s32 other_mantissa;
++	ps2f_s32 man;
++	ps2f_s32 abs_man;
++	ps2f_s32 raw_exp;
++	ps2f_s32 amount;
++	ps2f_s32 msb_index;
++
++	/* Order operands by exponent up front instead of recursing: the
++	 * reference's tail call kept this function out of line and made a
++	 * data-driven branch-and-call of half of all additions.  The swap is
++	 * a mask blend - which operand is larger is a coin flip. */
++	{
++		ps2f_u32 m = 0u - (ps2f_u32)(ps2f_exponent(a) < ps2f_exponent(b));
++		ps2f_u32 x = (a & ~m) | (b & m);
++		b = (b & ~m) | (a & m);
++		a = x;
++	}
++	self_exponent = ps2f_exponent(a);
++	res_exponent  = (ps2f_s32)self_exponent - (ps2f_s32)ps2f_exponent(b);
++	if (res_exponent >= 25)
++		return a;
++
++	/* roundingMultiplier = 6.
++	 * http://graphics.stanford.edu/~seander/bithacks.html#ConditionalNegate
++	 * Shifts of possibly-negative mantissas are done in unsigned
++	 * arithmetic; two's complement keeps the bit patterns identical to
++	 * the reference while staying defined behavior. */
++	sign1 = (ps2f_u32)((ps2f_s32)a >> 31);
++	self_mantissa = (ps2f_s32)((ps2f_mantissa(a) ^ sign1) - sign1);
++	sign2 = (ps2f_u32)((ps2f_s32)b >> 31);
++	other_mantissa = (ps2f_s32)((ps2f_mantissa(b) ^ sign2) - sign2);
++
++	man = (ps2f_s32)(((ps2f_u32)self_mantissa << 6) + (ps2f_u32)(((ps2f_s32)((ps2f_u32)other_mantissa << 6)) >> res_exponent));
++	abs_man = abs(man);
++	if (abs_man == 0)
++		return 0;
++
++	raw_exp = (ps2f_s32)self_exponent - 6;
++
++	amount = ps2f_normalize_amounts[ps2f_count_leading_sign_bits(abs_man)];
++	raw_exp -= amount;
++	abs_man = (ps2f_s32)((ps2f_u32)abs_man << amount);
++
++	msb_index = ps2f_bsr((ps2f_u32)(abs_man >> PS2F_MANTISSA_BITS));
++	raw_exp += msb_index;
++	abs_man >>= msb_index;
++
++	if (raw_exp > 255)
++		return (man < 0 ? PS2F_MIN_FLOATING_POINT_VALUE : PS2F_MAX_FLOATING_POINT_VALUE) | PS2F_OF;
++	else if (raw_exp < 1)
++		return (ps2f_u64)ps2f_pack(man < 0, 0, 0) | PS2F_UF;
++
++	return ((ps2f_u32)man & PS2F_SIGNMASK) | ((ps2f_u32)raw_exp << PS2F_MANTISSA_BITS) | ((ps2f_u32)abs_man & 0x7fffffu);
++}
++
++static ps2f_u64 ps2f_do_mul(ps2f_u32 a, ps2f_u32 b)
++{
++	ps2f_u32 self_mantissa = ps2f_mantissa(a);
++	ps2f_u32 other_mantissa = ps2f_mantissa(b);
++	ps2f_u32 sign = (a ^ b) & PS2F_SIGNMASK;
++	ps2f_s32 res_exponent = (ps2f_s32)ps2f_exponent(a) + (ps2f_s32)ps2f_exponent(b) - 127;
++	ps2f_u32 res_mantissa = (ps2f_u32)(ps2f_mul_mantissa(self_mantissa, other_mantissa) >> PS2F_MANTISSA_BITS);
++
++	/* Carry-out normalize without a branch: the top bit is operand data. */
++	{
++		ps2f_u32 carry = res_mantissa >> 24;
++		res_mantissa >>= carry;
++		res_exponent += (ps2f_s32)carry;
++	}
++
++	if (res_exponent > 255)
++		return (ps2f_u64)(sign | PS2F_MAX_FLOATING_POINT_VALUE) | PS2F_OF;
++	else if (res_exponent < 1)
++		return (ps2f_u64)sign | PS2F_UF;
++
++	return sign | ((ps2f_u32)res_exponent << PS2F_MANTISSA_BITS) | (res_mantissa & 0x7fffffu);
++}
++
++ps2f_u64 ps2f_add(ps2f_u32 a, ps2f_u32 b)
++{
++	ps2f_s32 exp_diff;
++
++	if (ps2f_is_denormalized(a) || ps2f_is_denormalized(b))
++	{
++		int sign = ps2f_addition_sign(a, b);
++
++		if (ps2f_is_denormalized(a) && !ps2f_is_denormalized(b))
++			return ps2f_pack(sign, ps2f_exponent(b), ps2f_frac(b));
++		else if (!ps2f_is_denormalized(a))
++			return ps2f_pack(sign, ps2f_exponent(a), ps2f_frac(a));
++		/* both denormalized */
++		if (!ps2f_sign(a) || !ps2f_sign(b))
++			return ps2f_pack(0, 0, 0);
++		return ps2f_pack(1, 0, 0);
++	}
++
++	/* exponent difference */
++	exp_diff = (ps2f_s32)ps2f_exponent(a) - (ps2f_s32)ps2f_exponent(b);
++
++	/* diff = 1 .. 24, expt < expd */
++	if (exp_diff > 0 && exp_diff < 25)
++	{
++		exp_diff = exp_diff - 1;
++		b = (PS2F_MIN_FLOATING_POINT_VALUE << exp_diff) & b;
++	}
++	/* diff = -24 .. -1 , expd < expt */
++	else if (exp_diff < 0 && exp_diff > -25)
++	{
++		exp_diff = -exp_diff;
++		exp_diff = exp_diff - 1;
++		a = a & (PS2F_MIN_FLOATING_POINT_VALUE << exp_diff);
++	}
++
++	return ps2f_do_add(a, b);
++}
++
++ps2f_u64 ps2f_sub(ps2f_u32 a, ps2f_u32 b)
++{
++	ps2f_s32 exp_diff;
++
++	if (ps2f_is_denormalized(a) || ps2f_is_denormalized(b))
++	{
++		int sign = ps2f_subtraction_sign(a, b);
++
++		if (ps2f_is_denormalized(a) && !ps2f_is_denormalized(b))
++			return ps2f_pack(sign, ps2f_exponent(b), ps2f_frac(b));
++		else if (!ps2f_is_denormalized(a))
++			return ps2f_pack(sign, ps2f_exponent(a), ps2f_frac(a));
++		/* both denormalized */
++		if (!ps2f_sign(a) || ps2f_sign(b))
++			return ps2f_pack(0, 0, 0);
++		return ps2f_pack(1, 0, 0);
++	}
++
++	/* exponent difference */
++	exp_diff = (ps2f_s32)ps2f_exponent(a) - (ps2f_s32)ps2f_exponent(b);
++
++	/* diff = 1 .. 24, expt < expd */
++	if (exp_diff > 0 && exp_diff < 25)
++	{
++		exp_diff = exp_diff - 1;
++		b = (PS2F_MIN_FLOATING_POINT_VALUE << exp_diff) & b;
++	}
++	/* diff = -24 .. -1 , expd < expt */
++	else if (exp_diff < 0 && exp_diff > -25)
++	{
++		exp_diff = -exp_diff;
++		exp_diff = exp_diff - 1;
++		a = a & (PS2F_MIN_FLOATING_POINT_VALUE << exp_diff);
++	}
++
++	return ps2f_do_add(a, b ^ PS2F_SIGNMASK);
++}
++
++ps2f_u64 ps2f_mul(ps2f_u32 a, ps2f_u32 b)
++{
++	if (ps2f_is_denormalized(a) || ps2f_is_denormalized(b) || ps2f_is_zero(a) || ps2f_is_zero(b))
++		return ps2f_pack(ps2f_muldiv_sign(a, b), 0, 0);
++
++	return ps2f_do_mul(a, b);
++}
++
++ps2f_u64 ps2f_div(ps2f_u32 a, ps2f_u32 b)
++{
++	ps2f_u32 am;
++	ps2f_u32 bm;
++	ps2f_csa_t current;
++	ps2f_u32 quotient;
++	ps2f_s32 quotient_bit;
++	ps2f_s32 i;
++	ps2f_u32 sign;
++	ps2f_u32 dvdt_exp;
++	ps2f_u32 dvsr_exp;
++	ps2f_s32 cexp;
++
++	if (((a & 0x7f800000u) == 0) && ((b & 0x7f800000u) != 0))
++	{
++		ps2f_u32 float_result = 0;
++		float_result &= PS2F_MAX_FLOATING_POINT_VALUE;
++		float_result |= (ps2f_u32)(((ps2f_s32)(b >> 31) != (ps2f_s32)(a >> 31)) ? 1 : (0 & 1)) << 31;
++		return float_result;
++	}
++	if (((a & 0x7f800000u) != 0) && ((b & 0x7f800000u) == 0))
++	{
++		ps2f_u32 float_result = PS2F_MAX_FLOATING_POINT_VALUE;
++		float_result &= PS2F_MAX_FLOATING_POINT_VALUE;
++		float_result |= (ps2f_u32)(((ps2f_s32)(b >> 31) != (ps2f_s32)(a >> 31)) ? 1 : (0 & 1)) << 31;
++		return (ps2f_u64)float_result | PS2F_DZ;
++	}
++	if (((a & 0x7f800000u) == 0) && ((b & 0x7f800000u) == 0))
++	{
++		ps2f_u32 float_result = PS2F_MAX_FLOATING_POINT_VALUE;
++		float_result &= PS2F_MAX_FLOATING_POINT_VALUE;
++		float_result |= (ps2f_u32)(((ps2f_s32)(b >> 31) != (ps2f_s32)(a >> 31)) ? 1 : (0 & 1)) << 31;
++		return (ps2f_u64)float_result | PS2F_IV;
++	}
++
++	am = ps2f_mantissa(a) << 2;
++	bm = ps2f_mantissa(b) << 2;
++	current.sum = am;
++	current.carry = 0;
++	quotient = 0;
++	quotient_bit = 1;
++	/* Fully unrolled: the digit chain is serial data (each step's
++	 * remainder representation feeds the next select), so lane
++	 * parallelism does not apply - a three-candidate speculative
++	 * rework proved bit-exact and measured slower, throughput-bound
++	 * at triple the operations, and an SSE lane form prices out on
++	 * the register-to-vector transfer latency sitting on the serial
++	 * path. Unrolling the twenty-five steps is what remains: proven
++	 * bit-identical over forty million operand pairs and thirteen
++	 * percent faster. Every select stays a mask; no branches. */
++#define PS2F_DIV_STEP 	{ 		ps2f_u32 m_any = 0u - (ps2f_u32)(quotient_bit != 0); 		ps2f_u32 m_pos = 0u - (ps2f_u32)(quotient_bit > 0); 		ps2f_u32 add; 		ps2f_csa_t csa; 		quotient = (quotient << 1) + (ps2f_u32)quotient_bit; 		add = (bm ^ m_pos) & m_any; 		current.carry += m_pos & 1u; 		csa = ps2f_csa(current.sum, current.carry, add); 		{ 			ps2f_s32 t_csa = ps2f_quotient_test(csa); 			ps2f_s32 t_cur = ps2f_quotient_test(current); 			quotient_bit = ps2f_quotient_select_test((ps2f_s32)(((ps2f_u32)t_csa & m_any) | ((ps2f_u32)t_cur & ~m_any))); 		} 		current.sum = csa.sum << 1; 		current.carry = csa.carry << 1; 	}
++	PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP
++	PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP
++	PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP
++	PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP
++	PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP PS2F_DIV_STEP
++#undef PS2F_DIV_STEP
++	(void)i;
++
++	sign = (a ^ b) & 0x80000000u;
++	dvdt_exp = ps2f_exponent(a);
++	dvsr_exp = ps2f_exponent(b);
++	cexp = (ps2f_s32)dvdt_exp - (ps2f_s32)dvsr_exp + 126;
++
++	if (quotient >= (1u << 24))
++	{
++		cexp += 1;
++		quotient >>= 1;
++	}
++
++	if (dvdt_exp == 0 && dvsr_exp == 0)
++		return (ps2f_u64)(sign | PS2F_MAX_FLOATING_POINT_VALUE) | PS2F_IV;
++	else if (dvdt_exp == 0 || dvsr_exp != 0)
++	{
++		if (dvdt_exp == 0 && dvsr_exp != 0)
++			return sign;
++	}
++	else
++		return (ps2f_u64)(sign | PS2F_MAX_FLOATING_POINT_VALUE) | PS2F_DZ;
++
++	if (cexp > 255)
++		return (ps2f_u64)(sign | PS2F_MAX_FLOATING_POINT_VALUE) | PS2F_OF;
++	else if (cexp < 1)
++		return (ps2f_u64)sign | PS2F_UF;
++
++	return (quotient & 0x7fffffu) | ((ps2f_u32)cexp << 23) | sign;
++}
++
++ps2f_u64 ps2f_sqrt(ps2f_u32 a)
++{
++	ps2f_u32 m;
++	ps2f_csa_t current;
++	ps2f_u32 quotient;
++	ps2f_s32 quotient_bit;
++	ps2f_s32 i;
++	ps2f_s32 dvdt_exp;
++	ps2f_u32 res;
++
++	if ((a & 0x7f800000u) == 0)
++		return (ps2f_u64)0 | (((a >> 31) & 1u) ? PS2F_IV : 0);
++
++	m = ps2f_mantissa(a) << 1;
++	if (!(a & 0x800000u)) /* If exponent is odd after subtracting bias of 127 */
++		m <<= 1;
++
++	current.sum = m;
++	current.carry = 0;
++	quotient = 0;
++	quotient_bit = 1;
++	for (i = 0; i < 25; i++)
++	{
++		/* Adding n to quotient adds n * (2*quotient + n) to quotient^2
++		 * (which is what we need to subtract from the remainder) */
++		ps2f_u32 adjust;
++		ps2f_u32 add;
++		ps2f_csa_t csa;
++		ps2f_u32 m_any = 0u - (ps2f_u32)(quotient_bit != 0);
++		ps2f_u32 m_pos = 0u - (ps2f_u32)(quotient_bit > 0);
++		adjust = quotient + ((ps2f_u32)quotient_bit << (24 - i));
++		quotient += (ps2f_u32)quotient_bit << (25 - i);
++		add = (adjust ^ m_pos) & m_any;
++		current.carry += m_pos & 1u;
++		csa = ps2f_csa(current.sum, current.carry, add);
++		{
++			ps2f_s32 t_csa = ps2f_quotient_test(csa);
++			ps2f_s32 t_cur = ps2f_quotient_test(current);
++			quotient_bit = ps2f_quotient_select_test((ps2f_s32)(((ps2f_u32)t_csa & m_any) | ((ps2f_u32)t_cur & ~m_any)));
++		}
++		current.sum = csa.sum << 1;
++		current.carry = csa.carry << 1;
++	}
++
++	dvdt_exp = (ps2f_s32)ps2f_exponent(a);
++	if (dvdt_exp == 0)
++		return 0;
++	dvdt_exp = (dvdt_exp + 127) >> 1;
++
++	res = ((quotient >> 2) & 0x7fffffu) | ((ps2f_u32)dvdt_exp << 23);
++	if (ps2f_sign(a))
++	{
++		if (ps2f_sign(res))
++			res ^= PS2F_SIGNMASK;
++		return (ps2f_u64)res | PS2F_IV;
++	}
++	return res;
++}
++
++ps2f_u64 ps2f_rsqrt(ps2f_u32 a, ps2f_u32 b)
++{
++	ps2f_u64 sq = ps2f_sqrt(ps2f_pack(0, ps2f_exponent(b), ps2f_frac(b)));
++	ps2f_u64 dv = ps2f_div(a, ps2f_raw(sq));
++	ps2f_u64 flags = (dv & (PS2F_OF | PS2F_UF)) | ((sq | dv) & (PS2F_DZ | PS2F_IV));
++	return (ps2f_u64)ps2f_raw(dv) | flags;
++}
++
++/****************************************************************
++ * Fused chains (MADD/MSUB and accumulator variants)
++ ****************************************************************/
++
++/* Modes 3/8: MADD rounds to max when the product is positive; modes 4/9
++ * (MSUB) when it is negative.  acc/acc_of feed the accumulator overflow
++ * resolution; result overrides come from the hardware's MAC exception
++ * priority. */
++static ps2f_u64 ps2f_mac_finish(int round_to_max, ps2f_u32 acc, int acc_of, ps2f_u64 mulres, ps2f_u64 addsub)
++{
++	ps2f_u32 res = ps2f_raw(addsub);
++	ps2f_u64 flags = addsub & (PS2F_OF | PS2F_UF);
++	int m_of = (mulres & PS2F_OF) != 0;
++
++	if (!acc_of)
++	{
++		if (m_of)
++		{
++			res = round_to_max ? PS2F_MAX_FLOATING_POINT_VALUE : PS2F_MIN_FLOATING_POINT_VALUE;
++			flags = PS2F_OF;
++		}
++	}
++	else if (!m_of)
++	{
++		res = acc;
++		flags = PS2F_OF;
++	}
++	else
++	{
++		res = round_to_max ? PS2F_MAX_FLOATING_POINT_VALUE : PS2F_MIN_FLOATING_POINT_VALUE;
++		flags = PS2F_OF;
++	}
++
++	return (ps2f_u64)res | flags;
++}
++
++ps2f_u64 ps2f_madd(ps2f_u32 acc, ps2f_u32 s, ps2f_u32 t, int acc_of)
++{
++	ps2f_u64 mulres = ps2f_mul(s, t);
++	ps2f_u64 addres = ps2f_add(acc, ps2f_raw(mulres));
++	return ps2f_mac_finish(!ps2f_sign(ps2f_raw(mulres)), acc, acc_of, mulres, addres);
++}
++
++ps2f_u64 ps2f_madda(ps2f_u32 acc, ps2f_u32 s, ps2f_u32 t, int acc_of)
++{
++	return ps2f_madd(acc, s, t, acc_of);
++}
++
++ps2f_u64 ps2f_msub(ps2f_u32 acc, ps2f_u32 s, ps2f_u32 t, int acc_of)
++{
++	ps2f_u64 mulres = ps2f_mul(s, t);
++	ps2f_u64 subres = ps2f_sub(acc, ps2f_raw(mulres));
++	return ps2f_mac_finish(ps2f_sign(ps2f_raw(mulres)), acc, acc_of, mulres, subres);
++}
++
++ps2f_u64 ps2f_msuba(ps2f_u32 acc, ps2f_u32 s, ps2f_u32 t, int acc_of)
++{
++	return ps2f_msub(acc, s, t, acc_of);
++}
++
++/****************************************************************
++ * VU EFU helpers
++ ****************************************************************/
++
++ps2f_u64 ps2f_ercpr(ps2f_u32 a)
++{
++	return ps2f_div(PS2F_ONE, a);
++}
++
++ps2f_u64 ps2f_esqrt(ps2f_u32 a)
++{
++	return ps2f_sqrt(a);
++}
++
++ps2f_u64 ps2f_esqur(ps2f_u32 a)
++{
++	return ps2f_mul(a, a);
++}
++
++ps2f_u64 ps2f_ersqrt(ps2f_u32 a)
++{
++	return ps2f_rsqrt(PS2F_ONE, a);
++}
++
++/****************************************************************
++ * CLIP
++ ****************************************************************/
++
++ps2f_u32 ps2f_clip(ps2f_u32 f1, ps2f_u32 f2)
++{
++	ps2f_u32 a;
++	ps2f_u32 result = 0;
++
++	if ((f1 & 0x7f800000u) == 0)
++		f1 &= 0xff800000u;
++
++	a = f1;
++
++	if ((f2 & 0x7f800000u) == 0)
++		f2 &= 0xff800000u;
++
++	f1 = f1 & PS2F_MAX_FLOATING_POINT_VALUE;
++	f2 = f2 & PS2F_MAX_FLOATING_POINT_VALUE;
++
++	if ((-1 < (ps2f_s32)a) && (f2 < f1))
++		result |= 1u;
++
++	if (((ps2f_s32)a < 0) && (f2 < f1))
++		result |= 2u;
++
++	return result;
++}

@@ -1,0 +1,153 @@
+diff --git a/ps2xRuntime/include/runtime/presentation_pacing.hpp b/ps2xRuntime/include/runtime/presentation_pacing.hpp
+new file mode 100644
+index 0000000..8279f84
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/presentation_pacing.hpp
+@@ -0,0 +1,33 @@
++#pragma once
++// Window pacing. PS2_PORT_DISPLAY_VSYNC=1 presents on the display's refresh instead of a 60 Hz timer, so frames
++// are not dropped or doubled against the panel. PS2_PORT_PRESENT_TRACE=FILE records each swap (ns, field tick,
++// generation, ingress sequence) for frame-pacing analysis.
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++
++namespace PresentationPacing
++{
++    inline bool vsync()
++    {
++        static const bool value = [] { const char *v = std::getenv("PS2_PORT_DISPLAY_VSYNC"); return v && *v == '1'; }();
++        return value;
++    }
++    inline uint64_t tick = 0, generation = 0, ingress = 0;
++    inline void uploaded(uint64_t t, uint64_t g, uint64_t i) { tick = t; generation = g; ingress = i; }
++    inline void swapped()
++    {
++        static FILE *file = [] {
++            const char *path = std::getenv("PS2_PORT_PRESENT_TRACE");
++            FILE *f = path ? std::fopen(path, "w") : nullptr;
++            if (f) std::setvbuf(f, nullptr, _IOFBF, 65536);
++            return f;
++        }();
++        if (!file) return;
++        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++        std::fprintf(file, "%lld,%llu,%llu,%llu\n", (long long)ns, (unsigned long long)tick, (unsigned long long)generation, (unsigned long long)ingress);
++        static unsigned count = 0;
++        if (++count % 120 == 0) std::fflush(file);
++    }
++}
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index b0d419e..67f8702 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -31,6 +31,10 @@ inline std::filesystem::path memory_card_root(const std::filesystem::path &disc_
+ #include "ps2x/iop/iop_subsystem.h"
+ 
+ #include <iostream>
++#include "runtime/presentation_pacing.hpp"
++#if !defined(_WIN32)
++#include <dlfcn.h>
++#endif
+ #include <stdexcept>
+ #include <fstream>
+ #include <algorithm>
+@@ -491,6 +495,12 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+                                                    &usedPreferredDisplaySource,
+                                                    &completedStamp))
+     {
++        if (std::getenv("PS2_PORT_ENHANCE_HIRES_SCANOUT") && s_hasUploadedFrame)
++        {
++            outWidth = s_lastWidth;
++            outHeight = s_lastHeight;
++            return;
++        }
+         Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, completedFields ? BLACK : MAGENTA);
+         UpdateTexture(tex, blank.data);
+         UnloadImage(blank);
+@@ -508,6 +518,26 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+         outWidth=s_lastWidth;outHeight=s_lastHeight;return;
+     }
+     s_lastCompletedStamp=completedStamp;
++    PresentationPacing::uploaded(completedStamp.tick, completedStamp.generation, completedStamp.ingressSequence);
++    // A GPU renderer can deliver its picture above 640 pixels wide: upload it whole instead of cropping.
++    if (const char *hd = std::getenv("PS2_PORT_ENHANCE_HIRES_SCANOUT"); hd && hd[0] == '1' && hd[1] == 0)
++    {
++        if (!width || !height || width > 4096 || height > 4096 || s_scratch.size() != size_t(width) * height * 4)
++            throw std::runtime_error("Invalid packed high-resolution host frame");
++        if (tex.width != int(width) || tex.height != int(height))
++        {
++            UnloadTexture(tex);
++            Image blank = GenImageColor(width, height, BLACK);
++            tex = LoadTextureFromImage(blank);
++            UnloadImage(blank);
++            SetTextureFilter(tex, TEXTURE_FILTER_BILINEAR);
++        }
++        UpdateTexture(tex, s_scratch.data());
++        outWidth = s_lastWidth = width;
++        outHeight = s_lastHeight = height;
++        s_hasUploadedFrame = true;
++        return;
++    }
+ 
+     PS2_IF_AGRESSIVE_LOGS({
+         static uint32_t s_uploadDebugCount = 0u;
+@@ -756,6 +786,35 @@ bool PS2Runtime::syncCoreSubsystems()
+ 
+     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
+     if (std::getenv("PS2_PORT_GS_TRACE")) m_gs.setDebugHistoryPaused(false);
++#if !defined(_WIN32)
++    // A GPU GS renderer, built from runtime/gpu (native-plugin), owns the raw GS stream when named here.
++    const char *pluginPath = std::getenv("PS2_PORT_GS_PLUGIN");
++    if (!pluginPath) pluginPath = std::getenv("PS2_PORT_PRIVATE_GS_PLUGIN");
++    if (pluginPath && *pluginPath)
++    {
++        if (pluginPath[0] != '/')
++            throw std::runtime_error("PS2_PORT_GS_PLUGIN must be an absolute path");
++        // The ELF loader's convenience DISPLAY defaults lack the analog offsets and magnification a hardware
++        // scanout model needs; give the renderer the physical NTSC geometry before guest code runs.
++        constexpr uint64_t legacyDisplay = (639ull << 32) | (447ull << 44);
++        constexpr uint64_t physicalDisplay = 636ull | (50ull << 12) | (3ull << 23) | (2559ull << 32) | (447ull << 44);
++        auto &displayRegs = m_memory.gs();
++        if (displayRegs.display1 == legacyDisplay) displayRegs.display1 = physicalDisplay;
++        if (displayRegs.display2 == legacyDisplay) displayRegs.display2 = physicalDisplay;
++        void *plugin = dlopen(pluginPath, RTLD_NOW | RTLD_LOCAL);
++        if (!plugin)
++            throw std::runtime_error(std::string("GS plugin: ") + dlerror());
++        auto factory = reinterpret_cast<GSRasterBackend *(*)()>(dlsym(plugin, "PS2PortCreateRawGSBackend"));
++        if (!factory)
++            throw std::runtime_error("GS plugin has no PS2PortCreateRawGSBackend");
++        std::unique_ptr<GSRasterBackend> backend(factory());
++        if (!backend || !backend->OwnsRawGS())
++            throw std::runtime_error("GS plugin returned no raw GS owner");
++        m_gs.setRasterBackend(std::move(backend));
++        std::cerr << "[gpu] GS renderer plugin attached: " << pluginPath << std::endl;
++        // The module stays loaded: the backend's code lives in it.
++    }
++#endif
+     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
+                                     { m_gs.processGIFPacket(data, size); });
+     m_memory.setGifArbiter(&m_gifArbiter);
+@@ -830,12 +889,12 @@ if (std::getenv("PS2_PORT_HEADLESS")) {
+ #if defined(PLATFORM_VITA)
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
+ #else
+-        SetConfigFlags(FLAG_WINDOW_RESIZABLE);
++        SetConfigFlags(FLAG_WINDOW_RESIZABLE | (PresentationPacing::vsync() ? FLAG_VSYNC_HINT : 0));
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+         InitAudioDevice();
+         m_audioBackend.setAudioReady(IsAudioDeviceReady());
+ #endif
+-        SetTargetFPS(60);
++        SetTargetFPS(PresentationPacing::vsync() ? 0 : 60);
+         SetExitKey(KEY_NULL);
+         if (m_debugUiInitCallback)
+         {
+@@ -2719,6 +2778,7 @@ void PS2Runtime::run()
+             m_debugUiDrawCallback(*this, m_debugUiUserData);
+         }
+         EndDrawing();
++        PresentationPacing::swapped();
+ 
+         if (WindowShouldClose())
+         {

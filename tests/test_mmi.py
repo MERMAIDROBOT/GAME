@@ -30,6 +30,14 @@ class MMIRewriteTests(unittest.TestCase):
             self.assertIn(mmi.emit(w),updated)
             self.assertEqual(mmi.rewrite(updated),(updated,1,0))
 
+    def test_patched_recompiler_call_is_accepted_unchanged(self):
+        w=word(4,5,6)
+        source=record(w,mmi.reference_call(w))
+        self.assertEqual(mmi.reference_call(w),'ps2_mmi::pmulth(ctx, 6, 4, 5, 28);')
+        self.assertEqual(mmi.rewrite(source),(source,1,0))
+        with self.assertRaises(ValueError):  # a call naming other registers is not the instruction
+            mmi.rewrite(record(w,mmi.reference_call(word(4,5,7))))
+
     def test_knowledge_does_not_mutate_any_source_on_unknown_emission(self):
         with tempfile.TemporaryDirectory() as tmp:
             a=Path(tmp)/'a.cpp';a.write_text(record(word(),mmi.legacy(word())))

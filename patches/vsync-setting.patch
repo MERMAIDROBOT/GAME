@@ -1,0 +1,25 @@
+diff --git a/ps2xRuntime/include/runtime/presentation_pacing.hpp b/ps2xRuntime/include/runtime/presentation_pacing.hpp
+index 8279f84..53988b7 100644
+--- a/ps2xRuntime/include/runtime/presentation_pacing.hpp
++++ b/ps2xRuntime/include/runtime/presentation_pacing.hpp
+@@ -1,5 +1,5 @@
+ #pragma once
+-// Window pacing. PS2_PORT_DISPLAY_VSYNC=1 presents on the display's refresh instead of a 60 Hz timer, so frames
++// Window pacing. PS2_PORT_ENHANCE_VSYNC=1 presents on the display's refresh instead of a 60 Hz timer, so frames
+ // are not dropped or doubled against the panel. PS2_PORT_PRESENT_TRACE=FILE records each swap (ns, field tick,
+ // generation, ingress sequence) for frame-pacing analysis.
+ #include <chrono>
+@@ -11,7 +11,12 @@ namespace PresentationPacing
+ {
+     inline bool vsync()
+     {
+-        static const bool value = [] { const char *v = std::getenv("PS2_PORT_DISPLAY_VSYNC"); return v && *v == '1'; }();
++        // PS2_PORT_ENHANCE_VSYNC is the declared launch setting (launch_config); PS2_PORT_DISPLAY_VSYNC the older name.
++        static const bool value = [] {
++            for (const char *name : {"PS2_PORT_ENHANCE_VSYNC", "PS2_PORT_DISPLAY_VSYNC"})
++                if (const char *v = std::getenv(name); v && *v == '1') return true;
++            return false;
++        }();
+         return value;
+     }
+     inline uint64_t tick = 0, generation = 0, ingress = 0;

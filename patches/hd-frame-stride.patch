@@ -1,0 +1,49 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frame_layout.h b/ps2xRuntime/include/runtime/gs/gs_frame_layout.h
+new file mode 100644
+index 0000000..d3c91b5
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/gs/gs_frame_layout.h
+@@ -0,0 +1,16 @@
++#pragma once
++#include <cstddef>
++#include <cstdint>
++
++// Row stride of a latched host frame: a GPU renderer delivers packed RGBA at its own size (for example 1024x896
++// at 2x); the software renderer pads to the 640x480 display buffer. 0 when the bytes fit neither layout.
++inline size_t gsHostFrameStride(uint32_t width, uint32_t height, size_t bytes)
++{
++    if (!width || !height || width > 4096 || height > 4096)
++        return 0;
++    if (bytes == size_t(width) * height * 4)
++        return size_t(width) * 4;
++    if (width <= 640 && height <= 480 && bytes == size_t(640) * 480 * 4)
++        return size_t(640) * 4;
++    return 0;
++}
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index b857a03..df850c8 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -5,6 +5,7 @@
+ #include "runtime/gs/gs_cpu_backend.h"
+ #include "runtime/gs/gs_threaded_backend.h"
+ #include "runtime/gs/gs_host_rounding.h"
++#include "runtime/gs/gs_frame_layout.h"
+ #include "ps2_log.h"
+ #include "runtime/ps2_memory.h"
+ #include <atomic>
+@@ -761,7 +762,13 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
+     outPixels.resize(packedRowBytes * static_cast<size_t>(outHeight));
+     if (outWidth != 0u && outHeight != 0u)
+     {
+-        const size_t sourceRowBytes = static_cast<size_t>(kHostFrameWidth) * 4u;
++        const size_t sourceRowBytes = gsHostFrameStride(outWidth, outHeight, m_hostPresentationFrame.size());
++        if (!sourceRowBytes)
++        {
++            outPixels.clear();
++            outWidth = outHeight = 0u;
++            return false;
++        }
+         for (uint32_t y = 0; y < outHeight; ++y)
+         {
+             const size_t srcOffset = static_cast<size_t>(y) * sourceRowBytes;

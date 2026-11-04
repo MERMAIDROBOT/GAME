@@ -47,6 +47,9 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL PS2_PORT_UPSTREAM)
         if(UNIX AND PS2_PORT_CACHE_ENVIRONMENT)
             set(port_environment_source "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../runtime/host_environment/env_cache.c")
             target_sources(ps2EntryRunner PRIVATE "${port_environment_source}")
+            # This is C: the runner's C++ precompiled headers and unity batches must not reach it.
+            set_source_files_properties("${port_environment_source}" TARGET_DIRECTORY ps2EntryRunner
+                PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
             target_link_libraries(ps2EntryRunner PRIVATE ${CMAKE_DL_LIBS})
         endif()
         # Keep optimized link cache private beside the generated game build.

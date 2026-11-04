@@ -1,0 +1,42 @@
+{
+ "compiler": "Glslang Version: 11:16.6.0",
+ "target": "vulkan1.3",
+ "inputs": {
+  "runtime/gpu/shaders/date.frag": "bc6c1c1b096b3493354b789a6dd402f41cd3b53e20bde3d55bb21019bc92fc66",
+  "runtime/gpu/shaders/date.vert": "b61b6a62550e75efdf534777fc679b16fcd7473427cf187535c73e5886079e5b",
+  "runtime/gpu/shaders/decode.comp": "824b480a1eca1c4d0cc53d085d3ed4cd8af36e6555525ce633b29796f05fada2",
+  "runtime/gpu/shaders/depth_load.frag": "766c5d2caf5ecb1801fa1ca5617f47c97d4cd4cd40930ef1dfec0b520ab35c4c",
+  "runtime/gpu/shaders/downsample.comp": "99c3e2c3c293bde3d5bfaba203ea4b43535d8eb50f4d52dcc52660f03538a3d5",
+  "runtime/gpu/shaders/fxaa.comp": "c41a2811c3612b56798b6ef9e5d8afeeccc3c76f89392d0dc3c9018bac1b416c",
+  "runtime/gpu/shaders/gs.frag": "b963a993ee255dfeda68b596324c8aed6c73dd49493ce010d0f9e1e449cdaca2",
+  "runtime/gpu/shaders/gs.vert": "8aa4dd0090672bd87af3d047af6db1c87e062a410a681b5a6c78d57d5f8f96e8",
+  "runtime/gpu/shaders/gs_address.glsl": "1f6214ff3f2f2509b61a35c0dec69c55720a187d3fe706068f3fff13f33fd419",
+  "runtime/gpu/shaders/patch.comp": "f985b8894a2b9331e02cce66896f2ab937796e9e547e35b2569642db4b17297d",
+  "runtime/gpu/shaders/smaa_blend.comp": "ba89d0a3939bf95d93c18fdd340c4d79d6d24b222246de7a46635d720f00b59c",
+  "runtime/gpu/shaders/smaa_common.glsl": "da416cebfae66dfec78f5f32a2210dc453a8bcb353fd886615a43f822fc25d4b",
+  "runtime/gpu/shaders/smaa_edges.comp": "04bceab59e67513fd63cc56f2998d19b4439eec5c3da917d4b7a249b08a79a92",
+  "runtime/gpu/shaders/smaa_weights.comp": "da447ed285835bac8a2c05dc6a6e4a35f1d58fdfb56f6b7f0050209e0e4f381f",
+  "runtime/gpu/shaders/swizzle.comp": "b9a6543d6752710d1bfe657e7cbdd863860889692d963dc941cfbd99bcad932b",
+  "runtime/gpu/third_party/smaa/SMAA.glsl": "6cec0fb5473c51ef2fa7c75def128f23c2ef41ea0d029923b2feff40e4b40936"
+ },
+ "outputs": {
+  "gs_vert.h": "e70323356fe93924b694c10c2afa990e6f4f02db1fcbc604c3885f366e3e7b57",
+  "gs_frag.h": "101bb1ec0e2ea234a51ff7dce086bdfe16eba2425672c43cd8e0aec846c6b206",
+  "date_vert.h": "c6957098ac2b1d0e955e13298f633c62b18aaacd0d3bd0f13002d332391b1d04",
+  "date_frag.h": "df6818487284022dc8c471c2834004ae064d973445c0b893277bc8e42687ad91",
+  "swizzle_comp.h": "7fa13268aa00eb83002cf4919195519891f2036e2c5b6c82349c8d3f8c3c648c",
+  "decode_comp.h": "d2331ca62cd9669641d6d529d9dad615b006a2e0e53217ba897e5b00b04965b7",
+  "depth_load_frag.h": "aa73cbc03bcb41675a2484af2c6f611f2329efe0b16e9542628ae5f2c5af4c42",
+  "patch_comp.h": "76ccb7ae1b3f5cfb3adbb6d435498e3e6cb0d948d5a6f91136788d0c2d5afc95",
+  "fxaa_comp.h": "0bd604be55ae38facfbfa4ee339cfe3c646672e94748e503f4d3de011b0aab26",
+  "downsample_comp.h": "c455764396ab88118895de95831a14c926c939c04f9a4c68a488da254faee53d",
+  "smaa_edges_comp.h": "77c4520282aa3e9b126f5c194a29fdf2ee4ed77300c2f8930db8e5e2a765c4a0",
+  "smaa_weights_comp.h": "7b221ae5e66cf6aac8df75a4b929c9c0b8476a3fddf17c388f83c532301ad3c5",
+  "smaa_blend_comp.h": "ca68a25c318bf585c198ce2b25c11f67f325660f8d554b04a00a9f6fabc3800b",
+  "gs_frag_single.h": "e5b898ce5ddb125437fd816794652bb38b2555439511fcc41b21f736e04a7205",
+  "swizzle_image_comp.h": "18a15ba01cd6246b526770be0a2389c5ef30f9ef688ceb914ef2fe6c4a283969",
+  "decode_image_comp.h": "e2f51e90a8c4d3916abe3604d9299d9097768f2155308e201e5f12f2adaf8ee8",
+  "swizzle_depth_comp.h": "bbc7aabaa2f5bb2e94260da50ee471f4eec5f4177997f298683388093cdf3d99",
+  "gs_frag_blend.h": "8eef13c3332c71df0eb2412971c828c3ce2c550c6bd4483869b1b2a1344ccb6d"
+ }
+}

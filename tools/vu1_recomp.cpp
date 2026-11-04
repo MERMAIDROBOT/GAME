@@ -20,6 +20,21 @@ namespace
     using A = VU1InterpreterAccess;
 
     constexpr uint32_t kCodeSize = 16u * 1024u;
+    constexpr uint32_t kVu0CodeSize = 4u * 1024u;
+    // The image being compiled: VU1 (16 KiB of micro memory) or VU0 (4 KiB, captured as vu0_*.bin).
+    // Code addresses wrap at the image size; VU0 data addresses at its 4 KiB data memory (qaddr0).
+    uint32_t g_codeSize = kCodeSize;
+    bool g_vu0 = false;
+
+    std::string codeMask()
+    {
+        return std::to_string(g_codeSize - 1u) + "u";
+    }
+
+    std::string qaddrFn()
+    {
+        return g_vu0 ? "qaddr0(" : "qaddr(";
+    }
     constexpr uint32_t kDefaultBlockPairs = 128u;
     constexpr uint32_t kMaxVfLatency = 4u;
     constexpr uint32_t kMaxViLatency = 4u;
@@ -79,7 +94,7 @@ namespace
 
     uint32_t nextPc(uint32_t pc)
     {
-        return pc + 8u >= kCodeSize ? 0u : pc + 8u;
+        return pc + 8u >= g_codeSize ? 0u : pc + 8u;
     }
 
     uint8_t fDest(uint32_t i) { return static_cast<uint8_t>((i >> 21) & 0xFu); }
@@ -171,6 +186,13 @@ namespace
         return "bcast<" + num(bc) + "u>(" + normV(reg) + ")";
     }
 
+    // MAX/MINI compare the raw register bits (no denormal flush), as the interpreter does; their
+    // results (and ABS's) may keep a denormal, so the normalized shadow is recomputed from them.
+    std::string rawBc(uint32_t reg, uint32_t bc)
+    {
+        return "bcast<" + num(bc) + "u>(" + rawV(reg) + ")";
+    }
+
     std::string laneBits(uint32_t reg, uint32_t component)
     {
         if (!gView.local)
@@ -187,10 +209,11 @@ namespace
 
     std::string writeV(uint32_t reg, const std::string &raw, const std::string &norm, const std::string &dest)
     {
-        if (!gView.local)
-            return "writeVf(vu, ctx, " + num(reg) + "u, " + raw + ", " + norm + ", " + dest + ");";
+        // VF0 is constant: a result aimed at it only sets flags, in either view.
         if (reg == 0u)
             return "";
+        if (!gView.local)
+            return "writeVf(vu, ctx, " + num(reg) + "u, " + raw + ", " + norm + ", " + dest + ");";
         noteVf(reg, true);
         const std::string r = "vr" + num(reg);
         const std::string n = "vn" + num(reg);
@@ -306,8 +329,8 @@ namespace
                 case 1: fmac("Sub", bcExpr(bc), false, false, false); break;
                 case 2: fmac("Madd", bcExpr(bc), true, false, false); break;
                 case 3: fmac("Msub", bcExpr(bc), true, false, false); break;
-                case 4: unary("_mm_max_ps(" + s + ", " + bcExpr(bc) + ")", fd); break;
-                case 5: unary("_mm_min_ps(" + s + ", " + bcExpr(bc) + ")", fd); break;
+                case 4: unary("vmaxBits(" + rawV(fs) + ", " + rawBc(ft, bc) + ")", fd, true); break;
+                case 5: unary("vminBits(" + rawV(fs) + ", " + rawBc(ft, bc) + ")", fd, true); break;
                 case 6: fmac("Mul", bcExpr(bc), false, false, false); break;
                 }
                 return e;
@@ -315,9 +338,9 @@ namespace
             switch (op)
             {
             case 0x1C: fmac("Mul", "qN(vu)", false, false, true); break;
-            case 0x1D: unary("_mm_max_ps(" + s + ", iN(vu))", fd); break;
+            case 0x1D: unary("vmaxBits(" + rawV(fs) + ", _mm_set1_ps(vu.m_state.i))", fd, true); break;
             case 0x1E: fmac("Mul", "iN(vu)", false, false, false); break;
-            case 0x1F: unary("_mm_min_ps(" + s + ", iN(vu))", fd); break;
+            case 0x1F: unary("vminBits(" + rawV(fs) + ", _mm_set1_ps(vu.m_state.i))", fd, true); break;
             case 0x20: fmac("Add", "qN(vu)", false, false, true); break;
             case 0x21: fmac("Madd", "qN(vu)", true, false, true); break;
             case 0x22: fmac("Add", "iN(vu)", false, false, false); break;
@@ -329,11 +352,11 @@ namespace
             case 0x28: fmac("Add", tVec, false, false, false); break;
             case 0x29: fmac("Madd", tVec, true, false, false); break;
             case 0x2A: fmac("Mul", tVec, false, false, false); break;
-            case 0x2B: unary("_mm_max_ps(" + s + ", " + tVec + ")", fd); break;
+            case 0x2B: unary("vmaxBits(" + rawV(fs) + ", " + rawV(ft) + ")", fd, true); break;
             case 0x2C: fmac("Sub", tVec, false, false, false); break;
             case 0x2D: fmac("Msub", tVec, true, false, false); break;
             case 0x2E: fmac("Opmsub", tVec, true, false, false); break;
-            case 0x2F: unary("_mm_min_ps(" + s + ", " + tVec + ")", fd); break;
+            case 0x2F: unary("vminBits(" + rawV(fs) + ", " + rawV(ft) + ")", fd, true); break;
             default:
                 e.nop = false;
                 e.generic = true;
@@ -366,7 +389,7 @@ namespace
             unary("ftoi<" + num(kShift[special & 3u]) + "u>(" + s + ")", ft, true);
             break;
         case 0x1C: fmac("Mul", "qN(vu)", false, true, true); break;
-        case 0x1D: unary("absN(" + s + ")", ft); break;
+        case 0x1D: unary("absN(" + rawV(fs) + ")", ft, true); break;  // ABS clears the sign bit of the raw register
         case 0x1E: fmac("Mul", "iN(vu)", false, true, false); break;
         case 0x1F:
             e.nop = false;
@@ -462,18 +485,18 @@ namespace
         switch (opHi)
         {
         case 0x00:
-            loadVf(ft, "qaddr(" + vi(is) + ", " + num(imm) + ")");
+            loadVf(ft, qaddrFn() + vi(is) + ", " + num(imm) + ")");
             return e;
         case 0x01:
-            storeVf(fs, "qaddr(" + vi(it) + ", " + num(imm) + ")");
+            storeVf(fs, qaddrFn() + vi(it) + ", " + num(imm) + ")");
             return e;
         case 0x04:
             if (it != 0u)
-                viSet(it, "ldw(mem, qaddr(" + vi(is) + ", " + num(imm) + ") + " + num(firstComponent(dest) * 4u) + "u) & 0xFFFFu");
+                viSet(it, "ldw(mem, " + qaddrFn() + vi(is) + ", " + num(imm) + ") + " + num(firstComponent(dest) * 4u) + "u) & 0xFFFFu");
             return e;
         case 0x05:
             if (dest != 0u)
-                e.code = "stw(vu, ctx, cyc, qaddr(" + vi(is) + ", " + num(imm) + "), " + vi(it) + ", " + dst + ");";
+                e.code = "stw(vu, ctx, cyc, " + qaddrFn() + vi(is) + ", " + num(imm) + "), " + vi(it) + ", " + dst + ");";
             return e;
         case 0x08:
         case 0x09:
@@ -540,10 +563,10 @@ namespace
             viSet(it, num((pc + 16u) / 8u));
             return e;
         case 0x24:
-            e.code = "jt = (static_cast<uint32_t>(static_cast<uint16_t>(" + br(is) + ")) * 8u) & 0x3FFFu;";
+            e.code = "jt = (static_cast<uint32_t>(static_cast<uint16_t>(" + br(is) + ")) * 8u) & " + codeMask() + ";";
             return e;
         case 0x25:
-            e.code = "jt = (static_cast<uint32_t>(static_cast<uint16_t>(" + br(is) + ")) * 8u) & 0x3FFFu;";
+            e.code = "jt = (static_cast<uint32_t>(static_cast<uint16_t>(" + br(is) + ")) * 8u) & " + codeMask() + ";";
             viSet(it, num((pc + 16u) / 8u));
             return e;
         case 0x28:
@@ -621,20 +644,20 @@ namespace
             }
             return e;
         case 0x34:
-            loadVf(ft, "qaddr(" + vi(is) + ", 0)");
+            loadVf(ft, qaddrFn() + vi(is) + ", 0)");
             viSet(is, vi(is) + " + 1");
             return e;
         case 0x35:
-            storeVf(fs, "qaddr(" + vi(it) + ", 0)");
+            storeVf(fs, qaddrFn() + vi(it) + ", 0)");
             viSet(it, vi(it) + " + 1");
             return e;
         case 0x36:
             viSet(is, vi(is) + " - 1");
-            loadVf(ft, "qaddr(" + vi(is) + ", 0)");
+            loadVf(ft, qaddrFn() + vi(is) + ", 0)");
             return e;
         case 0x37:
             viSet(it, vi(it) + " - 1");
-            storeVf(fs, "qaddr(" + vi(it) + ", 0)");
+            storeVf(fs, qaddrFn() + vi(it) + ", 0)");
             return e;
         case 0x38:
             e.code = "divOp(vu, ctx, cyc, " + laneFloat(fs, fsf) + ", " + laneFloat(ft, ftf) + ");";
@@ -661,11 +684,11 @@ namespace
             return e;
         case 0x3E:
             if (it != 0u)
-                viSet(it, "ldw(mem, qaddr(" + vi(is) + ", 0) + " + num(firstComponent(dest) * 4u) + "u) & 0xFFFFu");
+                viSet(it, "ldw(mem, " + qaddrFn() + vi(is) + ", 0) + " + num(firstComponent(dest) * 4u) + "u) & 0xFFFFu");
             return e;
         case 0x3F:
             if (dest != 0u)
-                e.code = "stw(vu, ctx, cyc, qaddr(" + vi(is) + ", 0), " + vi(it) + ", " + dst + ");";
+                e.code = "stw(vu, ctx, cyc, " + qaddrFn() + vi(is) + ", 0), " + vi(it) + ", " + dst + ");";
             return e;
         case 0x64:
             if (dest != 0u)
@@ -1003,7 +1026,11 @@ namespace
                 if (recordBackup)
                 {
                     backupVar = "bk" + known->id + "_" + num(known->pos);
-                    out += "        const int32_t " + backupVar + " = " + vi(writtenVi) + ";\n";
+                    out += "        const int32_t " + backupVar + " = " +
+                           (known->backupReg == static_cast<int>(writtenVi) ? known->backupVar
+                            : known->backupReg < 0 ? "(vu.m_viBranchBackupValid && vu.m_viBranchBackupReg == " + num(writtenVi) +
+                                                         "u ? vu.m_viBranchBackupValue : " + vi(writtenVi) + ")"
+                                                   : vi(writtenVi)) + ";\n";
                 }
                 if (known->backupReg >= 0)
                 {
@@ -1033,7 +1060,9 @@ namespace
             }
             out += "        {\n";
             if (recordBackup && !known)
-                out += "            const int32_t oldVi = " + vi(writtenVi) + ";\n";
+                // Back-to-back writes to one VI keep the value from before the chain (as the interpreter does).
+                out += "            const int32_t oldVi = vu.m_viBranchBackupValid && vu.m_viBranchBackupReg == " + num(writtenVi) +
+                       "u ? vu.m_viBranchBackupValue : " + vi(writtenVi) + ";\n";
             const UpperEmit up = upperEmit(d.upper);
             std::string fmacValue = up.value;
             std::string fmacDecl = "__m128 un;";
@@ -1382,12 +1411,12 @@ namespace
     bool writeImage(const std::filesystem::path &outDir, uint64_t hash, const std::vector<uint8_t> &code, uint32_t maxBlockPairs,
                     std::map<std::string, uint32_t> &stats)
     {
-        VU1Interpreter vu(VU1Interpreter::Unit::VU1);
+        VU1Interpreter vu(g_vu0 ? VU1Interpreter::Unit::VU0 : VU1Interpreter::Unit::VU1);
         uint32_t used = 0u;
         for (uint32_t pc = 0; pc + 8u <= code.size(); pc += 8u)
             if (std::any_of(code.begin() + pc, code.begin() + pc + 8u, [](uint8_t b) { return b != 0u; }))
                 used = pc / 8u + 1u;
-        const uint32_t total = kCodeSize / 8u;
+        const uint32_t total = g_codeSize / 8u;
         const uint32_t count = std::min(total, used + 2u);
 
         Emitter emitter;
@@ -1404,7 +1433,7 @@ namespace
                 const uint32_t opHi = (p.d.lower >> 25) & 0x7Fu;
                 p.dynamic = opHi == 0x24u || opHi == 0x25u;
                 p.conditional = opHi >= 0x28u;
-                p.target = (p.pc + 8u + static_cast<uint32_t>(fImm11(p.d.lower) * 8)) & 0x3FFFu;
+                p.target = (p.pc + 8u + static_cast<uint32_t>(fImm11(p.d.lower) * 8)) & (g_codeSize - 1u);
             }
         }
         for (uint32_t index = 0; index < count; ++index)
@@ -1561,42 +1590,46 @@ int main(int argc, char **argv)
             std::filesystem::remove(entry.path());
     }
 
+    // vu1_*.bin: 16 KiB VU1 micro memory; vu0_*.bin: 4 KiB VU0 micro memory (VCALLMS programs).
     std::vector<std::filesystem::path> images;
     for (const auto &entry : std::filesystem::directory_iterator(captureDir))
     {
         const std::string name = entry.path().filename().string();
-        if (name.rfind("vu1_", 0) == 0 && entry.path().extension() == ".bin")
+        if ((name.rfind("vu1_", 0) == 0 || name.rfind("vu0_", 0) == 0) && entry.path().extension() == ".bin")
             images.push_back(entry.path());
     }
     std::sort(images.begin(), images.end());
 
-    std::vector<uint64_t> hashes;
+    std::vector<std::pair<uint64_t, bool>> hashes;
     std::map<std::string, uint32_t> stats;
     for (const auto &path : images)
     {
+        g_vu0 = path.filename().string().rfind("vu0_", 0) == 0;
+        g_codeSize = g_vu0 ? kVu0CodeSize : kCodeSize;
         std::ifstream file(path, std::ios::binary);
         std::vector<uint8_t> code((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        if (code.size() != kCodeSize)
+        if (code.size() != g_codeSize)
         {
-            std::cerr << path << ": expected " << kCodeSize << " bytes\n";
+            std::cerr << path << ": expected " << g_codeSize << " bytes\n";
             return 1;
         }
         const uint64_t hash = fnv1a64(code.data(), code.size());
         if (!writeImage(outDir, hash, code, blockPairs, stats))
             return 1;
-        hashes.push_back(hash);
+        hashes.emplace_back(hash, g_vu0);
     }
     for (const auto &[name, value] : stats)
         std::cout << name << ": " << value << "\n";
 
     std::ostringstream reg;
     reg << "#include \"ps2_vu1_impl.inl\"\n\n";
-    for (const uint64_t hash : hashes)
+    for (const auto &[hash, vu0] : hashes)
         reg << "template <>\nVU1InterpreterAccess::StepResult VU1InterpreterAccess::runImage<" << hex64(hash)
             << ">(VU1Interpreter &, const Vu1RunArgs &);\n";
     reg << "\nvoid registerGeneratedVu1Programs()\n{\n";
-    for (const uint64_t hash : hashes)
-        reg << "    registerVu1CompiledProgram(" << hex64(hash) << ", &VU1InterpreterAccess::runImage<" << hex64(hash) << ">);\n";
+    for (const auto &[hash, vu0] : hashes)
+        reg << "    " << (vu0 ? "registerVu0CompiledProgram(" : "registerVu1CompiledProgram(") << hex64(hash)
+            << ", &VU1InterpreterAccess::runImage<" << hex64(hash) << ">);\n";
     reg << "}\n";
     std::ofstream file(outDir / "vu1_programs.cpp", std::ios::binary);
     file << reg.str();

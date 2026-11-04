@@ -1,0 +1,93 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_host_rounding.h b/ps2xRuntime/include/runtime/gs/gs_host_rounding.h
+new file mode 100644
+index 0000000..22d036d
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/gs/gs_host_rounding.h
+@@ -0,0 +1,28 @@
++#pragma once
++
++#include <cfenv>
++
++// The GS rasterizes with host float arithmetic written for round-to-nearest. Callers may arrive
++// with another mode active: a VU program runs under round-toward-zero and sends PATH1 packets
++// through XGKICK while it is still running. Without this guard, the same GS packet drew
++// differently depending on which path delivered it. Each GS entry point forces round-to-nearest
++// for its duration and restores the caller's mode on every exit.
++class GSHostRounding
++{
++public:
++    GSHostRounding() : m_previous(std::fegetround())
++    {
++        if (m_previous != FE_TONEAREST)
++            std::fesetround(FE_TONEAREST);
++    }
++    ~GSHostRounding()
++    {
++        if (m_previous != FE_TONEAREST)
++            std::fesetround(m_previous);
++    }
++    GSHostRounding(const GSHostRounding &) = delete;
++    GSHostRounding &operator=(const GSHostRounding &) = delete;
++
++private:
++    int m_previous;
++};
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 14fc722..b857a03 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -4,6 +4,7 @@
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/gs/gs_cpu_backend.h"
+ #include "runtime/gs/gs_threaded_backend.h"
++#include "runtime/gs/gs_host_rounding.h"
+ #include "ps2_log.h"
+ #include "runtime/ps2_memory.h"
+ #include <atomic>
+@@ -790,6 +791,7 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
+ 
+ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ {
++    const GSHostRounding rounding;
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     if (!data || sizeBytes < 16 || !m_backend)
+         return;
+@@ -889,6 +891,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ 
+ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ {
++    const GSHostRounding rounding;
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     if (!data || sizeBytes < 16u || !m_backend)
+         return false;
+@@ -935,6 +938,7 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
+                            const uint8_t *data,
+                            uint32_t sizeBytes)
+ {
++    const GSHostRounding rounding;
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     if (m_backend && m_backend->OwnsRawGS() && data && sizeBytes)
+         m_backend->RawUpload(bitbltbuf,trxpos,trxreg,trxdir,data,sizeBytes);
+@@ -1215,6 +1219,7 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
+ 
+ void GS::writeRegister(uint8_t regAddr, uint64_t value)
+ {
++    const GSHostRounding rounding;
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     if (m_backend && m_backend->OwnsRawGS()) m_backend->RawRegister(regAddr,value);
+     writeRegisterUnlocked(regAddr, value);
+@@ -1771,12 +1776,14 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
+ 
+ bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
+ {
++    const GSHostRounding rounding;
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
+ }
+ 
+ bool GS::clearActiveFramebuffer(uint32_t rgba)
+ {
++    const GSHostRounding rounding;
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
+ }
