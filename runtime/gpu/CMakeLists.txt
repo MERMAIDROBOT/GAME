@@ -12,6 +12,42 @@ cmake_minimum_required(VERSION 3.20)
 project(ps2gpu CXX C)
 option(PS2GPU_BUILD_DISPLAY "Build the SDL window presenter" ON)
 
+# Everything the renderer needs is in this repository by default: the Vulkan C headers
+# (third_party/vulkan-headers), a generated loader with volk's API subset
+# (third_party/vk_loader, tools/gen_vk_loader.py) and the shaders compiled to SPIR-V
+# (shaders/spirv, tools/gen_shaders.py, checked against their sources by tests).
+# PS2GPU_FETCH_DEPENDENCIES=ON restores the original configure-time fetches.
+option(PS2GPU_FETCH_DEPENDENCIES "Fetch Vulkan-Headers, volk and glslang at configure time" OFF)
+if(NOT PS2GPU_FETCH_DEPENDENCIES)
+    if(NOT TARGET Vulkan::Headers)
+        add_library(ps2gpu_vulkan_headers INTERFACE)
+        target_include_directories(ps2gpu_vulkan_headers INTERFACE ${CMAKE_CURRENT_LIST_DIR}/third_party/vulkan-headers/include)
+        add_library(Vulkan::Headers ALIAS ps2gpu_vulkan_headers)
+    endif()
+    if(NOT TARGET volk::volk)
+        add_library(ps2gpu_vk_loader STATIC ${CMAKE_CURRENT_LIST_DIR}/third_party/vk_loader/volk.c)
+        target_include_directories(ps2gpu_vk_loader PUBLIC ${CMAKE_CURRENT_LIST_DIR}/third_party/vk_loader)
+        target_compile_definitions(ps2gpu_vk_loader PUBLIC VK_NO_PROTOTYPES)
+        target_link_libraries(ps2gpu_vk_loader PUBLIC Vulkan::Headers ${CMAKE_DL_LIBS})
+        set_target_properties(ps2gpu_vk_loader PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        add_library(volk::volk ALIAS ps2gpu_vk_loader)
+    endif()
+    set(PS2GPU_SHADER_DIR ${CMAKE_CURRENT_LIST_DIR}/shaders/spirv)
+    add_custom_target(ps2gpu_shaders)
+    if(PS2GPU_BUILD_DISPLAY)
+        include(FetchContent)
+        set(FETCHCONTENT_QUIET ON)
+        FetchContent_Declare(sdl3
+            GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+            GIT_TAG release-3.4.18
+            GIT_SHALLOW TRUE)
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "" FORCE)
+        set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+        set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(sdl3)
+    endif()
+else()
 include(FetchContent)
 set(FETCHCONTENT_QUIET ON)
 
@@ -117,6 +153,7 @@ add_custom_command(OUTPUT ${out}
     COMMENT "glslang gs.frag (blending in the shader)")
 list(APPEND PS2GPU_SHADER_HEADERS ${out})
 add_custom_target(ps2gpu_shaders DEPENDS ${PS2GPU_SHADER_HEADERS})
+endif()
 
 add_library(ps2gpu STATIC
     ${CMAKE_CURRENT_LIST_DIR}/src/gpu.cpp

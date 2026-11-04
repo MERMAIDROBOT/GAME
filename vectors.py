@@ -59,7 +59,7 @@ def compile_vu(profile,private,capture):
         # Diagnose the exact snapshots supplied to this compilation, without
         # changing generated code selection or declaring parallel eligibility.
         evidence=dict(schema=1,implementation=analysis_model,local_only=True,retail_derived=True,
-                      images={name:deps.analyze_image(data) for name,data in snapshots.items()},
+                      images={name:deps.analyze_named(name,data) for name,data in snapshots.items()},
                       runtime_optimization_eligible=False)
         lab.save(temporary/'vu-dependencies.json',evidence)
         if any(lab.digest(path)!=inputs[path.name] for path in images):
@@ -79,3 +79,62 @@ def compile_vu(profile,private,capture):
         if temporary.exists(): shutil.rmtree(temporary)
     print(f'Compiled {len(images)} private vector images into {len(sources)} source files. Verify execution before packaging.')
     return record
+
+
+# ---- learning: VU programs recorded by packaged apps feed the next build ------------------------------------
+def fnv1a64(data):
+    value = 0xcbf29ce484222325
+    for byte in data:
+        value = ((value ^ byte) * 0x100000001b3) & 0xffffffffffffffff
+    return value
+
+
+def learning_sources(profile, private):
+    """Capture folders whose programs the next build compiles: earlier private captures and the packaged app's."""
+    private = Path(private)
+    folders = sorted(p for p in private.glob('vu-capture-*') if p.is_dir() and not p.is_symlink())
+    app = Path.home() / 'Library/Application Support/PS2 Port Lab' / profile['id'] / 'vu-capture'
+    return folders + [app]
+
+
+def learn(profile, private):
+    """Merge recorded VU programs into private/vu-capture. A file counts only when its size is a full VU image and
+    its bytes hash to the name the runtime gave it. Returns the number of new programs."""
+    import re
+    target = Path(private) / 'vu-capture'
+    target.mkdir(exist_ok=True)
+    added = 0
+    for folder in learning_sources(profile, private):
+        if not folder.is_dir():
+            continue
+        for path in sorted(folder.glob('vu[01]_*.bin')):
+            m = re.fullmatch(r'vu([01])_([0-9a-f]{16})\.bin', path.name)
+            if not m or path.is_symlink() or (target / path.name).exists():
+                continue
+            data = path.read_bytes()
+            if len(data) != (4096 if m.group(1) == '0' else 16384) or fnv1a64(data) != int(m.group(2), 16):
+                continue
+            if len(list(target.glob('vu[01]_*.bin'))) >= deps.MAX_IMAGES:
+                break
+            (target / path.name).write_bytes(data)
+            added += 1
+    return added
+
+
+def refresh_compiled(profile, private):
+    """Compile every learned program. Returns the compiled record, or None when nothing can be compiled yet
+    (no recorded programs, or no vector compiler until the first build)."""
+    private = Path(private)
+    learn(profile, private)
+    capture = private / 'vu-capture'
+    if not any(capture.glob('vu[01]_*.bin')) or not (private / 'native-build/ps2PortVuRecompiler').is_file():
+        return None
+    images = deps.capture_images(private, capture)
+    inputs = {p.name: deps.sha(p.read_bytes()) for p in images}
+    output = private / 'generated-vu'
+    if output.exists():
+        _, record = validated_sources(private)
+        if record.get('input_images') == inputs and record.get('compiler_sha256') == lab.digest(private / 'native-build/ps2PortVuRecompiler'):
+            return record
+        output.rename(private / f'generated-vu.previous-{int(time.time())}')     # kept, not deleted
+    return compile_vu(profile, private, capture)

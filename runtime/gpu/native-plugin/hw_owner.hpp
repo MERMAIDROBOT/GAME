@@ -210,6 +210,12 @@ public:
             const unsigned lines = (priv.smode2.INT && priv.smode2.FFMD) ? std::max(1u, gh / 2) : gh;
             const unsigned sx = std::min(w - 1, unsigned(fb.DBX) * s), sy = std::min(h - 1, unsigned(fb.DBY) * s);
             const unsigned dw = std::min(w - sx, gw * s), dh = std::min(h - sy, lines * s);
+            if (!coversDisplay(w, unsigned(fb.DBX), gw, s) && !last.bytes().empty()) {
+                static unsigned held = 0;
+                if (held++ < 24) std::fprintf(stderr, "[scanout transition] kept previous picture: target %u wide, display needs %u\n", w, (unsigned(fb.DBX) + gw) * s);
+                scanoutLatch_.reset();
+                return last;
+            }
             const uint8_t *src = frame + (size_t(sy) * w + sx) * 4;
             { static int told = 0; static unsigned lastKey = 0; const unsigned key = gw * 100000 + lines * 10 + (dw == OW && dh == OH);
               if (key != lastKey && told < 12) { lastKey = key; ++told; std::fprintf(stderr, "[claude-hw display] DW %u MAGH %u DH %u MAGV %u INT %u FFMD %u DBX %u DBY %u -> shown %ux%u lines %u, target %ux%u, crop %ux%u, out %ux%u%s\n",

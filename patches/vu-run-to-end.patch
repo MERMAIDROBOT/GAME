@@ -1,0 +1,89 @@
+diff --git a/ps2xRuntime/include/runtime/ps2_vu1.h b/ps2xRuntime/include/runtime/ps2_vu1.h
+index b19fbff..4b780a2 100644
+--- a/ps2xRuntime/include/runtime/ps2_vu1.h
++++ b/ps2xRuntime/include/runtime/ps2_vu1.h
+@@ -61,6 +61,9 @@ public:
+ 
+     VU1State &state() { return m_state; }
+     const VU1State &state() const { return m_state; }
++    // True when the last run stopped at its cycle budget before the program ended (E bit, D/T halt
++    // or an error), so the program can be continued with resume().
++    bool running() const { return m_running; }
+ 
+ private:
+     enum Pipeline : uint8_t
+@@ -244,6 +247,7 @@ private:
+     GS *m_activeGs = nullptr;
+     PS2Memory *m_activeMemory = nullptr;
+     bool m_stopRequested = false;
++    bool m_running = false;
+     bool m_pendingHaltD = false;
+     bool m_pendingHaltT = false;
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 9f25488..637c2ec 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -107,6 +107,24 @@ struct ProgramHeader
+ 
+ namespace
+ {
++    // A VU program runs until it ends (E bit, D/T halt or an error): on the hardware the next
++    // MSCAL/VCALLMS waits for it. It runs in budget-sized slices; the cap only stops a program that
++    // never ends, which is reported once per unit.
++    void finishVuProgram(VU1Interpreter &vu, uint8_t *code, uint32_t codeSize, uint8_t *data, uint32_t dataSize,
++                         GS &gs, PS2Memory *memory, uint32_t slice, const char *unit)
++    {
++        constexpr uint32_t kMaxSlices = 1024u;
++        for (uint32_t n = 0; vu.running() && n < kMaxSlices; ++n)
++            vu.resume(code, codeSize, data, dataSize, gs, memory, vu.state().top, vu.state().itop, slice);
++        if (vu.running())
++        {
++            static std::atomic<bool> reported[2]{};
++            if (!reported[unit[2] == '1'].exchange(true))
++                std::cerr << "[" << unit << "] program still running after " << kMaxSlices << " x " << slice
++                          << " cycles at pc=0x" << std::hex << vu.state().pc << std::dec << "; stopped" << std::endl;
++        }
++    }
++
+     constexpr uint32_t kGuestHeapDefaultBase = 0x00100000u;
+     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
+     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
+@@ -755,6 +773,8 @@ bool PS2Runtime::syncCoreSubsystems()
+                                      m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                    m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                    m_gs, &m_memory, startPC, top, itop, 65536);
++                                     finishVuProgram(m_vu1, m_memory.getVU1Code(), PS2_VU1_CODE_SIZE, m_memory.getVU1Data(),
++                                                     PS2_VU1_DATA_SIZE, m_gs, &m_memory, 65536, "VU1");
+                                      cpuContext->vu0_vpu_stat =
+                                          (cpuContext->vu0_vpu_stat & ~0x0600u) |
+                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+@@ -773,6 +793,8 @@ bool PS2Runtime::syncCoreSubsystems()
+                                      m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                   m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                   m_gs, &m_memory, top, itop, 65536);
++                                     finishVuProgram(m_vu1, m_memory.getVU1Code(), PS2_VU1_CODE_SIZE, m_memory.getVU1Data(),
++                                                     PS2_VU1_DATA_SIZE, m_gs, &m_memory, 65536, "VU1");
+                                      cpuContext->vu0_vpu_stat =
+                                          (cpuContext->vu0_vpu_stat & ~0x0600u) |
+                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+@@ -1538,6 +1560,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
+                   vu0Data, PS2_VU0_DATA_SIZE,
+                   m_gs, &m_memory,
+                   startPC, 0u, ctx->vu0_itop, 4096);
++    finishVuProgram(m_vu0, vu0Code, PS2_VU0_CODE_SIZE, vu0Data, PS2_VU0_DATA_SIZE, m_gs, &m_memory, 4096, "VU0");
+     copyVu0StateToContext(m_vu0.state(), ctx);
+ }
+ 
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 2f55e07..cf18676 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1150,6 +1150,7 @@ bool VU1InterpreterAccess::runLoopWith(VU1Interpreter &vu, uint8_t *vuCode, uint
+         vu.m_pendingHaltT = false;
+     }
+     vu.m_state.cycles = vu.m_cycle;
++    vu.m_running = !programEnded && !vu.m_stopRequested && vu.m_state.pc + 8u <= codeSize;
+     if (changeRounding)
+         _mm_setcsr((_mm_getcsr() & ~0x6000u) | (previousCsr & 0x6000u));
+     return programEnded;

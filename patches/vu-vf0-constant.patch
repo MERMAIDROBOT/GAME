@@ -1,0 +1,17 @@
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl b/ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl
+index d034e32..8b76d97 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl
+@@ -3758,6 +3758,12 @@ struct VU1InterpreterAccess
+             else
+             {
+                 vu.execUpper(decoded.upper);
++                // VF0 is constant: an upper result aimed at it (flag-only arithmetic) must not reach
++                // the lower instruction of the same pair.
++                vu.m_state.vf[0][0] = 0.0f;
++                vu.m_state.vf[0][1] = 0.0f;
++                vu.m_state.vf[0][2] = 0.0f;
++                vu.m_state.vf[0][3] = 1.0f;
+                 vu.execLower(decoded.lower, vuData, dataSize, gs, memory, decoded.upper);
+             }
+ 

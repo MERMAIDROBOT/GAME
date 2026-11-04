@@ -47,6 +47,12 @@ def emit(word):
 }}'''
 
 
+def reference_call(word):
+    """The call the patched recompiler emits (patches/mmi-reference-forms.patch); already correct."""
+    rs,rt,rd = registers(word)
+    return f'ps2_mmi::pmulth(ctx, {rd}, {rs}, {rt}, 28);'
+
+
 def shape(text):
     return re.compile(r'\s*'.join(re.escape(part) for part in re.split(r'\s+',text.strip())))
 
@@ -67,7 +73,7 @@ def rewrite(text):
         start += prefix.end()
         body = text[start:end]
         corrected = emit(word)
-        if shape(corrected).match(body):
+        if shape(corrected).match(body) or shape(reference_call(word)).match(body):
             continue
         old = shape(legacy(word)).match(body)
         if not old:

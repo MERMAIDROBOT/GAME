@@ -1,0 +1,20 @@
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 523e98a..ab7fd04 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2640,6 +2640,15 @@ void PS2Runtime::run()
+                       << " gif=" << m_memory.gifCopyCount()
+                       << " gs=" << m_memory.gsWriteCount()
+                       << " threads=" << snapshot.threads.size() << std::endl;
++            // PS2_PORT_DMA_WATCH=1: the registers a "sync path" spin-wait polls (VIF1/GIF CHCR STR, VIF1_STAT VPS,
++            // GIF_STAT APATH, D_STAT), so a path that never reports idle can be named from the heartbeat.
++            static const bool dmaWatch = std::getenv("PS2_PORT_DMA_WATCH") != nullptr;
++            if (dmaWatch)
++                std::cerr << "[port-lab dma] d1_chcr=0x" << std::hex << m_memory.readIORegister(0x10009000u)
++                          << " d2_chcr=0x" << m_memory.readIORegister(0x1000A000u)
++                          << " vif1_stat=0x" << m_memory.readIORegister(0x10003C00u)
++                          << " gif_stat=0x" << m_memory.readIORegister(0x10003020u)
++                          << " d_stat=0x" << m_memory.readIORegister(0x1000E010u) << std::dec << std::endl;
+             if (std::getenv("PS2_PORT_GS_TRACE")) {
+                 const auto graphics = gs().getDebugSnapshot();
+                 const auto history = gs().getDebugHistory();

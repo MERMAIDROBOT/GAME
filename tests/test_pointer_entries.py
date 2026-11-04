@@ -90,5 +90,93 @@ class PointerEntryScan(unittest.TestCase):
                 pointer_entries.apply({'id': 'synthetic'}, Path(tmp))
 
 
+def elf_with_sections():
+    """Three sections: executable (nop, nop, prologue ...), executable non-EE (VU-like word), data (prologue-shaped word)."""
+    exec_words = [NOP, NOP, 0x27BDFF40, 0x7FBF0000, JR_RA, 0x27BD00C0]
+    vu_words = [0x8000033C, 0x000002FF]   # not a MIPS prologue
+    data_words = [0x27BDFFF0, 0x00000001]  # looks like a prologue but SHF_EXECINSTR is clear
+    blobs = [(0x300000, exec_words, 6), (0x310000, vu_words, 6), (0x320000, data_words, 3)]
+    raw = bytearray(0x100)
+    raw[:52] = struct.pack('<16sHHIIIIIHHHHHH', b'\x7fELF\x01\x01\x01' + bytes(9), 2, 8, 1, 0x300000, 52, 0, 0, 52, 32, 1, 40, 0, 0)
+    raw[52:84] = struct.pack('<8I', 1, 0x100, 0x300000, 0, 4 * len(exec_words), 4 * len(exec_words), 5, 4)  # PT_LOAD of the code
+    headers = [bytes(40)]
+    for addr, words, flags in blobs:
+        offset = len(raw)
+        raw += struct.pack(f'<{len(words)}I', *words)
+        headers.append(struct.pack('<10I', 0, 1, flags, addr, offset, 4 * len(words), 0, 0, 4, 0))
+    shoff = len(raw)
+    raw += b''.join(headers)
+    struct.pack_into('<I', raw, 32, shoff)
+    struct.pack_into('<HH', raw, 46, 40, len(headers))
+    return bytes(raw)
+
+
+class SectionStartEntries(unittest.TestCase):
+    def test_prologue_after_padding_at_executable_section_start_is_a_candidate(self):
+        self.assertEqual(pointer_entries._section_starts(elf_with_sections()), {0x300008})
+
+    def test_scan_reports_section_start_reason(self):
+        self.assertIn((0x300008, 'section_start'), pointer_entries.scan(elf_with_sections()))
+
+    def test_elf_without_section_headers_adds_nothing(self):
+        self.assertEqual(pointer_entries._section_starts(elf()), set())
+
+
+class PrologueAfterReturn(unittest.TestCase):
+    def _raw(self, code):
+        body = struct.pack(f'<{len(code)}I', *code)
+        header = struct.pack('<16sHHIIIIIHHHHHH', b'\x7fELF\x01\x01\x01' + bytes(9), 2, 8, 1, 0x100000, 52, 0, 0, 52, 32, 1, 40, 0, 0)
+        load = struct.pack('<8I', 1, 0x100, 0x100000, 0, len(body), len(body), 5, 4)
+        raw = bytearray(0x100 + len(body)); raw[:52] = header; raw[52:84] = load; raw[0x100:] = body
+        return bytes(raw)
+
+    def test_unreferenced_prologue_after_return_is_a_start(self):
+        code = [0x27BDFFF0, 0x34020001, JR_RA, 0x27BD0010,   # f1 ends: jr ra, delay slot restores sp
+                0x27BDFFE0, 0x34020002, JR_RA, 0x27BD0020,   # 0x100010 f2: nothing points here
+                0x27BDFFD0, JR_RA, NOP, NOP, NOP,            # 0x100020 f3 after f2's delay slot
+                0x27BDFFC0, JR_RA, NOP]                       # 0x100034 f4 after jr ra, nop delay, two padding nops
+        found = dict(pointer_entries.scan(self._raw(code)))
+        self.assertEqual(found.get(0x100010), 'prologue_after_return')
+        self.assertEqual(found.get(0x100020), 'prologue_after_return')
+        self.assertEqual(found.get(0x100034), 'prologue_after_return')
+
+    def test_prologue_without_a_preceding_return_is_not_a_start(self):
+        code = [0x27BDFFF0, 0x34020001, 0x10400002, NOP,     # beqz: not a function end
+                0x27BDFFE0, JR_RA, NOP]
+        self.assertNotIn(0x100010, dict(pointer_entries.scan(self._raw(code))))
+
+
+class AnalyzeStageAddsPointerHints(unittest.TestCase):
+    """The analyze stage merges pointer-entry hints itself (no manual step); profiles may opt out."""
+
+    def run_analyze(self, profile):
+        from unittest import mock
+        import pipeline
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        private = Path(tmp.name)
+        (private / 'disc-root').mkdir(); (private / 'analysis').mkdir()
+        elf_path = private / 'disc-root/TEST.ELF'; elf_path.write_bytes(elf())
+        config = '[general]\ninput = "x"\nentry_points = ["known@0x00100000"]\n\n[mmio]\n'
+        def analyzer(command, log, **kwargs):
+            (private / 'analysis/recomp.toml').write_text(config)
+        with mock.patch.object(pipeline, 'inspect', return_value=elf_path), mock.patch.object(pipeline, 'run', side_effect=analyzer):
+            pipeline.analyze(profile, private)
+        stage = json.loads((private / 'analysis/analyzer-stage.json').read_text())
+        return private, stage, config
+
+    def test_hints_are_merged_by_default(self):
+        private, stage, config = self.run_analyze({'id': 'synthetic', 'expected_executable': 'TEST.ELF'})
+        entries = tomllib.loads((private / 'analysis/recomp.toml').read_text())['general']['entry_points']
+        self.assertIn('ptr_00100020@0x00100020', entries)
+        self.assertEqual(stage['pointer_entry_hints']['candidates'], 3)
+        self.assertTrue(stage['pointer_entry_hints']['config_updated'])
+
+    def test_profile_can_opt_out(self):
+        private, stage, config = self.run_analyze({'id': 'synthetic', 'expected_executable': 'TEST.ELF', 'pointer_entry_hints': False})
+        self.assertIsNone(stage['pointer_entry_hints'])
+        entries = tomllib.loads((private / 'analysis/recomp.toml').read_text())['general']['entry_points']
+        self.assertEqual(entries, ['known@0x00100000'])
+
+
 if __name__ == '__main__':
     unittest.main()

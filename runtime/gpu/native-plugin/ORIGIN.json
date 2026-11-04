@@ -15,7 +15,7 @@
     {
       "file": "hw_owner.hpp",
       "source_sha256": "c79e53b396df3f40e3ad36d0f2e4e5d279af25e3a48f6d1f44b1b2991dd5ac7f",
-      "candidate_sha256": "3de6e201a13f18ceb339a302e026d540c58bc0a0a9e3ee4e98095251eb272d61"
+      "candidate_sha256": "c6f3fac32934195a61d2e9221bd0ab91e69110c58553a514855f6aa59202bdcd"
     },
     {
       "file": "queued_owner.hpp",
@@ -40,7 +40,7 @@
     {
       "file": "scanout_latch.hpp",
       "source_sha256": "a0235608db09b97267aa86a98203058c28c636bd233a6a5cbefea97130bb1afc",
-      "candidate_sha256": "a0235608db09b97267aa86a98203058c28c636bd233a6a5cbefea97130bb1afc"
+      "candidate_sha256": "7212112e2af727d283692982d9881b32ea030c2b24b6ab41cd4de6964a03d2ee"
     },
     {
       "file": "raw_field.hpp",

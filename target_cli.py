@@ -7,6 +7,8 @@ CORE_COMMANDS = {'recover-link-target','audit-abi-layouts','recover-make-plan','
                  'check-generated','prepare','status','new-profile','next-game','knowledge-plan',
                  'knowledge-add','enhancement-plan','source-package','freeze-source'}
 CORE_COMMANDS.add('import-preserved-copy')
+CORE_COMMANDS.add('code-census')
+CORE_COMMANDS.add('translate-overlays')
 CORE_COMMANDS.update({'isolate-tool-sources','relocate-source-graph','amend-source-graph','capture-source-corrections','retain-source-corrections','apply-source-corrections'})
 
 

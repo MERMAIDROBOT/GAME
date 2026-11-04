@@ -22,7 +22,7 @@ BUILD = WORK / 'build/ps2recomp'
 ENV = Path(os.environ.get('PS2_PORT_LAB_TOOLCHAIN',str(WORK/'toolchain'))).resolve()
 LOCK = json.loads((ROOT / 'toolchain.lock.json').read_text())
 NETWORK_APIS = re.compile(r'\b(?:socket|connect|sendto|sendmsg|curl_\w*|WinHttp\w*|InternetOpen\w*|popen|system)\s*\(|#include[^\n]*(?:curl|socket|http|asio|winsock)', re.I)
-SOURCE_FILES = ('patches/native-callback-context-lifetime.patch',) + ('patches/host-clock-accounting.patch',) + ('audio_evidence.py','tests/test_audio_evidence.py',) + ('runtime/host_input/direction_recovery.hpp','patches/touch-direction-recovery.patch','tests/direction_recovery.cpp','tests/test_direction_recovery.py',) + ('replay_receipt_versions.json','tests/test_runtime_capabilities.py','bundle_assets.py','tests/test_bundle_assets.py','cmake/BundleConfiguration.h','runtime/host_environment/storage_paths.hpp','patches/native-save-root.patch','tests/test_storage_paths.py','preserved_disc.py','tests/test_preserved_disc.py','offline_toolchain.py','tests/test_offline_toolchain.py','platform_sdks.py','tests/test_platform_sdks.py','source_corrections.py','tests/test_source_corrections.py','runtime/gpu/host-adapter/alpha_cut_rule.hpp','tests/alpha_cut_rule.cpp','tests/test_alpha_cut_rule.py','tests/mac_vulkan_surface.cpp','tests/test_mac_vulkan_surface.py','tests/mac_surface_presenter.cpp','tests/mac_surface_producer.cpp','tests/test_mac_surface_presenter.py','tests/surface_owner.cpp','tests/test_surface_owner.py','tests/test_surface_transport.py','surface_transport.py','runtime/presentation/mac_surface_presenter.hpp','runtime/presentation/surface_token.hpp','runtime/presentation/surface_consumer.hpp','tests/surface_consumer.cpp','tests/test_surface_consumer.py','runtime/gpu/src/surface_leases.h','runtime/gpu/include/ps2gpu/surface_api.h','tests/gpu_surface_leases.cpp','tests/test_gpu_surface_leases.py','runtime/host_input/ORIGIN.json','patches/host-input-events.patch','patches/mpeg-stream-callbacks.patch','runtime/host_environment/ORIGIN.json','runtime/host_environment/env_cache.c','tests/host_environment.c','tests/test_host_environment.py','runtime/gpu/host-model/include/ps2rt/types.h','runtime/gpu/host-model/include/ps2rt/generated.h','runtime/gpu/host-model/include/ps2rt/lifted.h','graph_amend.py','tests/test_graph_amend.py','runtime/gpu/native-plugin/gs_register_addr.hpp','patches/gif-image2.patch','tests/test_image2_patch.py','native_components.py','tests/test_native_components.py','tests/native_plugin.cpp','tests/test_native_plugin.py','runtime/gpu/native-plugin/CMakeLists.txt','runtime/gpu/native-plugin/COPYING.LGPLv3','runtime/gpu/native-plugin/ORIGIN.json','runtime/gpu/native-plugin/field_publisher.hpp','runtime/gpu/native-plugin/field_readiness.hpp','runtime/gpu/native-plugin/gs_registers.hpp','runtime/gpu/native-plugin/hw_owner.hpp','runtime/gpu/native-plugin/image_stamp.hpp','runtime/gpu/native-plugin/native_registers.hpp','runtime/gpu/native-plugin/plugin.cpp','runtime/gpu/native-plugin/queued_owner.hpp','runtime/gpu/native-plugin/raw_backend.hpp','runtime/gpu/native-plugin/raw_field.hpp','runtime/gpu/native-plugin/scanout_latch.hpp','runtime/gpu/native-plugin/serial_queue.hpp','runtime/gpu/native-plugin/staging.hpp','runtime/gpu/host-adapter/cache_hash.hpp','runtime/gpu/host-adapter/hwgs_capi.cpp','runtime/gpu/host-adapter/host_services.cpp','runtime/gpu/host-adapter/host_defaults.cpp','runtime/gpu/host-model/src/gs_thread.cpp','runtime/gpu/host-model/src/profile.cpp','runtime/gpu/third_party/stb/stb_image.h','runtime/gpu/third_party/stb/stb_image_write.h','runtime/gpu/third_party/stb/LICENSE','link_recipe.py','tests/test_link_recipe.py','sdk_policy.py','tests/test_sdk_audit.py','tool_state.py','tests/test_tool_state.py','compute_slot.py','tests/test_compute_slot.py','abi_layouts.py','tests/test_abi_layouts.py','object_symbols.py','tests/test_object_symbols.py','runtime/abi/sdk_policy.h','patches/sdk-audio-policy.patch','tests/test_sdk_policy.py','make_plan.py','tests/test_make_plan.py','archive_selection.py','tests/test_archive_selection.py','object_controls.py','tests/test_object_controls.py','patches/ee64-varargs.patch','runtime/abi/Support.h','runtime/abi/ORIGIN.json','tests/ee64_varargs.cpp','tests/test_ee64_varargs.py','merge_graphs.py','tests/test_merge_graphs.py','launch_config.py','tests/test_launch_config.py','compile_recipe.py','tests/test_compile_recipe.py','native_graph.py','tests/test_native_graph.py','archive_sources.py','tests/test_archive_sources.py','source_graph.py','tests/test_source_graph.py','tests/test_field_trace.py','clean_build.py','build_closure.py','CLEAN-BUILD.md','tests/test_clean_build.py','tests/test_build_closure.py','tests/gs_touch.cpp','tests/test_gs_touch.py','runtime/gpu/host-adapter/vram_ranges.hpp','runtime/gpu/host-model/CMakeLists.txt','runtime/gpu/host-model/include/ps2host/disc.h','runtime/gpu/host-model/include/ps2host/dma.h','runtime/gpu/host-model/include/ps2host/gs.h','runtime/gpu/host-model/include/ps2host/host.h','runtime/gpu/host-model/include/ps2host/iop_vm.h','runtime/gpu/host-model/include/ps2host/ipu.h','runtime/gpu/host-model/include/ps2host/mc2.h','runtime/gpu/host-model/include/ps2host/memory.h','runtime/gpu/host-model/include/ps2host/path3.h','runtime/gpu/host-model/include/ps2host/profile.h','runtime/gpu/host-model/include/ps2host/run.h','runtime/gpu/host-model/include/ps2host/settings.h','runtime/gpu/host-model/include/ps2host/texture_pack.h','runtime/gpu/host-model/include/ps2host/timeline.h','runtime/gpu/host-model/include/ps2host/vif.h','runtime/gpu/host-model/include/ps2host/vu.h','runtime/gpu/host-model/include/ps2host/vu_core.h','runtime/gpu/host-model/src/gs.cpp','runtime/gpu/host-model/src/gs_draw.cpp','runtime/gpu/host-model/src/gs_memory.cpp','runtime/gpu/host-adapter/texpack/hw_runtime_pack.hpp','runtime/gpu/host-adapter/texpack/claude_tex_pack_core.hpp','runtime/gpu/host-adapter/texpack/blob_prefetch.hpp','runtime/presentation/completed_field.hpp','tests/frame_ownership.cpp','tests/test_frame_ownership.py','tests/test_release.py','tests/test_gpu_components.py','runtime/gpu/CMakeLists.txt','runtime/gpu/LICENSE','runtime/gpu/ORIGIN.json','runtime/gpu/host-adapter/gpu_bridge.cpp','runtime/gpu/host-adapter/runtime_mips.hpp','runtime/gpu/include/ps2gpu/display.h','runtime/gpu/include/ps2gpu/gs_renderer.h','runtime/gpu/shaders/date.frag','runtime/gpu/shaders/date.vert','runtime/gpu/shaders/decode.comp','runtime/gpu/shaders/depth_load.frag','runtime/gpu/shaders/downsample.comp','runtime/gpu/shaders/fxaa.comp','runtime/gpu/shaders/gs.frag','runtime/gpu/shaders/gs.vert','runtime/gpu/shaders/gs_address.glsl','runtime/gpu/shaders/patch.comp','runtime/gpu/shaders/smaa_blend.comp','runtime/gpu/shaders/smaa_common.glsl','runtime/gpu/shaders/smaa_edges.comp','runtime/gpu/shaders/smaa_weights.comp','runtime/gpu/shaders/swizzle.comp','runtime/gpu/src/gpu.cpp','runtime/gpu/src/gpu_internal.h','runtime/gpu/src/gs_renderer.cpp','runtime/gpu/src/threaded_renderer.cpp','runtime/gpu/src/vulkan_display.cpp','runtime/gpu/tests/display_smoke.cpp','runtime/gpu/tests/renderer_tests.cpp','runtime/gpu/third_party/smaa/AreaTex.h','runtime/gpu/third_party/smaa/LICENSE.txt','runtime/gpu/third_party/smaa/README.md','runtime/gpu/third_party/smaa/SMAA.glsl','runtime/gpu/third_party/smaa/SearchTex.h','tests/gpu_residency.cpp','patches/host-input.patch','runtime/host_input/ps2_pad.cpp','patches/native-pcm.patch','runtime/native_audio/ps2_audio.cpp','runtime/native_audio/ps2_audio.h','runtime/native_audio/ORIGIN.json','tests/native_audio_drift.cpp','tests/reference/raylib/raylib.h','tests/test_native_audio.py','gif_packets.py', 'tests/test_gif_packets.py', 'branches.py', 'port_checks.py', 'upstreams.py', 'tests/test_branches.py', 'tests/test_port_checks.py', 'tests/test_upstreams.py', 'PORT-QUALIFICATION.md', 'UPSTREAM-REVIEW-2026-10-24.md', 'pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTROLS.md', 'PRIVACY.md',
+SOURCE_FILES = ('patches/native-callback-context-lifetime.patch',) + ('patches/host-clock-accounting.patch',) + ('audio_evidence.py','tests/test_audio_evidence.py',) + ('runtime/host_input/direction_recovery.hpp','patches/touch-direction-recovery.patch','tests/direction_recovery.cpp','tests/test_direction_recovery.py',) + ('replay_receipt_versions.json','tests/test_runtime_capabilities.py','bundle_assets.py','tests/test_bundle_assets.py','cmake/BundleConfiguration.h','runtime/host_environment/storage_paths.hpp','patches/native-save-root.patch','tests/test_storage_paths.py','preserved_disc.py','tests/test_preserved_disc.py','offline_toolchain.py','tests/test_offline_toolchain.py','platform_sdks.py','tests/test_platform_sdks.py','source_corrections.py','tests/test_source_corrections.py','runtime/gpu/host-adapter/alpha_cut_rule.hpp','tests/alpha_cut_rule.cpp','tests/test_alpha_cut_rule.py','tests/mac_vulkan_surface.cpp','tests/test_mac_vulkan_surface.py','tests/mac_surface_presenter.cpp','tests/mac_surface_producer.cpp','tests/test_mac_surface_presenter.py','tests/surface_owner.cpp','tests/test_surface_owner.py','tests/test_surface_transport.py','surface_transport.py','runtime/presentation/mac_surface_presenter.hpp','runtime/presentation/surface_token.hpp','runtime/presentation/surface_consumer.hpp','tests/surface_consumer.cpp','tests/test_surface_consumer.py','runtime/gpu/src/surface_leases.h','runtime/gpu/include/ps2gpu/surface_api.h','tests/gpu_surface_leases.cpp','tests/test_gpu_surface_leases.py','runtime/host_input/ORIGIN.json','patches/host-input-events.patch','patches/mpeg-stream-callbacks.patch','runtime/host_environment/ORIGIN.json','runtime/host_environment/env_cache.c','tests/host_environment.c','tests/test_host_environment.py','tests/test_attach_game_c_sources.py','runtime/gpu/host-model/include/ps2rt/types.h','runtime/gpu/host-model/include/ps2rt/generated.h','runtime/gpu/host-model/include/ps2rt/lifted.h','graph_amend.py','tests/test_graph_amend.py','runtime/gpu/native-plugin/gs_register_addr.hpp','patches/gif-image2.patch','tests/test_image2_patch.py','native_components.py','tests/test_native_components.py','tests/native_plugin.cpp','tests/test_native_plugin.py','runtime/gpu/native-plugin/CMakeLists.txt','runtime/gpu/native-plugin/COPYING.LGPLv3','runtime/gpu/native-plugin/ORIGIN.json','runtime/gpu/native-plugin/field_publisher.hpp','runtime/gpu/native-plugin/field_readiness.hpp','runtime/gpu/native-plugin/gs_registers.hpp','runtime/gpu/native-plugin/hw_owner.hpp','runtime/gpu/native-plugin/image_stamp.hpp','runtime/gpu/native-plugin/native_registers.hpp','runtime/gpu/native-plugin/plugin.cpp','runtime/gpu/native-plugin/queued_owner.hpp','runtime/gpu/native-plugin/raw_backend.hpp','runtime/gpu/native-plugin/raw_field.hpp','runtime/gpu/native-plugin/scanout_latch.hpp','runtime/gpu/native-plugin/serial_queue.hpp','runtime/gpu/native-plugin/staging.hpp','runtime/gpu/host-adapter/cache_hash.hpp','runtime/gpu/host-adapter/hwgs_capi.cpp','runtime/gpu/host-adapter/host_services.cpp','runtime/gpu/host-adapter/host_defaults.cpp','runtime/gpu/host-model/src/gs_thread.cpp','runtime/gpu/host-model/src/profile.cpp','runtime/gpu/third_party/stb/stb_image.h','runtime/gpu/third_party/stb/stb_image_write.h','runtime/gpu/third_party/stb/LICENSE','link_recipe.py','tests/test_link_recipe.py','sdk_policy.py','tests/test_sdk_audit.py','tool_state.py','tests/test_tool_state.py','compute_slot.py','tests/test_compute_slot.py','abi_layouts.py','tests/test_abi_layouts.py','object_symbols.py','tests/test_object_symbols.py','runtime/abi/sdk_policy.h','patches/sdk-audio-policy.patch','tests/test_sdk_policy.py','make_plan.py','tests/test_make_plan.py','archive_selection.py','tests/test_archive_selection.py','object_controls.py','tests/test_object_controls.py','patches/ee64-varargs.patch','runtime/abi/Support.h','runtime/abi/ORIGIN.json','tests/ee64_varargs.cpp','tests/test_ee64_varargs.py','merge_graphs.py','tests/test_merge_graphs.py','launch_config.py','tests/test_launch_config.py','compile_recipe.py','tests/test_compile_recipe.py','native_graph.py','tests/test_native_graph.py','archive_sources.py','tests/test_archive_sources.py','source_graph.py','tests/test_source_graph.py','tests/test_field_trace.py','clean_build.py','build_closure.py','CLEAN-BUILD.md','tests/test_clean_build.py','tests/test_build_closure.py','tests/gs_touch.cpp','tests/test_gs_touch.py','runtime/gpu/host-adapter/vram_ranges.hpp','runtime/gpu/host-model/CMakeLists.txt','runtime/gpu/host-model/include/ps2host/disc.h','runtime/gpu/host-model/include/ps2host/dma.h','runtime/gpu/host-model/include/ps2host/gs.h','runtime/gpu/host-model/include/ps2host/host.h','runtime/gpu/host-model/include/ps2host/iop_vm.h','runtime/gpu/host-model/include/ps2host/ipu.h','runtime/gpu/host-model/include/ps2host/mc2.h','runtime/gpu/host-model/include/ps2host/memory.h','runtime/gpu/host-model/include/ps2host/path3.h','runtime/gpu/host-model/include/ps2host/profile.h','runtime/gpu/host-model/include/ps2host/run.h','runtime/gpu/host-model/include/ps2host/settings.h','runtime/gpu/host-model/include/ps2host/texture_pack.h','runtime/gpu/host-model/include/ps2host/timeline.h','runtime/gpu/host-model/include/ps2host/vif.h','runtime/gpu/host-model/include/ps2host/vu.h','runtime/gpu/host-model/include/ps2host/vu_core.h','runtime/gpu/host-model/src/gs.cpp','runtime/gpu/host-model/src/gs_draw.cpp','runtime/gpu/host-model/src/gs_memory.cpp','runtime/gpu/host-adapter/texpack/hw_runtime_pack.hpp','runtime/gpu/host-adapter/texpack/claude_tex_pack_core.hpp','runtime/gpu/host-adapter/texpack/blob_prefetch.hpp','runtime/presentation/completed_field.hpp','tests/frame_ownership.cpp','tests/test_frame_ownership.py','tests/test_release.py','tests/test_gpu_components.py','runtime/gpu/CMakeLists.txt','runtime/gpu/LICENSE','runtime/gpu/ORIGIN.json','runtime/gpu/host-adapter/gpu_bridge.cpp','runtime/gpu/host-adapter/runtime_mips.hpp','runtime/gpu/include/ps2gpu/display.h','runtime/gpu/include/ps2gpu/gs_renderer.h','runtime/gpu/shaders/date.frag','runtime/gpu/shaders/date.vert','runtime/gpu/shaders/decode.comp','runtime/gpu/shaders/depth_load.frag','runtime/gpu/shaders/downsample.comp','runtime/gpu/shaders/fxaa.comp','runtime/gpu/shaders/gs.frag','runtime/gpu/shaders/gs.vert','runtime/gpu/shaders/gs_address.glsl','runtime/gpu/shaders/patch.comp','runtime/gpu/shaders/smaa_blend.comp','runtime/gpu/shaders/smaa_common.glsl','runtime/gpu/shaders/smaa_edges.comp','runtime/gpu/shaders/smaa_weights.comp','runtime/gpu/shaders/swizzle.comp','runtime/gpu/src/gpu.cpp','runtime/gpu/src/gpu_internal.h','runtime/gpu/src/gs_renderer.cpp','runtime/gpu/src/threaded_renderer.cpp','runtime/gpu/src/vulkan_display.cpp','runtime/gpu/tests/display_smoke.cpp','runtime/gpu/tests/renderer_tests.cpp','runtime/gpu/third_party/smaa/AreaTex.h','runtime/gpu/third_party/smaa/LICENSE.txt','runtime/gpu/third_party/smaa/README.md','runtime/gpu/third_party/smaa/SMAA.glsl','runtime/gpu/third_party/smaa/SearchTex.h','tests/gpu_residency.cpp','patches/host-input.patch','runtime/host_input/ps2_pad.cpp','patches/native-pcm.patch','runtime/native_audio/ps2_audio.cpp','runtime/native_audio/ps2_audio.h','runtime/native_audio/ORIGIN.json','tests/native_audio_drift.cpp','tests/reference/raylib/raylib.h','tests/test_native_audio.py','gif_packets.py', 'tests/test_gif_packets.py', 'branches.py', 'port_checks.py', 'upstreams.py', 'tests/test_branches.py', 'tests/test_port_checks.py', 'tests/test_upstreams.py', 'PORT-QUALIFICATION.md', 'UPSTREAM-REVIEW-2026-10-24.md', 'pipeline.py', 'native.py', 'scenarios.py', 'README.md', 'CONTROLS.md', 'PRIVACY.md',
                 'STATUS.md', 'RUNTIME_COMPARISON.md', '.gitignore', 'toolchain.lock.json',
                 'profiles/example-game.json', 'cmake/AttachGame.cmake', 'cmake/LocalLauncher.m',
                 'patches/runtime-diagnostics.patch', 'patches/ps2xIOP-port-lab.patch', 'tests/test_iop_patch.py', 'tests/test_pipeline.py',
@@ -55,7 +55,7 @@ SOURCE_FILES = ('patches/native-callback-context-lifetime.patch',) + ('patches/h
                 'tools/reference/COPYING.LESSER', 'tools/reference/COPYING.GPLv3',
                 'patches/scalar-fpu.patch', 'FPU.md',
                 'patches/runtime-title-conformance.patch', 'tests/test_title_conformance.py', 'tests/test_runtime_patch_stack.py',
-                'cdimage.py', 'pointer_entries.py', 'tests/test_cdimage.py', 'tests/test_pointer_entries.py',
+                'cdimage.py', 'pointer_entries.py', 'code_census.py', 'overlays.py', 'tests/test_overlays.py', 'runtime/overlays/overlay_dispatch.hpp', 'patches/overlay-dispatch.patch', 'tests/overlay_dispatch.cpp', 'tests/test_overlay_dispatch.py', 'tools/recomp/stub_interior_entries.h','tools/recomp/mmi_corrections.h','runtime/mmi/ps2_mmi_ops.h','patches/mmi-reference-forms.patch','tests/test_mmi_reference_forms.py','tools/recomp/vu0_corrections.h','runtime/mmi/ps2_vu0_ops.h','patches/vu0-reference-forms.patch','tests/test_vu0_reference_forms.py','patches/link-branch-reference.patch','tests/test_link_branch_reference.py','patches/fpu-reference-flags.patch','tests/test_fpu_reference_flags.py','runtime/mmi/ps2_vu_float.h','patches/vu-micro-reference.patch','vu_micro_check.py','vu_hardware_check.py','tests/fixtures/vu-hardware.json','tests/test_vu_micro_reference.py', 'patches/gs-host-rounding.patch', 'tests/gs_host_rounding.cpp', 'tests/test_gs_host_rounding.py', 'patches/vu-run-to-end.patch', 'patches/vu-vf0-constant.patch', 'tests/vu_run_to_end.cpp', 'tests/vu_vf0_constant.cpp', 'tests/fixtures/vu-lockstep-regressions.json', 'vu_lockstep_check.py', 'tests/test_vu_lockstep.py', 'patches/iop-shared-pool.patch', 'tests/test_iop_shared_pool.py', 'behaviour_check.py', 'tests/test_behaviour_check.py', 'patches/stub-interior-entries.patch', 'tests/stub_interior_entries.cpp', 'tests/test_stub_interior_entries.py', 'tests/test_cdimage.py', 'tests/test_pointer_entries.py', 'tests/test_code_census.py',
                 'cadence.py', 'tests/test_cadence.py', 'NEW-REPOSITORIES-2026-10-17.md', 'CADENCE.md',
                 'platforms/macos/adapter.json', 'platforms/macos/macos_adapter.py',
                 'ab_check.py', 'tests/test_ab_check.py',
@@ -69,6 +69,15 @@ SOURCE_FILES = ('cmake/SourceInventory.cmake', 'runtime/gpu/host-adapter/target_
 
 
 SOURCE_FILES = ('tests/test_native_component_provision.py',) + SOURCE_FILES
+# Claude 2026-11-04: the GPU renderer builds from this repository alone (vendored Vulkan headers, generated
+# loader, committed SPIR-V), plus the shared display, renderer-host and frame-stride runtime patches.
+SOURCE_FILES = SOURCE_FILES + tuple(sorted(
+    str(p.relative_to(ROOT)) for folder in ('runtime/gpu/third_party/vulkan-headers', 'runtime/gpu/third_party/vk_loader',
+                                            'runtime/gpu/shaders/spirv')
+    for p in (ROOT / folder).rglob('*') if p.is_file() and not p.name.startswith('.'))) + (
+    'tools/gen_vk_loader.py', 'tools/gen_shaders.py', 'patches/presentation-fidelity.patch',
+    'patches/gpu-renderer-host.patch', 'patches/window-thread-failure.patch', 'patches/hd-frame-stride.patch',
+    'patches/vsync-setting.patch', 'tests/test_gpu_offline.py', 'tests/test_display_path.py', 'tests/display_path.cpp', 'tests/test_app_storage.py', 'patches/guest-heap-exact.patch', 'tests/guest_heap_layout.cpp', 'tests/test_guest_heap_layout.py', 'tests/scanout_transition.cpp', 'tests/test_scanout_transition.py', 'isa_r5900.py', 'binary_rebuild.py', 'tests/test_isa_r5900.py', 'tests/test_binary_rebuild.py', 'MATCHING.md', 'match_function.py', 'tests/test_match_function.py', 'tests/test_vu_learning.py', 'patches/cdvdfsv-resident.patch', 'tests/test_cdvdfsv_resident.py', 'patches/sif-module-load-report.patch', 'tests/test_sif_module_report.py', 'patches/iop-module-buffer.patch', 'tests/test_iop_module_buffer.py', 'patches/dma-watch.patch', 'tests/test_dma_watch.py', 'patches/mpeg-stream-types.patch', 'tests/test_mpeg_stream_types.py')
 
 
 SOURCE_FILES = ('translation_graph.py','tests/test_translation_graph.py') + SOURCE_FILES
@@ -436,7 +445,18 @@ def analyze(profile, private):
         else:
             text = text.replace('[general]', f'[general]\n{key} = {value}', 1)
     config.write_text(text)
-    save(private / 'analysis/analyzer-stage.json', {'success': True, 'config': str(config), 'tool_revision': LOCK['ps2recomp']['revision']})
+    # Stripped executables: the analyzer can merge a function only reached through a pointer into its
+    # predecessor. Add the generic pointer-entry hints here so every title gets them without a manual
+    # step and this stage's recorded output is the final configuration. Profile opt-out:
+    # "pointer_entry_hints": false.
+    pointer_hints = None
+    if profile.get('pointer_entry_hints', True) is not False:
+        from pointer_entries import apply as apply_pointer_hints
+        report = apply_pointer_hints(profile, private, write_config=True)
+        pointer_hints = {'candidates': len(report['candidates']), 'counts': report['counts'],
+                         'already_known': report['already_known'], 'config_updated': report['config_updated']}
+    save(private / 'analysis/analyzer-stage.json', {'success': True, 'config': str(config), 'tool_revision': LOCK['ps2recomp']['revision'],
+                                                    'pointer_entry_hints': pointer_hints})
     print('Analyzer finished; configuration saved locally')
 
 
@@ -568,6 +588,21 @@ def translate(profile, private, feedback=None):
     print('Native build and gameplay remain unverified.')
 
 
+def syntax_check_command(*include_dirs):
+    """clang++ syntax-only command for generated C++ against the runtime headers."""
+    compiler = shutil.which('clang++')
+    if not compiler:
+        raise RuntimeError('Native clang++ is missing')
+    flags = [compiler, '-std=c++20', '-fsyntax-only', '-ferror-limit=8',
+             '-I', str(SOURCE / 'ps2xRuntime/include'), '-I', str(SOURCE / 'ps2xRuntime/src/lib/Kernel'),
+             '-I', str(SOURCE / 'ps2xIOP/include')]
+    for directory in include_dirs:
+        flags += ['-I', str(directory)]
+    if platform.machine() == 'arm64':
+        flags += ['-DUSE_SSE2NEON', '-I', str(BUILD / '_deps/sse2neon-src')]
+    return flags
+
+
 def check_generated(profile, private):
     """Check representative generated source with the native compiler, not a game build."""
     directory = private / 'generated'
@@ -578,14 +613,7 @@ def check_generated(profile, private):
     # Spread a general sample across the inventory and include largest functions.
     sample = {files[0], files[-1], *files[::max(1, len(files) // 8)]}
     sample.update(sorted(files, key=lambda p: p.stat().st_size, reverse=True)[:2])
-    compiler = shutil.which('clang++')
-    if not compiler:
-        raise RuntimeError('Native clang++ is missing')
-    flags = [compiler, '-std=c++20', '-fsyntax-only', '-ferror-limit=8',
-             '-I', str(SOURCE / 'ps2xRuntime/include'), '-I', str(SOURCE / 'ps2xRuntime/src/lib/Kernel'),
-             '-I', str(SOURCE / 'ps2xIOP/include'), '-I', str(directory)]
-    if platform.machine() == 'arm64':
-        flags += ['-DUSE_SSE2NEON', '-I', str(BUILD / '_deps/sse2neon-src')]
+    flags = syntax_check_command(directory)
     records = []
     for p in sorted(sample):
         log = private / 'logs/native-syntax' / (p.name + '.log')
@@ -615,7 +643,7 @@ def main(target=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile', help='Explicit per-game profile JSON (required for game processing)')
     sub = parser.add_subparsers(dest='command', required=True)
-    for cmd in ['doctor', 'bootstrap', 'bootstrap-runtime', 'build-native', 'test-runtime', 'boot-probe', 'diagnose', 'package-local', 'verify', 'inspect', 'analyze', 'check-generated', 'prepare', 'status']:
+    for cmd in ['doctor', 'bootstrap', 'bootstrap-runtime', 'build-native', 'test-runtime', 'boot-probe', 'diagnose', 'package-local', 'verify', 'inspect', 'code-census', 'translate-overlays', 'analyze', 'check-generated', 'prepare', 'status']:
         sub.add_parser(cmd)
     translation = sub.add_parser('translate')
     translation.add_argument('--feedback', help='Explicit private runtime-feedback run name; revalidates fingerprints')
@@ -663,6 +691,15 @@ def main(target=None):
     for option in ['source', 'destination', 'title', 'version', 'bundle-id', 'icon', 'log']:
         release.add_argument('--'+option, required=True)
     release.add_argument('--bundle-assets',action='store_true',help='Include verified disc/texture assets; require source-verified separate saves')
+    matching = sub.add_parser('match-function', help='Compile one function with a pinned PS2 compiler and compare it with the disc')
+    matching.add_argument('--function', required=True)
+    matching.add_argument('--source', required=True, help='C/C++ source inside private game storage')
+    matching.add_argument('--compiler', required=True, help='Compiler id under the toolchain ps2-compilers folder')
+    matching.add_argument('--name', required=True, help='Unique local match name')
+    matching.add_argument('--flag', action='append', dest='flags', help='Compiler flag (repeatable; default -O2 -G0)')
+    rebuild = sub.add_parser('rebuild-binary', help='Split the boot executable into assembly and rebuild it byte-for-byte')
+    rebuild.add_argument('--name', required=True, help='Unique local rebuild name')
+    rebuild.add_argument('--gp', type=lambda v: int(v, 0), help='gp value if the startup code does not show it')
     memory = sub.add_parser('memory-audit', help='Reject runtime pools overlapping declared game memory')
     memory.add_argument('--runtime-header', required=True, help='Local runtime Helpers/State.h used for this build')
     memory.add_argument('--layout', required=True, help='Private JSON layout path, relative to game storage')
@@ -1114,6 +1151,13 @@ def main(target=None):
                           'probe_matches_reference':report.get('probe_matches_reference'),
                           'whole_game_clean_build':False},indent=2))
         if report['status']!='passed': sys.exit(2)
+    elif args.command == 'code-census':
+        from code_census import census
+        census(private, profile)
+    elif args.command == 'translate-overlays':
+        from overlays import translate_overlays, check_overlays
+        translate_overlays(profile, private)
+        check_overlays(private)
     elif args.command == 'enhancement-plan':
         from enhancements import schedule
         report=schedule(profile,private)
@@ -1153,6 +1197,19 @@ def main(target=None):
         report = run_recipe(profile, private, args.recipe, args.name, stage=args.command=='compiler-stage')
         print(json.dumps({'status':report['status'], 'clean_build_ready':report['clean_build_ready'],
             'blockers':report['blockers'], 'report':str(private/'compiler-runs'/args.name/'report.json')}))
+    elif args.command == 'match-function':
+        from match_function import run as match_function
+        report = match_function(profile, private, args.function, args.source, args.compiler, args.name,
+                                tuple(args.flags or ('-O2', '-G0')))
+        print(json.dumps({k: report[k] for k in ('function', 'compiler', 'flags', 'match', 'original_bytes',
+                                                 'compiled_bytes', 'differing_words')}, indent=2))
+    elif args.command == 'rebuild-binary':
+        from binary_rebuild import run as rebuild_binary
+        report = rebuild_binary(profile, private, args.name, args.gp)
+        print(json.dumps({k: report[k] for k in ('identical', 'original_sha256', 'rebuilt_sha256', 'instructions',
+                                                 'undecoded', 'labels', 'output')}, indent=2))
+        if not report['identical']:
+            raise SystemExit(1)
     elif args.command == 'memory-audit':
         from memory import run_audit
         report = run_audit(profile, private, args.runtime_header, args.layout, args.name)

@@ -1,0 +1,112 @@
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index b966b04..8b3762c 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -820,8 +820,11 @@ namespace ps2x::iop::detail
+ 
+         ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
+         {
++            // sceSifLoadModuleBuffer passes an IOP address (the title SIF-DMA'd the image into IOP RAM). Images
++            // placed in EE memory by older callers are still accepted when IOP RAM holds no ELF there.
+             std::vector<uint8_t> image;
+-            if (!IopModuleLoader::readElfFromGuest(host, guestAddress, image))
++            if (!IopModuleLoader::readElfFromIop(memory, guestAddress, image) &&
++                !IopModuleLoader::readElfFromGuest(host, guestAddress, image))
+                 return {true, -1, -1};
+             std::ostringstream tag;
+             tag << "buffer@0x" << std::hex << guestAddress;
+diff --git a/ps2xIOP/src/emulator/services/iop_module_loader.cpp b/ps2xIOP/src/emulator/services/iop_module_loader.cpp
+index 087c421..d02e5ff 100644
+--- a/ps2xIOP/src/emulator/services/iop_module_loader.cpp
++++ b/ps2xIOP/src/emulator/services/iop_module_loader.cpp
+@@ -320,10 +320,10 @@ namespace ps2x::iop::detail
+         return ok;
+     }
+ 
+-    bool IopModuleLoader::readElfFromGuest(IopHost &host, uint32_t guestAddress, std::vector<uint8_t> &bytes)
++    static bool readElfWith(const std::function<bool(uint32_t, void *, size_t)> &read, uint32_t guestAddress, std::vector<uint8_t> &bytes)
+     {
+         Elf32Ehdr header{};
+-        if (!host.readGuest(guestAddress, &header, sizeof(header)) || !validElfHeader(header))
++        if (!read(guestAddress, &header, sizeof(header)) || !validElfHeader(header))
+             return false;
+ 
+         uint64_t required = sizeof(header);
+@@ -334,7 +334,7 @@ namespace ps2x::iop::detail
+             return false; // Should we log an error here? TODO check later
+ 
+         bytes.resize(static_cast<size_t>(required));
+-        if (!host.readGuest(guestAddress, bytes.data(), bytes.size()))
++        if (!read(guestAddress, bytes.data(), bytes.size()))
+             return false;
+ 
+         if (header.shnum != 0u && header.shentsize >= sizeof(Elf32Shdr))
+@@ -364,7 +364,17 @@ namespace ps2x::iop::detail
+             return false;
+ 
+         bytes.resize(static_cast<size_t>(required));
+-        return host.readGuest(guestAddress, bytes.data(), bytes.size());
++        return read(guestAddress, bytes.data(), bytes.size());
++    }
++
++    bool IopModuleLoader::readElfFromGuest(IopHost &host, uint32_t guestAddress, std::vector<uint8_t> &bytes)
++    {
++        return readElfWith([&](uint32_t a, void *d, size_t n) { return host.readGuest(a, d, n); }, guestAddress, bytes);
++    }
++
++    bool IopModuleLoader::readElfFromIop(const IopMemory &memory, uint32_t iopAddress, std::vector<uint8_t> &bytes)
++    {
++        return readElfWith([&](uint32_t a, void *d, size_t n) { return memory.readRam(a, d, n); }, iopAddress, bytes);
+     }
+ 
+     IopImageLoadResult IopModuleLoader::load(std::span<const uint8_t> image, IopMemory &memory, uint32_t moduleCursor)
+diff --git a/ps2xIOP/src/emulator/services/iop_module_loader.h b/ps2xIOP/src/emulator/services/iop_module_loader.h
+index 6cd9ef6..30589c3 100644
+--- a/ps2xIOP/src/emulator/services/iop_module_loader.h
++++ b/ps2xIOP/src/emulator/services/iop_module_loader.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <cstdint>
++#include <functional>
+ #include <span>
+ #include <string_view>
+ #include <vector>
+@@ -43,6 +44,8 @@ namespace ps2x::iop::detail
+     public:
+         [[nodiscard]] static bool readWholeHostFile(IopHost &host, std::string_view guestPath, std::vector<uint8_t> &bytes);
+         [[nodiscard]] static bool readElfFromGuest(IopHost &host, uint32_t guestAddress, std::vector<uint8_t> &bytes);
++        // The same ELF read from IOP RAM: sceSifLoadModuleBuffer takes an IOP address (the image was SIF-DMA'd there).
++        [[nodiscard]] static bool readElfFromIop(const IopMemory &memory, uint32_t iopAddress, std::vector<uint8_t> &bytes);
+         [[nodiscard]] static IopImageLoadResult load(std::span<const uint8_t> image, IopMemory &memory, uint32_t moduleCursor);
+     };
+ }
+diff --git a/ps2xIOP/tests/blocking_rpc_test.cpp b/ps2xIOP/tests/blocking_rpc_test.cpp
+index f8d2cec..3641d77 100644
+--- a/ps2xIOP/tests/blocking_rpc_test.cpp
++++ b/ps2xIOP/tests/blocking_rpc_test.cpp
+@@ -1144,4 +1144,23 @@ namespace
+     }
+ }
+ 
+-int main(){return testBlockingRpcServer();}
++namespace
++{
++    // sceSifLoadModuleBuffer passes an IOP address: the title SIF-DMAs the IRX into IOP RAM first.
++    int testModuleBufferFromIopRam()
++    {
++        TestHost host(0x20000u);
++        IopSubsystem iop(host);
++        constexpr uint32_t sid = 0xB10C0003u;
++        constexpr uint32_t iopImage = 0x00100000u;
++        writeBlockingRpcServerIrx(host, 0x100u, sid);
++        if (!expect(iop.writeMemory(iopImage, host.guest.data() + 0x100u, 0x8000u), "IOP RAM write failed")) return 1;
++        std::memset(host.guest.data() + 0x100u, 0, 0x8000u);       // nothing left in EE memory
++        const ModuleLoadResult module = iop.loadModuleBuffer(iopImage);
++        if (!expect(module.handled && module.moduleId > 0 && module.startResult == 0, "IRX in IOP RAM did not load")) return 1;
++        if (!expect(iop.canBindRpc(sid), "IRX loaded from IOP RAM did not register its server")) return 1;
++        return 0;
++    }
++}
++
++int main(){return testBlockingRpcServer() || testModuleBufferFromIopRam();}

@@ -15,9 +15,19 @@ import time
 import pipeline as lab
 
 STAGES = [('verify', 'verification.json'), ('inspect', 'analysis/elf.json'),
+          ('code-census', 'analysis/code-census.json'),
           ('knowledge-plan', 'analysis/knowledge-plan.json'),
           ('analyze', 'analysis/analyzer-stage.json'), ('translate', 'analysis/translation-stage.json'),
-          ('check-generated', 'analysis/native-syntax-stage.json')]
+          ('check-generated', 'analysis/native-syntax-stage.json'),
+          ('translate-overlays', 'analysis/overlay-translation.json')]
+
+INTAKE_LAST = 'knowledge-plan'
+
+
+def stages_through(through):
+    """Stages up to `through`, by name: intake ends with the knowledge plan, every later target translates."""
+    names = [command for command, _ in STAGES]
+    return list(STAGES[:names.index(INTAKE_LAST) + 1] if through == 'intake' else STAGES)
 
 
 def create_profile(path, title, source):
@@ -171,7 +181,7 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
         raise ValueError('Resume input/profile/tooling changed; start a new run')
     # Titles that read ISO9660 by LBN need a sector image as well as the file tree.
     stages = (([('import', 'disc-manifest.json')] if source else []) +
-              ([('import-image', 'analysis/cd-image-stage.json')] if image else []) + STAGES[:3 if through == 'intake' else 6])
+              ([('import-image', 'analysis/cd-image-stage.json')] if image else []) + stages_through(through))
     if through in {'native','package'}:
         stages += [('build-native','analysis/native-build-stage.json'),('test-runtime','analysis/runtime-tests-stage.json')]
     if through=='package':
@@ -264,6 +274,16 @@ def run(profile_path, name, source=None, through='intake', execute=False, resume
                 return report
             lab.save(report_path, report)
         report['inventory'] = inventory(private)
+        census_path = Path(private)/'analysis/code-census.json'
+        if census_path.is_file():
+            census = json.loads(census_path.read_text())
+            report['code_outside_boot_executable'] = {k: census.get(k) for k in ('scanned', 'ee_candidate_regions', 'ee_candidate_bytes',
+                                                       'unlisted_sector_bytes', 'iop_module_bytes', 'boot_executable_bytes')}
+        overlay_path = Path(private)/'analysis/overlay-translation.json'
+        if through != 'intake' and overlay_path.is_file():
+            overlay = json.loads(overlay_path.read_text())
+            report['overlay_translation'] = {k: overlay.get(k) for k in ('translated_overlays', 'accepted_overlays', 'functions',
+                                             'decode_failures', 'errors', 'native_build_verified', 'runtime_verified')}
         from enhancements import schedule
         graph=schedule(profile,private)
         report['enhancement_stages']={'qualified':graph['completed'],'total':graph['total'],

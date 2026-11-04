@@ -1,0 +1,37 @@
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 67f8702..9bc2586 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2591,6 +2591,10 @@ void PS2Runtime::run()
+     const bool testStart = headless && std::getenv("PS2_PORT_TEST_START");
+     const auto inputTestStart = std::chrono::steady_clock::now();
+     bool previousTestPress = false;
++    // An exception on the window thread must stop and join the game thread before it propagates: unwinding
++    // past a joinable std::thread calls std::terminate and loses the message.
++    std::exception_ptr windowFailure;
++    try {
+     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
+     {
+         if (!headless) {
+@@ -2787,12 +2791,21 @@ void PS2Runtime::run()
+             break;
+         }
+     }
++    } catch (const std::exception &error) {
++        std::cerr << "[run] window thread stopped: " << error.what() << std::endl;
++        windowFailure = std::current_exception();
++    } catch (...) {
++        std::cerr << "[run] window thread stopped: non-standard exception" << std::endl;
++        windowFailure = std::current_exception();
++    }
+ 
+     requestStop();
+     if (gameThread.joinable())
+     {
+         gameThread.join();
+     }
++    if (windowFailure)
++        std::rethrow_exception(windowFailure);
+ 
+     if (m_debugUiInitialized && m_debugUiShutdownCallback)
+     {

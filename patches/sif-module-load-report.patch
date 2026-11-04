@@ -1,0 +1,25 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+index a7fc804..637ee10 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+@@ -1,4 +1,6 @@
+ #include "Common.h"
++#include <atomic>
++#include <cstdio>
+ #include "System.h"
+ #include "runtime/guest_heap_layout.h"
+ 
+@@ -329,6 +331,13 @@ namespace ps2_syscalls
+         }
+ 
+         const auto loaded = runtime->loadIopModuleBuffer(bufferAddr, arguments.empty() ? nullptr : arguments.data(), static_cast<uint32_t>(arguments.size()));
++        {
++            // Release builds compile RUNTIME_LOG out; module loads are rare and decide whether IOP services exist.
++            static std::atomic<uint32_t> reported{0};
++            if (reported.fetch_add(1) < 64u)
++                std::fprintf(stderr, "[SIF module] load-buffer addr=0x%x tag=%s handled=%d id=%d\n", bufferAddr,
++                             moduleTag.c_str(), int(loaded.handled), int(loaded.moduleId));
++        }
+         if (!loaded.handled || loaded.moduleId <= 0)
+         {
+             setReturnS32(ctx, -1);

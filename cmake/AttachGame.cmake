@@ -47,6 +47,9 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL PS2_PORT_UPSTREAM)
         if(UNIX AND PS2_PORT_CACHE_ENVIRONMENT)
             set(port_environment_source "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../runtime/host_environment/env_cache.c")
             target_sources(ps2EntryRunner PRIVATE "${port_environment_source}")
+            # This is C: the runner's C++ precompiled headers and unity batches must not reach it.
+            set_source_files_properties("${port_environment_source}" TARGET_DIRECTORY ps2EntryRunner
+                PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
             target_link_libraries(ps2EntryRunner PRIVATE ${CMAKE_DL_LIBS})
         endif()
         # Keep optimized link cache private beside the generated game build.
@@ -106,6 +109,18 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL PS2_PORT_UPSTREAM)
             endif()
             target_include_directories(ps2EntryRunner PRIVATE "${PS2_PORT_UPSTREAM}/ps2xRuntime/src/lib/vu")
             target_sources(ps2EntryRunner PRIVATE ${vu_cpp})
+        endif()
+        if(PS2_PORT_OVERLAY_DIR)
+            # Run-time-loaded programs translated by overlays.py: uniquely named sources per
+            # overlay plus the registration unit for the runtime overlay dispatcher.
+            file(GLOB overlay_cpp CONFIGURE_DEPENDS "${PS2_PORT_OVERLAY_DIR}/*/generated/*.cpp")
+            ps2_port_filter_metadata(overlay_cpp ${overlay_cpp})
+            file(GLOB overlay_dirs LIST_DIRECTORIES true "${PS2_PORT_OVERLAY_DIR}/*/generated")
+            if(NOT overlay_cpp OR NOT EXISTS "${PS2_PORT_OVERLAY_DIR}/overlay_manifest.cpp")
+                message(FATAL_ERROR "Overlay build requested without translated overlays")
+            endif()
+            target_include_directories(ps2EntryRunner PRIVATE ${overlay_dirs} "${PS2_PORT_UPSTREAM}/ps2xRuntime/src/lib")
+            target_sources(ps2EntryRunner PRIVATE ${overlay_cpp} "${PS2_PORT_OVERLAY_DIR}/overlay_manifest.cpp")
         endif()
         message(STATUS "Attached local generated game code")
     endfunction()

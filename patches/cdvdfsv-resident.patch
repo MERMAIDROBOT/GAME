@@ -1,0 +1,125 @@
+diff --git a/ps2xIOP/CMakeLists.txt b/ps2xIOP/CMakeLists.txt
+index a591cde..49c9514 100644
+--- a/ps2xIOP/CMakeLists.txt
++++ b/ps2xIOP/CMakeLists.txt
+@@ -26,6 +26,7 @@ add_library(ps2_iop STATIC
+     src/emulator/imports/iop_sysmem.cpp
+     src/emulator/imports/iop_timrman.cpp
+     src/emulator/imports/iop_vblank.cpp
++    src/modules/cdvdfsv.cpp
+     src/modules/dbcman.cpp
+     src/modules/libsd.cpp
+     src/modules/mcserv.cpp
+diff --git a/ps2xIOP/src/iop_subsystem.cpp b/ps2xIOP/src/iop_subsystem.cpp
+index 849ecb8..838b498 100644
+--- a/ps2xIOP/src/iop_subsystem.cpp
++++ b/ps2xIOP/src/iop_subsystem.cpp
+@@ -37,6 +37,7 @@ namespace ps2x::iop
+             coreServices.emplace_back(detail::createMcservService(host));
+             coreServices.emplace_back(detail::createDbcmanService(host));
+             coreServices.emplace_back(detail::createLibSdService(host));
++            coreServices.emplace_back(detail::createCdvdfsvService(host));
+             refreshServiceModuleKeys();
+             rebuildRoutes();
+         }
+diff --git a/ps2xIOP/src/module_factories.h b/ps2xIOP/src/module_factories.h
+index f0da295..c213a35 100644
+--- a/ps2xIOP/src/module_factories.h
++++ b/ps2xIOP/src/module_factories.h
+@@ -7,4 +7,5 @@ namespace ps2x::iop::detail
+     std::unique_ptr<IopService> createDbcmanService(IopHost &host);
+     std::unique_ptr<IopService> createLibSdService(IopHost &host);
+     std::unique_ptr<IopService> createMcservService(IopHost &host);
++    std::unique_ptr<IopService> createCdvdfsvService(IopHost &host);
+ }
+diff --git a/ps2xIOP/src/modules/cdvdfsv.cpp b/ps2xIOP/src/modules/cdvdfsv.cpp
+new file mode 100644
+index 0000000..37c129d
+--- /dev/null
++++ b/ps2xIOP/src/modules/cdvdfsv.cpp
+@@ -0,0 +1,54 @@
++#include "module_factories.h"
++#include "rpc_reply.h"
++
++#include <array>
++#include <atomic>
++#include <cstdio>
++
++// CD/DVD file server RPCs that are resident on a booted console (cdvdfsv in ROM). Titles that keep their own
++// copy of the CD library -- stripped executables whose SDK functions the recompiler cannot name and replace --
++// reach these over RPC instead of through the runtime's CD stubs. A cdvdfsv the title loads into the emulated
++// IOP still answers first: emulated servers take precedence over core services.
++namespace ps2x::iop::detail
++{
++    namespace
++    {
++        constexpr uint32_t kDiskReadySid = 0x8000059Au;   // sceCdDiskReady(mode): reply word = ready state
++        constexpr uint32_t kCdComplete = 2u;              // SCECdComplete: drive ready (the disc is a file)
++        constexpr std::array<uint32_t, 1> kSids{kDiskReadySid};
++
++        class CdvdfsvService final : public IopService
++        {
++        public:
++            explicit CdvdfsvService(IopHost &host) : m_host(host) {}
++
++            [[nodiscard]] std::string_view name() const override { return "cdvdfsv"; }
++            [[nodiscard]] std::span<const uint32_t> sids() const override { return kSids; }
++            void reset() override { m_calls = 0; }
++
++            [[nodiscard]] RpcResult handleRpc(const RpcRequest &request) override
++            {
++                RpcResult result;
++                if (request.sid != kDiskReadySid)
++                    return result;
++                result.handled = true;
++                result.resultAddress = request.receive.address;
++                const std::array<uint32_t, 1> reply{kCdComplete};
++                if (request.receive.address && request.receive.size)
++                    (void)writeRpcWords(m_host, request.receive, reply);
++                if (m_calls++ == 0)
++                    std::fprintf(stderr, "[IOP:HLE] cdvdfsv disk-ready RPC answered (ready)\n");
++                return result;
++            }
++
++        private:
++            IopHost &m_host;
++            std::atomic<uint64_t> m_calls{0};
++        };
++    }
++
++    std::unique_ptr<IopService> createCdvdfsvService(IopHost &host)
++    {
++        return std::make_unique<CdvdfsvService>(host);
++    }
++}
+diff --git a/ps2xIOP/tests/iop_compatibility_tests.cpp b/ps2xIOP/tests/iop_compatibility_tests.cpp
+index 5c3bf40..b1eeaab 100644
+--- a/ps2xIOP/tests/iop_compatibility_tests.cpp
++++ b/ps2xIOP/tests/iop_compatibility_tests.cpp
+@@ -287,6 +287,18 @@ namespace
+         require(iop.handleRpc(request(0x80000701u, 0x8010u)).handled, "LIBSD RPC not handled");
+         require(host.audioCalls == 1u, "DBCMAN option intercepted LIBSD RPC");
+     }
++    // The CD/DVD file server is ROM-resident: its disk-ready RPC answers without any module load and after reset.
++    void cdvdfsvDiskReady()
++    {
++        constexpr uint32_t diskReadySid = 0x8000059Au;
++        Host host;
++        IopSubsystem iop(host);
++        require(iop.canBindRpc(diskReadySid), "disk-ready SID must be bindable at boot");
++        require(iop.handleRpc(request(diskReadySid, 0u, 4u)).handled, "disk-ready RPC not handled");
++        require(host.word(0x800u) == 2u, "disk-ready must report SCECdComplete");
++        iop.reset();
++        require(iop.canBindRpc(diskReadySid), "reset removed the resident CD server");
++    }
+ }
+ 
+ int main()
+@@ -310,6 +322,7 @@ int main()
+         {"HLE repeated loads and alias lifetime", moduleLifetime},
+         {"Loader outcomes are bounded and resettable", loaderDiagnostics},
+         {"LIBSD audio dispatch is unchanged", libsdUnchanged},
++        {"Resident CDVDFSV disk-ready RPC", cdvdfsvDiskReady},
+     };
+     return run(tests);
+ }

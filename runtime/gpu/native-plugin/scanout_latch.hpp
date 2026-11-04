@@ -15,4 +15,9 @@ public:
  bool unchanged(const ScanoutContent& c,const ScanoutGeometry& g)const{return valid&&c==content&&g==geometry;}
  void accepted(const ScanoutContent& c,const ScanoutGeometry& g){content=c;geometry=g;valid=true;}
 };
+// A rendered target narrower than the displayed width (from DBX) was drawn for another display mode: during a
+// mode switch (game 512 -> movie 640) the old picture would be stretched to the new width, a brief zoom.
+// The presenter keeps the previous picture until a target that covers the display exists.
+inline bool coversDisplay(unsigned targetWidth,unsigned left,unsigned shownWidth,unsigned scale)
+{return static_cast<unsigned long long>(targetWidth)>=(static_cast<unsigned long long>(left)+shownWidth)*scale;}
 }

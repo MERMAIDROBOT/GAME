@@ -1,0 +1,76 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_field_presentation.h b/ps2xRuntime/include/runtime/gs/gs_field_presentation.h
+new file mode 100644
+index 0000000..1e777d9
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/gs/gs_field_presentation.h
+@@ -0,0 +1,18 @@
++#pragma once
++
++#include <cstdint>
++
++// Which frame-buffer line the host shows on output line y of an interlaced display (SMODE2.INT=1).
++//  FFMD=1 (frame mode): every field scans the same half-height buffer, so each buffer line covers two
++//                       output lines.
++//  FFMD=0 (field mode): the buffer holds both fields' lines and the CRT shows them interleaved, so every
++//                       line is shown (weave). Showing only the current field's lines, doubled, halves the
++//                       vertical detail and moves the picture by a line every field.
++namespace GSFieldPresentation
++{
++    inline uint32_t sourceLine(uint32_t y, uint32_t height, bool frameMode)
++    {
++        const uint32_t line = frameMode ? (y >> 1u) : y;
++        return line < height ? line : (height ? height - 1u : 0u);
++    }
++}
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index 50a22c7..4c61b0e 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -3,6 +3,7 @@
+ #include <arm_neon.h>
+ #endif
+ #include "runtime/gs/gs_cpu_backend.h"
++#include "runtime/gs/gs_field_presentation.h"
+ #include "runtime/gs/ps2_gs_common.h"
+ #include "runtime/gs/ps2_gs_psmct16.h"
+ #include "runtime/gs/ps2_gs_psmct32.h"
+@@ -441,14 +442,19 @@ namespace
+ 
+     void applyFieldPresentation(std::vector<uint8_t> &pixels, uint32_t width, uint32_t height, bool oddField, bool frameMode)
+     {
+-        if (pixels.empty() || width == 0u || height < 2u)
+-            return;
++        static int lastMode = -1;
++        if (lastMode != static_cast<int>(frameMode))
++        {
++            lastMode = static_cast<int>(frameMode);
++            std::fprintf(stderr, "[gs] interlaced display, FFMD=%d (%s)\n", lastMode, frameMode ? "frame: line-doubled" : "field: weave");
++        }
++        (void)oddField;
++        if (pixels.empty() || width == 0u || height < 2u || !frameMode)
++            return; // Field mode: the buffer already holds both fields' lines.
+         const std::vector<uint8_t> source = pixels;
+         for (uint32_t y = 0; y < height; ++y)
+         {
+-            uint32_t sourceY = frameMode ? (y >> 1u) : (((y >> 1u) << 1u) + (oddField ? 1u : 0u));
+-            if (sourceY >= height)
+-                sourceY = height - 1u;
++            const uint32_t sourceY = GSFieldPresentation::sourceLine(y, height, frameMode);
+             std::memcpy(pixels.data() + y * kHostFrameWidth * 4u,
+                         source.data() + sourceY * kHostFrameWidth * 4u,
+                         width * 4u);
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 637c2ec..b0d419e 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2497,6 +2497,10 @@ void PS2Runtime::run()
+         Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
+         frameTex = LoadTextureFromImage(blank);
+         UnloadImage(blank);
++        // The picture is magnified to the window: filter it like a display does, not as square blocks.
++        // PS2_PORT_PRESENT_NEAREST=1 keeps the old point sampling.
++        if (const char *nearest = std::getenv("PS2_PORT_PRESENT_NEAREST"); !(nearest && nearest[0] == '1'))
++            SetTextureFilter(frameTex, TEXTURE_FILTER_BILINEAR);
+     }
+ 
+     std::atomic<bool> gameThreadFinished{false};
