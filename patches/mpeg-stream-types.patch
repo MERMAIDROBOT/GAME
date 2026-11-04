@@ -1,0 +1,52 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+index 824f2d7..4ee83a5 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+@@ -559,9 +559,11 @@ namespace ps2_stubs
+         // TODO this resolution should follow runtime resolution
+         constexpr uint32_t kStubMovieWidth = 320u;
+         constexpr uint32_t kStubMovieHeight = 240u;
++        // sceMpegStrType: M2V 0, IPU 1, PCM 2, ADPCM 3, DATA 4. Audio packets go to PCM and ADPCM callbacks;
++        // an ADPCM-only title (type 3) received nothing when ADPCM was numbered 2, and waited for audio forever.
+         constexpr uint32_t kMpegStrM2V = 0u;
+-        constexpr uint32_t kMpegStrPCM = 1u;
+-        constexpr uint32_t kMpegStrADPCM = 2u;
++        constexpr uint32_t kMpegStrPCM = 2u;
++        constexpr uint32_t kMpegStrADPCM = 3u;
+         constexpr uint8_t kMpegPackHeader = 0xBAu;
+         constexpr uint8_t kMpegSystemHeader = 0xBBu;
+         constexpr uint8_t kMpegProgramEnd = 0xB9u;
+diff --git a/ps2xTest/src/ps2_runtime_expansion_tests.cpp b/ps2xTest/src/ps2_runtime_expansion_tests.cpp
+index 4772f3f..fef802b 100644
+--- a/ps2xTest/src/ps2_runtime_expansion_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_expansion_tests.cpp
+@@ -608,6 +608,7 @@ void register_ps2_runtime_expansion_tests()
+             registerGenericCallback(2u, 0xDEAD0002u);
+             registerStreamCallback(0u, kVideoUserData);
+             registerStreamCallback(2u, kAudioUserData);
++            registerStreamCallback(3u, kAudioUserData + 1u);   // ADPCM (sceMpegStrADPCM = 3) receives audio too
+ 
+             const std::vector<uint8_t> videoPayload = {
+                 0x00u, 0x00u, 0x01u, 0xB3u, 0x14u, 0x00u, 0xF0u, 0x13u};
+@@ -656,16 +657,16 @@ void register_ps2_runtime_expansion_tests()
+ 
+             t.Equals(getRegS32(audioDemuxCtx, 2), static_cast<int32_t>(audioPacketSize),
+                      "sceMpegDemuxPssRing should consume the audio PES packet");
+-            t.Equals(gMpegStreamCallbackCount.load(std::memory_order_acquire), 1u,
+-                     "registered audio stream callback should be invoked");
+-            t.Equals(gMpegStreamCallbackType.load(std::memory_order_acquire), 2u,
+-                     "audio callback data should report PCM stream type");
++            t.Equals(gMpegStreamCallbackCount.load(std::memory_order_acquire), 2u,
++                     "audio packets reach both the PCM (2) and ADPCM (3) stream callbacks");
++            t.Equals(gMpegStreamCallbackType.load(std::memory_order_acquire), 3u,
++                     "the last audio callback reports the ADPCM stream type");
+             t.Equals(gMpegStreamCallbackDataAddr.load(std::memory_order_acquire), kAudioPacketAddr + 9u,
+                      "audio callback data should point at PES payload");
+             t.Equals(gMpegStreamCallbackLen.load(std::memory_order_acquire),
+                      static_cast<uint32_t>(audioPayload.size()),
+                      "audio callback data should report PES payload length");
+-            t.Equals(gMpegStreamCallbackUserData.load(std::memory_order_acquire), kAudioUserData,
++            t.Equals(gMpegStreamCallbackUserData.load(std::memory_order_acquire), kAudioUserData + 1u,
+                      "audio callback should receive registered user data");
+ 
+             ps2_stubs::notifyMpegCdStreamEof();
