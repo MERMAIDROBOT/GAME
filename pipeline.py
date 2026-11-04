@@ -77,7 +77,7 @@ SOURCE_FILES = SOURCE_FILES + tuple(sorted(
     for p in (ROOT / folder).rglob('*') if p.is_file() and not p.name.startswith('.'))) + (
     'tools/gen_vk_loader.py', 'tools/gen_shaders.py', 'patches/presentation-fidelity.patch',
     'patches/gpu-renderer-host.patch', 'patches/window-thread-failure.patch', 'patches/hd-frame-stride.patch',
-    'patches/vsync-setting.patch', 'tests/test_gpu_offline.py', 'tests/test_display_path.py', 'tests/display_path.cpp', 'tests/test_app_storage.py')
+    'patches/vsync-setting.patch', 'tests/test_gpu_offline.py', 'tests/test_display_path.py', 'tests/display_path.cpp', 'tests/test_app_storage.py', 'patches/guest-heap-exact.patch', 'tests/guest_heap_layout.cpp', 'tests/test_guest_heap_layout.py', 'tests/scanout_transition.cpp', 'tests/test_scanout_transition.py', 'isa_r5900.py', 'binary_rebuild.py', 'tests/test_isa_r5900.py', 'tests/test_binary_rebuild.py', 'MATCHING.md')
 
 
 SOURCE_FILES = ('translation_graph.py','tests/test_translation_graph.py') + SOURCE_FILES
@@ -691,6 +691,9 @@ def main(target=None):
     for option in ['source', 'destination', 'title', 'version', 'bundle-id', 'icon', 'log']:
         release.add_argument('--'+option, required=True)
     release.add_argument('--bundle-assets',action='store_true',help='Include verified disc/texture assets; require source-verified separate saves')
+    rebuild = sub.add_parser('rebuild-binary', help='Split the boot executable into assembly and rebuild it byte-for-byte')
+    rebuild.add_argument('--name', required=True, help='Unique local rebuild name')
+    rebuild.add_argument('--gp', type=lambda v: int(v, 0), help='gp value if the startup code does not show it')
     memory = sub.add_parser('memory-audit', help='Reject runtime pools overlapping declared game memory')
     memory.add_argument('--runtime-header', required=True, help='Local runtime Helpers/State.h used for this build')
     memory.add_argument('--layout', required=True, help='Private JSON layout path, relative to game storage')
@@ -1188,6 +1191,13 @@ def main(target=None):
         report = run_recipe(profile, private, args.recipe, args.name, stage=args.command=='compiler-stage')
         print(json.dumps({'status':report['status'], 'clean_build_ready':report['clean_build_ready'],
             'blockers':report['blockers'], 'report':str(private/'compiler-runs'/args.name/'report.json')}))
+    elif args.command == 'rebuild-binary':
+        from binary_rebuild import run as rebuild_binary
+        report = rebuild_binary(profile, private, args.name, args.gp)
+        print(json.dumps({k: report[k] for k in ('identical', 'original_sha256', 'rebuilt_sha256', 'instructions',
+                                                 'undecoded', 'labels', 'output')}, indent=2))
+        if not report['identical']:
+            raise SystemExit(1)
     elif args.command == 'memory-audit':
         from memory import run_audit
         report = run_audit(profile, private, args.runtime_header, args.layout, args.name)

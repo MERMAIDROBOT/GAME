@@ -1,0 +1,127 @@
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index 6caa21c..bf12c35 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -376,6 +376,8 @@ public:
+     void handleTLBP(uint8_t *rdram, R5900Context *ctx);
+     void clearLLBit(R5900Context *ctx);
+     void configureGuestHeap(uint32_t guestBase, uint32_t guestLimit = PS2_RAM_SIZE);
++    // Exactly [guestBase, guestLimit) inside RAM, without the default heap ceiling; false if invalid.
++    bool configureExactGuestHeap(uint32_t guestBase, uint32_t guestLimit);
+     uint32_t guestMalloc(uint32_t size, uint32_t alignment = 16u);
+     uint32_t guestCalloc(uint32_t count, uint32_t size, uint32_t alignment = 16u);
+     uint32_t guestRealloc(uint32_t guestAddr, uint32_t newSize, uint32_t alignment = 16u);
+diff --git a/ps2xRuntime/include/runtime/guest_heap_layout.h b/ps2xRuntime/include/runtime/guest_heap_layout.h
+new file mode 100644
+index 0000000..b298d92
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/guest_heap_layout.h
+@@ -0,0 +1,25 @@
++#pragma once
++// SetupHeap layout rule. An explicit heap size whose end lies above the default "rest of RAM" end is the title's
++// exact heap: the title placed a small C-library heap high in RAM (usually just under its own main stack) and
++// manages the memory below it itself. The runtime must use exactly that range for malloc, never move it to the
++// first free RAM after the executable, where the title keeps its own data.
++#include <cstdint>
++
++namespace GuestHeapLayout
++{
++    constexpr uint32_t kDefaultEnd = 0x01FF0000u;
++
++    // Exclusive heap limit for an exact title heap, or 0 when the generic SetupHeap path applies.
++    constexpr uint32_t exactLimit(uint32_t alignedBase, uint32_t size, uint32_t mainStackBase, uint32_t ramSize)
++    {
++        if (size == 0u || size == 0xFFFFFFFFu || alignedBase == 0u || alignedBase >= ramSize)
++            return 0u;
++        const uint64_t end = static_cast<uint64_t>(alignedBase) + size;
++        if (end <= kDefaultEnd || end > ramSize)
++            return 0u;
++        uint32_t limit = static_cast<uint32_t>(end);
++        if (mainStackBase > alignedBase && mainStackBase < limit)
++            limit = mainStackBase;
++        return limit;
++    }
++}
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+index a6d96d5..a7fc804 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+@@ -1,5 +1,6 @@
+ #include "Common.h"
+ #include "System.h"
++#include "runtime/guest_heap_layout.h"
+ 
+ namespace ps2_syscalls
+ {
+@@ -564,6 +565,14 @@ namespace ps2_syscalls
+ 
+         const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
+ 
++        if (const uint32_t exact = GuestHeapLayout::exactLimit(heapBase, heapSize, g_mainThreadStackBase, PS2_RAM_SIZE);
++            exact != 0u && runtime && runtime->configureExactGuestHeap(heapBase, exact))
++        {
++            g_titleHeapEnd = exact;
++            setReturnU32(ctx, heapBase);
++            return;
++        }
++
+         // Silent Hill and other games often pass -1 (0xFFFFFFFF) to mean "rest of RAM".
+         static constexpr uint32_t kDefaultGuestHeapEnd = 0x01FF0000u;
+         uint32_t heapLimit = kDefaultGuestHeapEnd;
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 9bc2586..523e98a 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1993,6 +1993,22 @@ void PS2Runtime::configureGuestHeap(uint32_t guestBase, uint32_t guestLimit)
+     resetGuestHeapLocked(normalizedBase, guestLimit);
+ }
+ 
++bool PS2Runtime::configureExactGuestHeap(uint32_t guestBase, uint32_t guestLimit)
++{
++    const uint32_t base = alignGuestHeapValue(guestBase, kGuestHeapDefaultAlignment);
++    if (base == 0u || base >= guestLimit || guestLimit > PS2_RAM_SIZE)
++        return false;
++    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
++    m_guestHeapBlocks.clear();
++    m_guestHeapBlocks.push_back({base, guestLimit - base, true});
++    m_guestHeapSuggestedBase = base;
++    m_guestHeapBase = base;
++    m_guestHeapEnd = base;
++    m_guestHeapLimit = guestLimit;
++    m_guestHeapConfigured = true;
++    return true;
++}
++
+ uint32_t PS2Runtime::guestMalloc(uint32_t size, uint32_t alignment)
+ {
+     std::lock_guard<std::mutex> lock(m_guestHeapMutex);
+diff --git a/ps2xTest/src/ps2_runtime_kernel_tests.cpp b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+index 63b12d9..64ed70d 100644
+--- a/ps2xTest/src/ps2_runtime_kernel_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+@@ -922,6 +922,25 @@ void register_ps2_runtime_kernel_tests()
+             t.Equals(reused, heapBase, "guestFree should make the head block reusable");
+         });
+ 
++        tc.Run("SetupHeap keeps an explicit heap placed above the default heap end", [](TestCase &t)
++        {
++            TestEnv env;
++            // Title stack 16 KiB at 0x1FFC000, C-library heap 16 KiB just under it; the title owns RAM below.
++            setRegU32(env.ctx, 4, 0u);
++            setRegU32(env.ctx, 5, 0x01FFC000u);
++            setRegU32(env.ctx, 6, 0x4000u);
++            t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime), "SetupThread syscall should dispatch");
++            setRegU32(env.ctx, 4, 0x01FF8000u);
++            setRegU32(env.ctx, 5, 0x4000u);
++            t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap syscall should dispatch");
++            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), 0x01FF8000u, "SetupHeap should return the title heap base");
++            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
++            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), 0x01FFC000u, "EndOfHeap should end at the title stack");
++            const uint32_t block = env.runtime.guestMalloc(0x100u, 16u);
++            t.IsTrue(block >= 0x01FF8000u && block + 0x100u <= 0x01FFC000u, "malloc should stay inside the title heap");
++            t.Equals(env.runtime.guestMalloc(0x8000u, 16u), 0u, "malloc larger than the title heap should fail, not spill");
++        });
++
+         tc.Run("memalign stubs allocate aligned guest memory", [](TestCase &t)
+         {
+             TestEnv env;
