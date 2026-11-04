@@ -77,7 +77,7 @@ SOURCE_FILES = SOURCE_FILES + tuple(sorted(
     for p in (ROOT / folder).rglob('*') if p.is_file() and not p.name.startswith('.'))) + (
     'tools/gen_vk_loader.py', 'tools/gen_shaders.py', 'patches/presentation-fidelity.patch',
     'patches/gpu-renderer-host.patch', 'patches/window-thread-failure.patch', 'patches/hd-frame-stride.patch',
-    'patches/vsync-setting.patch', 'tests/test_gpu_offline.py', 'tests/test_display_path.py', 'tests/display_path.cpp', 'tests/test_app_storage.py', 'patches/guest-heap-exact.patch', 'tests/guest_heap_layout.cpp', 'tests/test_guest_heap_layout.py', 'tests/scanout_transition.cpp', 'tests/test_scanout_transition.py', 'isa_r5900.py', 'binary_rebuild.py', 'tests/test_isa_r5900.py', 'tests/test_binary_rebuild.py', 'MATCHING.md')
+    'patches/vsync-setting.patch', 'tests/test_gpu_offline.py', 'tests/test_display_path.py', 'tests/display_path.cpp', 'tests/test_app_storage.py', 'patches/guest-heap-exact.patch', 'tests/guest_heap_layout.cpp', 'tests/test_guest_heap_layout.py', 'tests/scanout_transition.cpp', 'tests/test_scanout_transition.py', 'isa_r5900.py', 'binary_rebuild.py', 'tests/test_isa_r5900.py', 'tests/test_binary_rebuild.py', 'MATCHING.md', 'match_function.py', 'tests/test_match_function.py')
 
 
 SOURCE_FILES = ('translation_graph.py','tests/test_translation_graph.py') + SOURCE_FILES
@@ -691,6 +691,12 @@ def main(target=None):
     for option in ['source', 'destination', 'title', 'version', 'bundle-id', 'icon', 'log']:
         release.add_argument('--'+option, required=True)
     release.add_argument('--bundle-assets',action='store_true',help='Include verified disc/texture assets; require source-verified separate saves')
+    matching = sub.add_parser('match-function', help='Compile one function with a pinned PS2 compiler and compare it with the disc')
+    matching.add_argument('--function', required=True)
+    matching.add_argument('--source', required=True, help='C/C++ source inside private game storage')
+    matching.add_argument('--compiler', required=True, help='Compiler id under the toolchain ps2-compilers folder')
+    matching.add_argument('--name', required=True, help='Unique local match name')
+    matching.add_argument('--flag', action='append', dest='flags', help='Compiler flag (repeatable; default -O2 -G0)')
     rebuild = sub.add_parser('rebuild-binary', help='Split the boot executable into assembly and rebuild it byte-for-byte')
     rebuild.add_argument('--name', required=True, help='Unique local rebuild name')
     rebuild.add_argument('--gp', type=lambda v: int(v, 0), help='gp value if the startup code does not show it')
@@ -1191,6 +1197,12 @@ def main(target=None):
         report = run_recipe(profile, private, args.recipe, args.name, stage=args.command=='compiler-stage')
         print(json.dumps({'status':report['status'], 'clean_build_ready':report['clean_build_ready'],
             'blockers':report['blockers'], 'report':str(private/'compiler-runs'/args.name/'report.json')}))
+    elif args.command == 'match-function':
+        from match_function import run as match_function
+        report = match_function(profile, private, args.function, args.source, args.compiler, args.name,
+                                tuple(args.flags or ('-O2', '-G0')))
+        print(json.dumps({k: report[k] for k in ('function', 'compiler', 'flags', 'match', 'original_bytes',
+                                                 'compiled_bytes', 'differing_words')}, indent=2))
     elif args.command == 'rebuild-binary':
         from binary_rebuild import run as rebuild_binary
         report = rebuild_binary(profile, private, args.name, args.gp)

@@ -51,10 +51,32 @@ byte-identical rebuild alone does not prove relocatability.
 
 ## Stage 3: matching source
 
-Replace one function's assembly with C or C++ that the original compiler turns into the same bytes. That requires
-the exact compiler the title used. Kelly's symbols name Sony's EE GCC 2.9x (`gcc2_compiled.`; its CFI records rule
-out anything before 2.95). R&C is stripped. No such compiler is installed here. Getting one is a download that
-needs the owner's approval. A recompiled function counts only when `rebuild-binary` still reports `identical`.
+```sh
+python3 pipeline.py --profile .private/profiles/TITLE.json match-function --function NAME \
+  --source matching-src/FILE.c --compiler ee-gcc2.96 --name NAME-01 [--flag -O2 --flag -G0]
+```
+
+The engine compiles the function with a pinned original-era compiler and compares the result word by word with
+the disc's function. Fields that the object's relocations fill (call targets, %hi/%lo, %gp_rel) are masked.
+Compilers come from the decompme/compilers release. They live under `toolchain/ps2-compilers/` and count only if
+their archive matches `SHA256SUMS`. They run in a Colima/Docker container from a digest-pinned 32-bit Debian
+image, with no network and the compiler mounted read-only.
+
+Kelly compiler identification (2026-11-04), using zlib 1.1.3 functions Kelly links (`adler32`, `zcalloc`, `zcfree`):
+
+- None of the Linux builds (2.9-990721, 2.9-991111 and its variants, 2.96-001003) match under any flag tried.
+  The closest, 2.96 with `-fno-optimize-sibling-calls`, differs only in the return-address save and restore:
+  Kelly uses 128-bit `sq`/`lq`, the Linux builds use `sd`/`ld`.
+- Kelly's debug paths are Windows paths (`C:/KS/SRC/...`). The Windows SN-style builds run under decompals' wibo
+  (1.2.0, digest-pinned in `match_function.py`). wibo cannot start child processes in the container, so the
+  engine runs the driver's stages itself: `cpp.exe` with the specs' predefines, `cc1`/`cc1plus`, then `as.exe`.
+- **Result: `zcalloc` and `zcfree` match Kelly byte for byte with SN 2.95.2-273a and SN 2.95.3-114 at
+  `-O2 -G0`.** 2.95.3-136 does not. `adler32` differs by one instruction: the build's GNU assembler adds a `nop`
+  before a short loop's branch (an R5900 errata workaround), and Kelly's code has none. No `as.exe` option removes
+  it, and SN's own `ps2eeas` crashes under wibo. Next: an assembler without that insertion (for example decompals'
+  PS2 binutils), then C++ units, which go through `cc1plus`.
+
+A recompiled function counts only when `rebuild-binary` still reports `identical`.
 
 Generated assembly, blobs and reports contain retail code. They stay in private storage and never go into the
 source archive.
