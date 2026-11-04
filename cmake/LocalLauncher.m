@@ -67,6 +67,12 @@ int main(void) {
         unsetenv("PS2_PORT_VU_TRACE");
         unsetenv("PS2_PORT_GS_PROFILE");
         unsetenv("PS2_PORT_PAD_TRACE");
+        // VU programs the game runs are recorded for the next build to compile: the engine learns per title.
+        NSString *vuCapture = config[@"VuCaptureDirectory"];
+        if (vuCapture) {
+            if (![vuCapture isKindOfClass:NSString.class] || ![vuCapture isAbsolutePath]) return 2;
+            setenv("PS2X_VU1_CAPTURE", vuCapture.fileSystemRepresentation, 1);
+        }
         if ([config[@"LocalDiagnostics"] boolValue]) {
             setenv("PS2_PORT_GS_PROFILE", "1", 1);
             setenv("PS2_PORT_PAD_TRACE", "1", 1);

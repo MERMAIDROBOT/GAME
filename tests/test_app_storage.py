@@ -26,6 +26,17 @@ class Content(unittest.TestCase):
 
 
 class Behaviour(unittest.TestCase):
+    def test_cd_image_staged_beside_storage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / 'private/cd-image/disc.iso'; image.parent.mkdir(parents=True)
+            image.write_bytes(bytes(range(256)) * 32)
+            staged = native.stage_cd_image(image, Path(tmp) / 'support/cd-image')
+            self.assertEqual(staged.read_bytes(), image.read_bytes())
+            self.assertTrue(staged.is_relative_to(Path(tmp).resolve() / 'support'))
+            staged.write_bytes(b'short')                                       # wrong size: re-staged
+            self.assertEqual(native.stage_cd_image(image, Path(tmp) / 'support/cd-image').read_bytes(), image.read_bytes())
+        self.assertIn("image = stage_cd_image(image, storage / 'cd-image')", (ROOT / 'native.py').read_text())
+
     def test_staged_disc_matches_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             private = Path(tmp) / 'private'; disc = private / 'disc-root'; (disc / 'DATA').mkdir(parents=True)

@@ -168,8 +168,13 @@ def build_native(profile, private):
         build = private / 'native-build'
         vu_directory,vu_record = '',None
         if profile.get('compiled_vu',False):
-            from vectors import validated_sources
-            vu_directory,vu_record=validated_sources(private)
+            # Programs the packaged app recorded since the last build are compiled now; the first build of a
+            # title has no vector compiler yet and runs VU code interpreted until the next build.
+            from vectors import refresh_compiled, validated_sources
+            if refresh_compiled(profile, private) is not None:
+                vu_directory,vu_record=validated_sources(private)
+            else:
+                print('No compiled VU programs yet: VU code runs interpreted; play the packaged app, then rebuild.')
         command = common_configure(build) + [
             '-DFETCHCONTENT_FULLY_DISCONNECTED=ON',
             f'-DFETCHCONTENT_SOURCE_DIR_RAYLIB={raylib}',
@@ -311,7 +316,7 @@ def overlay_build_directory(profile, private):
 # kernel/IOP/CD/GS/MPEG behaviour a second title needed (see ENGINE.md "Runtime title conformance").
 RUNTIME_PATCHES = ('patches/runtime-diagnostics.patch', 'patches/ps2xIOP-port-lab.patch', 'patches/scalar-fpu.patch',
                    'patches/runtime-title-conformance.patch', 'patches/scalar-fpu-compare.patch',
-                   'patches/runtime-hotpaths.patch', 'patches/native-pcm.patch','patches/host-input.patch','patches/ee64-varargs.patch','patches/sdk-audio-policy.patch','patches/gif-image2.patch', 'patches/mpeg-stream-callbacks.patch','patches/host-input-events.patch','patches/touch-direction-recovery.patch','patches/native-save-root.patch','patches/host-clock-accounting.patch','patches/native-callback-context-lifetime.patch','patches/overlay-dispatch.patch','patches/stub-interior-entries.patch','patches/mmi-reference-forms.patch','patches/vu0-reference-forms.patch','patches/link-branch-reference.patch','patches/fpu-reference-flags.patch','patches/vu-micro-reference.patch','patches/gs-host-rounding.patch','patches/vu-run-to-end.patch','patches/vu-vf0-constant.patch','patches/iop-shared-pool.patch','patches/presentation-fidelity.patch','patches/gpu-renderer-host.patch','patches/window-thread-failure.patch','patches/hd-frame-stride.patch','patches/vsync-setting.patch','patches/guest-heap-exact.patch')
+                   'patches/runtime-hotpaths.patch', 'patches/native-pcm.patch','patches/host-input.patch','patches/ee64-varargs.patch','patches/sdk-audio-policy.patch','patches/gif-image2.patch', 'patches/mpeg-stream-callbacks.patch','patches/host-input-events.patch','patches/touch-direction-recovery.patch','patches/native-save-root.patch','patches/host-clock-accounting.patch','patches/native-callback-context-lifetime.patch','patches/overlay-dispatch.patch','patches/stub-interior-entries.patch','patches/mmi-reference-forms.patch','patches/vu0-reference-forms.patch','patches/link-branch-reference.patch','patches/fpu-reference-flags.patch','patches/vu-micro-reference.patch','patches/gs-host-rounding.patch','patches/vu-run-to-end.patch','patches/vu-vf0-constant.patch','patches/iop-shared-pool.patch','patches/presentation-fidelity.patch','patches/gpu-renderer-host.patch','patches/window-thread-failure.patch','patches/hd-frame-stride.patch','patches/vsync-setting.patch','patches/guest-heap-exact.patch','patches/cdvdfsv-resident.patch','patches/sif-module-load-report.patch','patches/iop-module-buffer.patch','patches/dma-watch.patch')
 
 
 def private_source_patches(profile, private):
@@ -512,6 +517,27 @@ def cd_image(private):
     return verified_image(private)
 
 
+def stage_cd_image(image, folder):
+    """The verified sector image beside the app's other storage (an APFS clone where possible), so a Finder launch
+    never reads it from ~/Documents. Re-staged when its size differs from the verified original."""
+    folder = Path(folder)
+    if folder.is_symlink():
+        raise ValueError('Runtime image storage must be a real directory')
+    folder.mkdir(parents=True, exist_ok=True)
+    staged = folder / Path(image).name
+    if staged.is_symlink():
+        raise ValueError('Runtime image must not be a symlink')
+    if not staged.is_file() or staged.stat().st_size != Path(image).stat().st_size:
+        temporary = folder / (staged.name + '.next')
+        temporary.unlink(missing_ok=True)
+        if subprocess.run(['/bin/cp', '-c', str(image), str(temporary)], capture_output=True).returncode:
+            shutil.copy2(image, temporary)
+        if temporary.stat().st_size != Path(image).stat().st_size:
+            raise ValueError('Staged image size differs from the verified image')
+        temporary.replace(staged)
+    return staged.resolve()
+
+
 def stage_runtime_disc(private, destination):
     """Verified local runtime copy; preserve the original archive and existing saves."""
     source = (private / 'disc-root').resolve()
@@ -641,6 +667,7 @@ def package_local(profile, private):
             (storage / folder).mkdir(parents=True, exist_ok=True)
         if 'PS2_PORT_HW_GS_PIPELINE_CACHE_DIR' in launch['Environment']:
             launch['Environment']['PS2_PORT_HW_GS_PIPELINE_CACHE_DIR'] = str(storage / 'cache/gpu-pipelines')
+
     macos = app / 'Contents/MacOS'
     resources = app / 'Contents/Resources'
     macos.mkdir(parents=True, exist_ok=True)
@@ -658,6 +685,10 @@ def package_local(profile, private):
               'RendererWorker': renderer_worker, 'AsyncPresentation': async_presentation, 'GraphicsHistoryEnabled': graphics_history,
               'GraphicsHistory': str(storage / 'logs/window-graphics-history.jsonl')}
     config.update({key:value for key,value in launch.items() if key!='assets'})
+    if profile.get('compiled_vu', False):
+        # The app records each VU program the game runs; the next build-native compiles them (vectors.learn).
+        (storage / 'vu-capture').mkdir(parents=True, exist_ok=True)
+        config['VuCaptureDirectory'] = str(storage / 'vu-capture')
     capabilities={}
     declared_capabilities=stage.get('runtime_capabilities',{})
     if not isinstance(declared_capabilities,dict) or set(declared_capabilities)-{'separate_save_root'} or any(v is not True for v in declared_capabilities.values()):raise ValueError('Unknown source runtime capability')
@@ -676,6 +707,8 @@ def package_local(profile, private):
     config['AssetPins']=launch['assets']
 
     image = cd_image(private)
+    if image and application_storage:
+        image = stage_cd_image(image, storage / 'cd-image')
     if image:
         config['CdImage'] = str(image)
     (resources / 'RunConfiguration.plist').write_bytes(plistlib.dumps(config))
