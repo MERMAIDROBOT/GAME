@@ -40,6 +40,34 @@ class LaunchConfig(unittest.TestCase):
   p={'native_launch':{'paths':{'PS2_PORT_HW_GS_PIPELINE_CACHE_DIR':{'path':'cache/shaders'}}}}
   r=prepare(p,self.p,{});self.assertFalse((self.p/'cache').exists());self.assertEqual(r['assets'],{})
   self.assertEqual(r['Environment']['PS2_PORT_HW_GS_PIPELINE_CACHE_DIR'],str(self.p/'cache/shaders'))
+ def test_movie_trace_is_explicit_opt_in_and_cannot_claim_to_be_disabled(self):
+  r=prepare({'native_launch':{'environment':{'PS2_PORT_MPEG_TRACE':'1'}}},self.p,{})
+  self.assertEqual(r['Environment']['PS2_PORT_MPEG_TRACE'],'1')
+  with self.assertRaises(ValueError):prepare({'native_launch':{'environment':{'PS2_PORT_MPEG_TRACE':'0'}}},self.p,{})
+
+ def test_overlay_miss_trace_is_opt_in_and_presence_based(self):
+  r=prepare({'native_launch':{'environment':{'PS2_PORT_OVERLAY_MISS_TRACE':'1'}}},self.p,{})
+  self.assertEqual(r['Environment']['PS2_PORT_OVERLAY_MISS_TRACE'],'1')
+  self.assertNotIn('PS2_PORT_OVERLAY_MISS_TRACE',prepare({},self.p,{})['Environment'])
+  with self.assertRaises(ValueError):prepare({'native_launch':{'environment':{'PS2_PORT_OVERLAY_MISS_TRACE':'0'}}},self.p,{})
+
+ def test_gs_recording_is_local_bounded_and_has_no_packaging_side_effect(self):
+  spec={'environment':{'PS2_PORT_HW_GS_RECORD_MB':'256'},'paths':{'PS2_PORT_HW_GS_RECORD':{'path':'diagnostics/transition.pgscap'}}}
+  r=prepare({'native_launch':spec},self.p,{})
+  self.assertEqual(r['Environment']['PS2_PORT_HW_GS_RECORD'],str(self.p/'diagnostics/transition.pgscap'))
+  self.assertEqual(r['assets'],{});self.assertFalse((self.p/'diagnostics').exists())
+  for limit in ['0','513','-1','256.5']:
+   spec['environment']['PS2_PORT_HW_GS_RECORD_MB']=limit
+   with self.subTest(limit=limit),self.assertRaises(ValueError):prepare({'native_launch':spec},self.p,{})
+  with self.assertRaises(ValueError):prepare({'native_launch':{'paths':spec['paths']}},self.p,{})
+  with self.assertRaises(ValueError):prepare({'native_launch':{'environment':{'PS2_PORT_HW_GS_RECORD_MB':'256'}}},self.p,{})
+
+ def test_window_movie_and_control_settings_are_bounded(self):
+  settings={'PS2_PORT_ENHANCE_WINSIZE':'1600x900','PS2_PORT_ENHANCE_MOVIE_FILL':'off','PS2_PORT_SHOW_CONTROLS':'0','PS2_PORT_ENHANCE_HIDPI':'1'}
+  self.assertEqual(prepare({'native_launch':{'environment':settings}},self.p,{})['Environment'],settings)
+  for key,value in [('PS2_PORT_ENHANCE_WINSIZE','100x100'),('PS2_PORT_ENHANCE_WINSIZE','1600x900;bad'),('PS2_PORT_ENHANCE_WINSIZE','9999x9999'),('PS2_PORT_ENHANCE_MOVIE_FILL','auto')]:
+   with self.subTest(value=value),self.assertRaises(ValueError):prepare({'native_launch':{'environment':{key:value}}},self.p,{})
+
  def test_defaults_do_not_enable_title_specific_settings(self):
   r=prepare({},self.p,{});self.assertEqual(r['Environment'],{});self.assertEqual(r['FrameworkEnvironment'],{})
 

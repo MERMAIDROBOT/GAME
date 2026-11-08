@@ -43,7 +43,10 @@ class PatchContent(unittest.TestCase):
     def test_fmac_uses_the_shared_lane_arithmetic_and_final_result_flags(self):
         impl = added('ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl')
         self.assertIn('vu_reference::fmacLane(m_currentUpperInstruction, m_state, component, lane)', impl)
-        self.assertIn('(void)dest;\n    return 0u;', impl)  # no product sticky bits
+        self.assertIn('(void)dest;\n    return 0u;', impl)  # historical patch; superseded below
+        followup = (ROOT / 'patches/vu-product-underflow.patch').read_text()
+        self.assertIn('lane.productUnderflow', followup)
+        self.assertIn('vu1.state().status, 0x100u', followup)
         gone = removed('ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl')
         self.assertIn('vfmaq_f32', gone)  # compiled multiply-add is no longer fused
         self.assertIn('_mm_set1_epi32(0x7F7FFFFF)', gone)  # exponent 255 is no longer clamped

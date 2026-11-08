@@ -1,6 +1,6 @@
 from pathlib import Path
 import json,re,tempfile,unittest
-from sdk_policy import audit_generated,REQUIRES_BODY
+from sdk_policy import audit_generated,audit_native_image_bindings,REQUIRES_BODY
 ROOT=Path(__file__).resolve().parents[1]
 class SdkAudit(unittest.TestCase):
  def setUp(self):
@@ -18,3 +18,19 @@ class SdkAudit(unittest.TestCase):
   (self.p/'analysis').mkdir();(self.p/'analysis/translation-stage.json').write_text(json.dumps(dict(accepted=True)))
   (self.generated/'remote.cpp').write_text('void f(){ps2_stubs::sceSdRemoteInit(a,b,c);}')
   with self.assertRaisesRegex(ValueError,'incomplete stateful SDK'):pipeline.require_accepted_translation(self.p)
+
+ def test_registered_guest_body_cannot_hide_a_missing_native_image_binding(self):
+  config=self.p/'config.toml';config.write_text('[general]\nstubs=["sceGsExecStoreImage@0x100040", "sceSdRemote@0x100080"]\n')
+  (self.generated/'register_functions.cpp').write_text('table[16] = guest; // 0x100040\n')
+  source=self.generated/'guest.cpp'
+  source.write_text('// ps2_stubs::sceGsExecStoreImage(a,b,c);\nvoid guest() {}\n')
+  result=audit_native_image_bindings(config,self.generated)
+  self.assertFalse(result['passed']);self.assertEqual(result['contracts_checked'],1)
+  source.write_text('void guest(){ps2_stubs::sceGsExecStoreImage(a,b,c);}\n')
+  self.assertTrue(audit_native_image_bindings(config,self.generated)['passed'])
+
+ def test_native_image_binding_needs_a_real_registered_handler(self):
+  config=self.p/'config.toml';config.write_text('[general]\nstubs=["sceGsExecLoadImage@0x100040"]\n')
+  self.assertFalse(audit_native_image_bindings(config,self.generated)['passed'])
+  config.write_text('[general]\nstubs=["sceGsExecLoadImage@0x100040", "sceGsExecStoreImage@0x100040"]\n')
+  with self.assertRaisesRegex(ValueError,'Conflicting'):audit_native_image_bindings(config,self.generated)

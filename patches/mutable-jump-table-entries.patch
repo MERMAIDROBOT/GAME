@@ -1,0 +1,15 @@
+--- a/ps2xRecomp/src/lib/control_flow_analyzer.cpp
++++ b/ps2xRecomp/src/lib/control_flow_analyzer.cpp
+@@ -403,7 +403,11 @@
+                         }
+                     }
+                 }
+-                if (!foundTable)
++                // A recognized static table does not prove the complete set of
++                // runtime JR destinations. Writable/relocated tables can select
++                // another decoded block in this function. Keep native reentry
++                // coverage even while retaining the fast switch for known cases.
++                if (!foundTable || jrInst->function == SPECIAL_JR)
+                 {
+                     needsIndirectFallback = true;
+                 }

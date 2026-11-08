@@ -19,6 +19,9 @@ class OverlayDispatch(unittest.TestCase):
             self.assertEqual(built.returncode, 0, built.stderr)
             run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("[overlay-miss] pc=00200000", run.stderr)
+            self.assertIn("candidate=a callable=1", run.stderr)
+            self.assertIn("002000f0:bbbb0002/aaaa0002", run.stderr)
 
 
 class OverlayDispatchPatch(unittest.TestCase):

@@ -66,6 +66,47 @@ Open translator gaps (not fixed):
 - VDIV/VRSQRT ignore the numerator and return 0 on divide-by-zero.
 - EE `C.cond.S` are host float compares.
 
+## Third-title promotions (Ratchet & Clank, 2026-10-24 to 2026-11-08)
+
+R&C was the first title whose gameplay lives almost entirely in run-time-loaded
+level programs, so most of what it taught is about overlays, VU0 concurrency and
+the GS image path. Work on the title stopped once these became shared engine
+behaviour; a fully playable port was never the goal. No title addresses,
+offsets or generated code are recorded here.
+
+| Rule | Where | What it fixed / why it is general | Test |
+|---|---|---|---|
+| Overlays are built by default once accepted; `overlay_build: false` is the opt-out | `native.overlay_build_directory` | A level-program title boots to a black screen if overlays are opt-in | `tests/test_native.py` |
+| Section-copy chains decode into a non-linear ELF; only the entry segment is executable | `overlay_segments.py`, `overlays.program_image` | Level files copy code, data and zero-fill sections to separate addresses. Translating them as one linear blob put data at guessed text-relative addresses | `tests/test_overlay_segments.py` |
+| Branch tails past an early `JR RA` are recovered, bounded by the next control transfer | `overlays.extend_branch_tails`, `branch_handoff_hints` | Density boundaries clipped alternate returns; compiled code handed off to unregistered PCs | `tests/test_overlays.py`, `tests/test_link_branch_resume.py` |
+| Direct overlay→resident calls become resident entries before linking | `resident_closure.py` | Level code calls into interiors of resident functions that the boot call graph never reaches | `tests/test_resident_closure.py` |
+| Register-jump (jump-table) entries are audited and must be covered | `indirect_entries.py`, `mutable-jump-table-entries.patch` | Tables written at run time dispatched to missing entries | `tests/test_indirect_entries.py`, `tests/test_mutable_jump_table.py` |
+| Overlay metadata (include guards, table initializers) is qualified per overlay | `overlays.qualify_metadata` | Two overlays in one unity unit silently dropped one table | `tests/test_overlays.py` |
+| VU0 runs concurrently with the EE; QMFC2/CFC2/QMTC2/CTC2 and macro ops emit SYNC/INTERLOCK | `vu0-concurrent.patch`, `overlays.vu0_sync_audit` | VU0 micro programs that poll a VI register deadlocked or read stale results. Old translations fail closed until regenerated | `tests/runtime_timer.cpp` (`testConcurrentVu0Server`) |
+| VU0 IBEQ poll loops are skipped in whole iterations when operands are ready | `tools/vu1_recomp.cpp` | Idle polling burned the whole VU0 slice budget | `tests/check_vu0_poll.py` |
+| MADD/MSUB product underflow sets US only; ZS/SS follow the final sum (Sony VU manual v6 p42) | `vu-product-underflow.patch`, `ps2_vu_float.h` | Previous runtime suppressed all intermediate flags | `tests/test_vu0_reference_forms.py`, `tests/test_vu_micro_reference.py` |
+| libgraph Load/StoreImage addresses are GS block units; no extra scaling | `gs-image-block-units.patch`, `libgraph-image-packet-abi.patch` | Uploads landed at the wrong VRAM block | `tests/test_gs_image_block_units.py` |
+| VIF1 DIRECT/DIRECTHL image data spans the full declared size | `vif1-direct-image-span.patch` | Texture bytes decoded as VIF commands and desynchronised the stream | `tests/test_vif1_direct_image_span.py` |
+| DBCMAN 2.x (libdbc/libpad2) controller RPC | `dbcman-v2-controller.patch` | Pad library newer than the libpad the runtime knew | none yet: patch-stack apply only |
+| MPEG: title-owned input buffers, multi-stream continuity, ADPCM movie audio to type-3 callbacks | `mpeg-title-owned-input.patch`, `mpeg-multistream-continuity.patch` | Second movie in a sequence stayed invisible | `tests/test_mpeg_fragment_decode.py` (multi-stream continuity has no dedicated test yet) |
+| Scanout qualification selects the circuit by PMODE.EN1/EN2, not the whole PMODE word | `scanout_qualification.hpp` | 512-wide CRT1 movies froze because only `PMODE==1`, width 640 was accepted | `tests/scanout_qualification.cpp` |
+| Present only GPU-completed fields; keep one pending candidate alive | `completion_gate.hpp` | Polling only the newest fence starved presentation under steady submission (sustained black screen) | `tests/completion_gate.cpp` |
+| Opt-in alpha proof / ordered-coverage refinement (`PS2_PORT_HW_GS_ALPHA_PROOF`, `..._ALPHA_COVERAGE`) | `alpha_proof.h`, `ordered_coverage.h` | 35% fewer draws on a 512-case fixture with identical output hash; not a measured frame-rate gain on any title | `tests/test_alpha_proof.py`, `tests/ordered_coverage.cpp` |
+| Disk budget checks before native relink and app signing | `native.require_native_link_space`, `require_signing_space` | Relink/sign failed mid-way on a full disk and left confusing state | `tests/test_signing_space.py` |
+| Patch stack keeps an unchanged prefix applied | `native.apply_runtime_patch` | Re-applying the whole stack touched every header and rebuilt every translated function | `tests/test_runtime_patch_stack.py` |
+
+Open gaps left when R&C work stopped (not fixed):
+- After repeated movie/loading transitions, guest asset relocation can overwrite
+  code. The first bad input/write was not identified. Do not paper over it by
+  skipping a class or faking a continuation; find the first bad write.
+- Save creation stalled in a scripted route; the no-save route works.
+- The scanout qualifier still carries three exact register snapshots for a
+  previous title's movie modes. They belong in a per-title profile.
+- Draw submission is still excessive in alpha-test-heavy scenes; the opt-in
+  refinements above have not been accepted on a real title yet.
+- Overlay translation scans section headers in Python over a window up to
+  ~28 MiB; fine for one disc, slow at scale.
+
 ## Remaining automation work, in dependency order
 
 1. Freeze v56's full source/flags/dependency closure and reproduce its link in an

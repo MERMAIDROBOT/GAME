@@ -17,7 +17,12 @@ def once(text,old,new):
 def window_source(text):
  text='#include "ps2port_surface/mac_surface_presenter.hpp"\n'+text
  text=once(text,'static void UploadFrame(Texture2D &tex,', '#if defined(__APPLE__)\nstatic ps2port::MacSurfacePresenter surfacePresenter;\nstatic void* surfaceProducerHandle=nullptr;\n#endif\nstatic std::uint64_t presentationWindowEpoch=0;\n\nstatic void UploadFrame(Texture2D &tex,')
- marker='    s_lastCompletedStamp=completedStamp;\n    PresentationPacing::uploaded(completedStamp.tick,completedStamp.generation,completedStamp.ingressSequence);'
+ markers=[
+  '    s_lastCompletedStamp=completedStamp;\n    PresentationPacing::uploaded(completedStamp.tick,completedStamp.generation,completedStamp.ingressSequence);',
+  '    s_lastCompletedStamp=completedStamp;\n    PresentationPacing::uploaded(completedStamp.tick, completedStamp.generation, completedStamp.ingressSequence);']
+ matches=[m for m in markers if text.count(m)==1]
+ if len(matches)!=1:raise ValueError('Unrecognized completed frame upload accounting')
+ marker=matches[0]
  # Successful delivery alone commits the dedup stamp. A pending fence/stale
  # token must be retried instead of marking an image as already uploaded.
  block='''#if defined(__APPLE__)
@@ -45,9 +50,10 @@ def window_source(text):
             if (!surfacePresenter.configureProducer(plugin)) throw std::runtime_error("Surface producer API missing from loaded plugin");
 #endif
         m_gs.setRasterBackend(std::move(backend));''')
- init='InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);'
- if text.count(init) not in (1,2):raise ValueError('Unrecognized window initialization branches')
- text=text.replace(init,init+''' ++presentationWindowEpoch;
+ inits=['InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);','InitWindow(windowWidth, windowHeight, title);']
+ if sum(text.count(init) for init in inits) not in (1,2):raise ValueError('Unrecognized window initialization branches')
+ for init in inits:
+  text=text.replace(init,init+''' ++presentationWindowEpoch;
 #if defined(__APPLE__)
         if (surfaceProducerHandle) {
             const char* zero=std::getenv("PS2_PORT_HW_GS_ZERO_COPY");

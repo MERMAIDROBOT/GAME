@@ -1,0 +1,20 @@
+diff --git a/ps2xRecomp/src/lib/control_flow_analyzer.cpp b/ps2xRecomp/src/lib/control_flow_analyzer.cpp
+--- a/ps2xRecomp/src/lib/control_flow_analyzer.cpp
++++ b/ps2xRecomp/src/lib/control_flow_analyzer.cpp
+@@ -141,6 +141,16 @@
+             if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_SYSCALL)
+             {
+                 queueResumeEntryTarget(inst.address + 4u);
++            }
++
++            // A REGIMM branch-and-link can return through JR $ra, even
++            // when its target was emitted as a local label in this function.
++            // The scheduler must reenter at the instruction after the delay slot.
++            if (inst.isBranch && inst.opcode == OPCODE_REGIMM &&
++                (inst.rt == REGIMM_BLTZAL || inst.rt == REGIMM_BGEZAL ||
++                 inst.rt == REGIMM_BLTZALL || inst.rt == REGIMM_BGEZALL))
++            {
++                queueResumeEntryTarget(inst.address + 8u);
+             }
+ 
+             bool isStaticJump = (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL);

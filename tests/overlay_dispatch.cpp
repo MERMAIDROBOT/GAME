@@ -36,9 +36,13 @@ int main() {
     hit = registry.resolve(ram.get(), 0x200010u);
     CHECK(hit.covered && hit.function == nullptr);
 
+    // Partial replacement stays rejected even when bounded diagnostics are enabled.
+    setenv("PS2_PORT_OVERLAY_MISS_TRACE", "1", 1);
     // Partially overwritten signature: neither program is resident.
     put(ram.get(), 0x2000F0u, 0xBBBB0002u);
     CHECK(!registry.resolve(ram.get(), 0x200000u).covered);
+
+    unsetenv("PS2_PORT_OVERLAY_MISS_TRACE");
 
     // B loaded: the cached A entry must not win.
     put(ram.get(), 0x200020u, 0xBBBB0001u);

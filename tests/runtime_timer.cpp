@@ -1,10 +1,13 @@
 // Synthetic runtime test: no retail data or generated game functions.
 #include "ps2_runtime.h"
+#include "ps2port_surface/surface_token.hpp"
+#include <optional>
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_stubs.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
+#include "runtime/gs/ps2_gs_psmt8.h"
 #include "runtime/gs/gs_threaded_backend.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include <cstring>
@@ -23,7 +26,7 @@ extern const uint32_t g_ps2RecompiledFunctionTableBase = 0x00100000u;
 extern const uint32_t g_ps2RecompiledFunctionTableEnd = 0x0010000cu;
 extern const uint32_t g_ps2RecompiledFunctionTableSlotCount = 3u;
 PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[3] = {};
-namespace ps2_stubs { void sceVu0InnerProduct(uint8_t*, R5900Context*, PS2Runtime*); void sceVu0MulMatrix(uint8_t*, R5900Context*, PS2Runtime*); void sceVu0ApplyMatrix(uint8_t*, R5900Context*, PS2Runtime*); void sceDmaPutEnv(uint8_t*, R5900Context*, PS2Runtime*); }
+namespace ps2_stubs { void notifyMpegCdStreamDataProduced(uint32_t,bool); void sceVu0InnerProduct(uint8_t*, R5900Context*, PS2Runtime*); void sceVu0MulMatrix(uint8_t*, R5900Context*, PS2Runtime*); void sceVu0ApplyMatrix(uint8_t*, R5900Context*, PS2Runtime*); void sceDmaPutEnv(uint8_t*, R5900Context*, PS2Runtime*); }
 static uint32_t expected = 0;
 static bool finished = false;
 
@@ -137,12 +140,16 @@ void audioStart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
     ps2_stubs::sceMpegInit(rdram, ctx, runtime);
     SET_GPR_U32(ctx, 4, 0x120000u);
     SET_GPR_U32(ctx, 5, 2u);
-    SET_GPR_U32(ctx, 6, 0u);
-    SET_GPR_U32(ctx, 7, 0x100008u);
-    SET_GPR_U32(ctx, 8, 0x1234u);
-    ps2_stubs::sceMpegAddStrCallback(rdram, ctx, runtime);
-    // Synthetic MPEG-2 private PES containing a fake audio header.
-    const uint8_t packet[] = {0,0,1,0xbd,0,15,0x80,0,0,0xa0,0,0,0,'S','S','h','d',0,0,0,0};
+    // Register a different-language sink too: exact substream matching must
+    // never send channel zero to its opaque 0x5678 callback.
+    for (unsigned channel=0;channel<2;++channel) {
+        SET_GPR_U32(ctx, 6, channel);
+        SET_GPR_U32(ctx, 7, 0x100008u);
+        SET_GPR_U32(ctx, 8, channel ? 0x5678u : 0x1234u);
+        ps2_stubs::sceMpegAddStrCallback(rdram, ctx, runtime);
+    }
+    // SDK PCM private-stream header FF A0 00 channel, followed by synthetic data.
+    const uint8_t packet[] = {0,0,1,0xbd,0,15,0x80,0,0,0xff,0xa0,0,0,'S','S','h','d',0,0,0,0};
     std::memcpy(rdram + 0x130000u, packet, sizeof(packet));
     SET_GPR_U32(ctx, 4, 0x120000u);
     SET_GPR_U32(ctx, 5, 0x130000u);
@@ -159,6 +166,117 @@ void audioStart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
     // restarts audioStart indefinitely when the service transfers control.
     SET_GPR_U32(ctx, 31, 0x100004u);
     audioGuestDemux(rdram, ctx, runtime);
+}
+
+// Asset-free title-owned movie fixture: reject, retry, wrap and a second accepting sink.
+static unsigned ownedCalls[2] = {0,0}, ownedRound = 0;
+static bool ownedFinished = false, ownedLinear = false;
+static unsigned ownedNodataCalls = 0;
+static constexpr uint32_t ownedBase = 0x130000u, ownedMpeg = 0x120000u;
+static const uint8_t ownedPayload[] = {0,0,1,0xb3,0x14,0,0xf0,0x14,1,2,3,4};
+void ownedCallback(uint8_t *ram, R5900Context *ctx, PS2Runtime *) {
+    const unsigned sink = getRegU32(ctx,6);
+    if(sink==99) { ++ownedNodataCalls; SET_GPR_U32(ctx,2,0);ctx->pc=0;return; }
+    if(sink>1) throw std::runtime_error("Invalid synthetic movie sink");
+    const uint32_t record=getRegU32(ctx,5)&PS2_RAM_MASK;
+    uint32_t address=0,len=0,type=99;
+    std::memcpy(&type,ram+record,4);std::memcpy(&address,ram+record+8,4);std::memcpy(&len,ram+record+12,4);
+    if(type!=0 || address!=ownedBase+61 || len!=sizeof(ownedPayload))
+        throw std::runtime_error("Owned movie callback lost original ring pointer/type/length");
+    for(unsigned n=0;n<len;++n)
+        if(ram[ownedBase+(ownedLinear?61+n:(61+n)%64)]!=ownedPayload[n])
+            throw std::runtime_error("Owned movie callback lost wrapped payload bytes");
+    ++ownedCalls[sink];
+    SET_GPR_U32(ctx,2,sink==1 && ownedCalls[1]==1 ? 0u : 1u);
+    ctx->pc=0;
+}
+void ownedDemux(uint8_t *ram,R5900Context *ctx,PS2Runtime *runtime,uint32_t offset,uint32_t count) {
+    SET_GPR_U32(ctx,4,ownedMpeg);SET_GPR_U32(ctx,5,ownedBase+offset);
+    SET_GPR_U32(ctx,6,count);SET_GPR_U32(ctx,7,ownedBase);SET_GPR_U32(ctx,8,64);
+    const uint32_t size=64;std::memcpy(ram+((getRegU32(ctx,29)+16)&PS2_RAM_MASK),&size,4);
+    SET_GPR_U32(ctx,31,0x100004u);ctx->pc=0x100004u;
+    if(ownedLinear)ps2_stubs::sceMpegDemuxPss(ram,ctx,runtime);
+    else ps2_stubs::sceMpegDemuxPssRing(ram,ctx,runtime);
+}
+void ownedEnd(uint8_t *ram,R5900Context *ctx,PS2Runtime *runtime) {
+    if(ownedRound++==0) {
+        if(getRegU32(ctx,2)!=12 || ownedCalls[0]!=1 || ownedCalls[1]!=1)
+            throw std::runtime_error("Rejected movie PES advanced the ring past its header prefix");
+        ownedDemux(ram,ctx,runtime,52,21);
+    } else if(ownedRound==2) {
+        if(getRegU32(ctx,2)!=21 || ownedCalls[0]!=1 || ownedCalls[1]!=2)
+            throw std::runtime_error("Movie retry lost data or repeated an already accepting sink");
+        // Disc EOF may already be known, but the title still owes compressed video.
+        SET_GPR_U32(ctx,4,ownedMpeg);SET_GPR_U32(ctx,5,0x180000u);ctx->pc=0x100004u;
+        ps2_stubs::sceMpegGetPicture(ram,ctx,runtime);
+    } else {
+        if(ownedNodataCalls!=1 || getRegU32(ctx,2)!=uint32_t(-1))
+            throw std::runtime_error("Disc EOF bypassed title-owned video drain");
+        ownedFinished=true;runtime->requestStop();ctx->pc=0;
+    }
+}
+void ownedStart(uint8_t *ram,R5900Context *ctx,PS2Runtime *runtime) {
+    runtime->eeScheduler().setupCurrentThread(0x1ff8000u,0x8000u,0u);
+    ownedCalls[0]=ownedCalls[1]=ownedRound=ownedNodataCalls=0;ownedFinished=false;
+    ps2_stubs::sceMpegInit(ram,ctx,runtime);
+    ps2_stubs::notifyMpegCdStreamDataProduced(33,true);
+    for(unsigned sink=0;sink<2;++sink) {
+        SET_GPR_U32(ctx,4,ownedMpeg);SET_GPR_U32(ctx,5,0);SET_GPR_U32(ctx,6,0);
+        SET_GPR_U32(ctx,7,0x100008u);SET_GPR_U32(ctx,8,sink);
+        std::memcpy(ram+((getRegU32(ctx,29)+16)&PS2_RAM_MASK),&sink,4);
+        ps2_stubs::sceMpegAddStrCallback(ram,ctx,runtime);
+    }
+    SET_GPR_U32(ctx,4,ownedMpeg);SET_GPR_U32(ctx,5,1);SET_GPR_U32(ctx,6,0x100008u);SET_GPR_U32(ctx,7,99);
+    ps2_stubs::sceMpegAddCallback(ram,ctx,runtime);
+    const uint8_t pack[]={0,0,1,0xba,0x21,0,0,0,0,0,0,0};
+    const uint8_t pes[]={0,0,1,0xe0,0,15,0x80,0,0};
+    for(unsigned n=0;n<sizeof(pack);++n)ram[ownedBase+(ownedLinear?40+n:(40+n)%64)]=pack[n];
+    for(unsigned n=0;n<sizeof(pes);++n)ram[ownedBase+(ownedLinear?52+n:(52+n)%64)]=pes[n];
+    for(unsigned n=0;n<sizeof(ownedPayload);++n)ram[ownedBase+(ownedLinear?61+n:(61+n)%64)]=ownedPayload[n];
+    ownedDemux(ram,ctx,runtime,52,8);
+    if(getRegU32(ctx,2)!=0 || ownedCalls[0] || ownedCalls[1])
+        throw std::runtime_error("Incomplete PES was consumed before its payload was available");
+    ownedDemux(ram,ctx,runtime,40,33);
+}
+static void testIpuInputDma(PS2Runtime &runtime) {
+    std::vector<uint8_t> received;auto &memory=runtime.memory();
+    memory.setIpuInputSink([&](const uint8_t *data,uint32_t bytes){received.insert(received.end(),data,data+bytes);});
+    auto *ram=memory.getRDRAM();for(unsigned n=0;n<32;++n)ram[0x140000+n]=uint8_t(n+1);
+    memory.write32(0x1000b410,0x140000);memory.write32(0x1000b420,2);memory.write32(0x1000b400,0x100);
+    if(received.size()!=32 || received[31]!=32 || memory.read32(0x1000b420)!=0 || (memory.read32(0x1000b400)&0x100))
+        throw std::runtime_error("IPU normal input DMA lost data or completion");
+    received.clear();const uint64_t tag=uint64_t(7u)<<28|2u;
+    std::memcpy(ram+0x13fff0,&tag,8);
+    memory.write32(0x1000b430,0x13fff0);memory.write32(0x1000b400,0x104);
+    if(received.size()!=32 || received[31]!=32 || memory.read32(0x1000b430)!=0x140020)
+        throw std::runtime_error("IPU END source chain lost its inline payload");
+    received.clear();
+    const uint64_t call=uint64_t(0x150100u)<<32 | uint64_t(5u)<<28 | 1u;
+    const uint64_t ret=uint64_t(6u)<<28 | 1u, end=uint64_t(7u)<<28;
+    std::memcpy(ram+0x150000,&call,8);std::memcpy(ram+0x150020,&end,8);std::memcpy(ram+0x150100,&ret,8);
+    std::memcpy(ram+0x150010,ram+0x140000,16);std::memcpy(ram+0x150110,ram+0x140010,16);
+    memory.write32(0x1000b430,0x150000);memory.write32(0x1000b400,0x104);
+    if(received.size()!=32 || received[31]!=32 || (memory.read32(0x1000b400)&0x30))
+        throw std::runtime_error("IPU CALL/RET source chain failed");
+    received.clear();std::memcpy(memory.getScratchpad(),ram+0x140000,16);
+    memory.write32(0x1000b410,0x80000000);memory.write32(0x1000b420,1);memory.write32(0x1000b400,0x100);
+    if(received.size()!=16 || received[15]!=16)throw std::runtime_error("IPU DMA SPR address flag was lost");
+    received.clear();bool invalid=false;
+    try { memory.write32(0x1000b410,PS2_RAM_SIZE-16);memory.write32(0x1000b420,2);memory.write32(0x1000b400,0x100); }
+    catch(const std::runtime_error &) { invalid=true; }
+    if(!invalid || !received.empty())throw std::runtime_error("Invalid IPU DMA was silently completed");
+    // Source-chain to SPR must transfer all REF/END payloads, including ring wrap and a completion marker.
+    const uint64_t ref=uint64_t(0x140000u)<<32 | uint64_t(3u)<<28 | 2u;
+    const uint64_t sprEnd=uint64_t(7u)<<28 | 1u;
+    std::memcpy(ram+0x160000,&ref,8);std::memcpy(ram+0x160010,&sprEnd,8);
+    std::memcpy(ram+0x160020,ram+0x140000,16);
+    std::memset(memory.getScratchpad(),0xff,PS2_SCRATCHPAD_SIZE);
+    memory.write32(0x1000d430,0x160000);memory.write32(0x1000d420,0);memory.write32(0x1000d480,0x3ff0);memory.write32(0x1000d400,0x104);
+    if(std::memcmp(memory.getScratchpad()+0x3ff0,ram+0x140000,16) || std::memcmp(memory.getScratchpad(),ram+0x140010,16) ||
+       std::memcmp(memory.getScratchpad()+16,ram+0x140000,16) || memory.read32(0x1000d480)!=0x20 || memory.read32(0x1000d430)!=0x160030 ||
+       (memory.read32(0x1000d400)&0x100)) throw std::runtime_error("Source-chain to SPR skipped payload, wrap, marker or completion");
+    memory.setIpuInputSink({});
+    std::cout<<"PASS: IPU normal, END/CALL/RET, scratchpad, invalid-input and to-SPR source-chain DMA\n";
 }
 
 static unsigned graphicsIrqCount = 0;
@@ -186,6 +304,9 @@ void ps2PortPublishPadState(const uint8_t *state);
 class QueueTestBackend final : public GSRasterBackend {
 public:
     std::vector<uint32_t> events;
+    std::optional<ps2port::SurfaceToken> surfaceToken;
+    std::shared_ptr<const void> surfaceResource;
+    bool mismatchedSurface = false;
     bool fail = false;
     bool gateFlush = false, flushEntered = false, releaseFlush = false;
     std::mutex gateMutex;
@@ -212,6 +333,13 @@ public:
     void Sync(GSSyncReason) override { events.push_back(26); }
     PresentationFrame Present(const GSPresentationRequest&) override {
         events.push_back(27); PresentationFrame result;
+        if (surfaceToken) {
+            result.width = mismatchedSurface ? surfaceToken->width / 2 : surfaceToken->width;
+            result.height = surfaceToken->height;
+            result.pixels = ps2port::encodeSurfaceToken(*surfaceToken);
+            result.retainedResource = surfaceResource;
+            return result;
+        }
         result.pixels.assign(events.begin(),events.end()); return result;
     }
     bool ClearFramebuffer(const GSContext&, uint32_t) override { events.push_back(28); return true; }
@@ -221,6 +349,45 @@ public:
     void SnapshotVram(std::vector<uint8_t>& out) const override { out.assign(events.begin(), events.end()); }
     GSTransferSnapshot GetTransferSnapshot() const override { GSTransferSnapshot s; s.copiedPixels=events.size(); return s; }
 };
+static void testSurfaceTokenFrontend() {
+    setenv("PS2_PORT_HEADLESS","1",1);
+    PS2Runtime runtime;
+    if (!runtime.initialize("Synthetic surface-token frontend")) throw std::runtime_error("Surface fixture init failed");
+    auto backend = std::make_unique<QueueTestBackend>(); auto *observed = backend.get();
+    observed->surfaceToken = ps2port::SurfaceToken{123,1280,896};
+    setenv("PS2_PORT_GS_PROFILE","1",1);
+    runtime.gs().setRasterBackend(std::move(backend));
+    runtime.gs().latchHostPresentationFrame();
+    std::vector<uint8_t> pixels;uint32_t width=0,height=0;
+    if(!runtime.gs().copyLatchedHostPresentationFrame(pixels,width,height) || width!=1280 || height!=896 ||
+       pixels!=ps2port::encodeSurfaceToken(*observed->surfaceToken))
+        throw std::runtime_error("Frontend interpreted a native surface lease as pixel rows");
+    auto lease = std::make_shared<int>(42);
+    std::weak_ptr<const void> lifetime = lease;
+    observed->surfaceResource = lease;
+    runtime.gs().latchHostPresentationFrame();
+    observed->surfaceResource.reset(); lease.reset();
+    if (lifetime.expired())
+        throw std::runtime_error("Latched surface lost its producer lease");
+    std::shared_ptr<const void> windowResource;
+    if (!runtime.gs().copyLatchedHostPresentationFrame(pixels,width,height,nullptr,nullptr,nullptr,nullptr,&windowResource))
+        throw std::runtime_error("Surface ownership handoff failed");
+    observed->surfaceToken->serial++;
+    runtime.gs().latchHostPresentationFrame();
+    if (lifetime.expired())
+        throw std::runtime_error("Replacing the host frame invalidated a window's pending surface");
+    windowResource.reset();
+    if (!lifetime.expired())
+        throw std::runtime_error("Completed surface consumer leaked the producer lease");
+    observed->mismatchedSurface=true;runtime.gs().latchHostPresentationFrame();
+    windowResource = std::make_shared<int>(7);
+    if(runtime.gs().copyLatchedHostPresentationFrame(pixels,width,height,nullptr,nullptr,nullptr,nullptr,&windowResource))
+        throw std::runtime_error("Frontend accepted mismatched native surface dimensions");
+    if (windowResource) throw std::runtime_error("Rejected surface retained a stale window resource");
+    unsetenv("PS2_PORT_GS_PROFILE");
+    std::cout<<"PASS: surface-token frontend passthrough and dimension rejection\n";
+}
+
 static void testRendererQueue() {
     const int savedRound=std::fegetround();
     std::fesetround(FE_DOWNWARD);
@@ -453,6 +620,181 @@ static void testTrianglePixelCenters() {
     std::cout<<"PASS: fractional triangle covers exactly ten integer pixel centers"<<std::endl;
 }
 
+// libgraph image transfers: vram_addr is already the GS block number, and StoreImage must not need guest
+// heap space (titles may claim the whole heap). Negative control: block 0 holds different pixels.
+// VIF1 DIRECT: a GIF IMAGE packet may span several DIRECTs; its remaining quadwords arrive as the next DIRECT's
+// payload, never as raw VIF stream data. A DIRECT split across VIF1 data chunks continues in the next chunk.
+// The MARK after them proves the interpreter stayed on the command stream (the old path ate the second DIRECT).
+static void testVif1DirectImageSpan() {
+ setenv("PS2_PORT_HEADLESS","1",1);PS2Runtime runtime;if(!runtime.initialize("Synthetic VIF1 DIRECT image span"))throw std::runtime_error("Synthetic VIF1 initialization failed");
+ auto &memory=runtime.memory();
+ std::vector<uint32_t> w(24,0u);
+ w[3]=0x50000001u;                                                   // DIRECT 1: GIF tag only
+ const uint64_t tag=2ull|(1ull<<15)|(2ull<<58);std::memcpy(&w[4],&tag,8); // IMAGE, NLOOP 2, EOP
+ w[11]=0x50000002u;                                                  // DIRECT 2: the image data
+ for(unsigned i=12;i<20;++i)w[i]=0xA5A50000u+i;
+ w[20]=0x07001234u;                                                  // MARK 0x1234
+ auto run=[&](const std::vector<uint32_t> &stream,uint32_t split,const char *what){
+  memory.vif1_regs.mark=0;
+  const auto *bytes=reinterpret_cast<const uint8_t*>(stream.data());const uint32_t size=uint32_t(stream.size()*4);
+  if(split){memory.processVIF1Data(bytes,split);memory.processVIF1Data(bytes+split,size-split);}
+  else memory.processVIF1Data(bytes,size);
+  if(memory.vif1_regs.mark!=0x1234u)throw std::runtime_error(std::string("VIF1 lost the command stream: ")+what);
+ };
+ run(w,0,"image continued in a second DIRECT");
+ // A PACKED register packet split across two DIRECTs: the second payload continues it (no new tag). If the
+ // continuation were read as a tag, its A+D words (FRAME_1 = 0x4C) would land in random registers.
+ std::vector<uint32_t> p(28,0u);
+ p[3]=0x50000002u;                                                   // DIRECT 2: tag + first A+D
+ const uint64_t packed=2ull|(1ull<<15)|(0ull<<58)|(1ull<<60);std::memcpy(&p[4],&packed,8);
+ const uint64_t areg=0xEull;std::memcpy(&p[6],&areg,8);              // REGS = A+D
+ const uint64_t frame1=0x00000123ull,frame1Reg=0x4Cull;std::memcpy(&p[8],&frame1,8);std::memcpy(&p[10],&frame1Reg,8);
+ p[15]=0x50000001u;                                                  // DIRECT 1: the second A+D
+ const uint64_t frame2=0x00000045ull;std::memcpy(&p[16],&frame2,8);std::memcpy(&p[18],&frame1Reg,8);
+ p[20]=0x07001234u;
+ run(p,0,"PACKED packet continued in a second DIRECT");
+ if(runtime.gs().getContextFrame(0).fbp!=0x45u)
+  throw std::runtime_error("PACKED continuation was not applied as the packet's second A+D (FRAME_1 fbp "+std::to_string(runtime.gs().getContextFrame(0).fbp)+")");
+ run(p,64,"PACKED packet continued across data chunks");
+ if(runtime.gs().getContextFrame(0).fbp!=0x45u)throw std::runtime_error("PACKED continuation across chunks was misread");
+ run(w,64,"DIRECT payload split across data chunks");          // first chunk ends after one image quadword
+ // Negative control: without the second DIRECT header the bytes are not image data, so MARK is not reached
+ // at its old offset; a correct interpreter must not treat stray data as a continuation either way.
+ std::cout<<"PASS: VIF1 DIRECT image spans and chunk-split DIRECT keep the command stream\n";
+}
+
+static void testGsLibgraphPacketABI() {
+ setenv("PS2_PORT_HEADLESS", "1", 1);
+ PS2Runtime runtime;
+ if (!runtime.initialize("Synthetic libgraph packet ABI") || !runtime.syncCoreSubsystems())
+  throw std::runtime_error("Libgraph fixture initialization failed");
+ auto *ram = runtime.memory().getRDRAM();
+ auto arguments = [&](uint32_t descriptor) {
+  R5900Context ctx{};
+  const uint32_t args[8] = {descriptor, 6000, 1, 0, 3, 4, 2, 2};
+  for (unsigned i=0; i<8; ++i) SET_GPR_U32(&ctx, 4+i, args[i]);
+  SET_GPR_U32(&ctx, 29, 0x18000);
+  return ctx;
+ };
+ auto load = arguments(0x4000);
+ std::memset(ram+0x4000, 0xa5, 128);
+ ps2_stubs::sceGsSetDefLoadImage(ram, &load, &runtime);
+ uint64_t packet[14]{};
+ std::memcpy(packet, ram+0x4000, 96);
+ if (getRegU32(&load,2)!=6 || packet[0]!=(4ull|(1ull<<60)) || packet[1]!=14 ||
+     packet[3]!=0x50 || packet[5]!=0x51 || packet[7]!=0x52 || packet[9]!=0x53 ||
+     packet[10]!=(1ull|0x8000ull|(2ull<<58)) || packet[11]!=0 || ram[0x4060]!=0xa5)
+  throw std::runtime_error("SetDefLoadImage must construct the six-qword inline libgraph packet");
+ const uint32_t colors[4] = {0x80123456,0x80765432,0x80abcdef,0x80987654};
+ std::memcpy(packet+12,colors,16);
+ // A caller can append pixels and send this directly, without ExecLoadImage.
+ runtime.memory().submitGifPacket(GifPathId::Path3,reinterpret_cast<const uint8_t*>(packet),sizeof(packet));
+ for (unsigned i=0;i<4;++i)
+  if (runtime.gs().ReadVram(0,6000,1,3+i%2,4+i/2)!=colors[i])
+   throw std::runtime_error("Inline libgraph image packet did not upload its pixels");
+ auto store = arguments(0x4200);
+ std::memset(ram+0x4200,0xa5,128);
+ ps2_stubs::sceGsSetDefStoreImage(ram,&store,&runtime);
+ uint64_t stored[14]{};std::memcpy(stored,ram+0x4200,sizeof(stored));
+ if (getRegU32(&store,2)!=7 || stored[2]!=(5ull|0x8000ull|(1ull<<60)) || stored[3]!=14 ||
+     stored[5]!=0x50 || stored[7]!=0x51 || stored[9]!=0x52 || stored[11]!=0x61 ||
+     stored[12]!=1 || stored[13]!=0x53 || ram[0x4270]!=0xa5)
+  throw std::runtime_error("SetDefStoreImage must construct the seven-qword VIF/FINISH packet");
+ SET_GPR_U32(&store,4,0x4200);SET_GPR_U32(&store,5,0xa000);
+ ps2_stubs::sceGsExecStoreImage(ram,&store,&runtime);
+ if (int32_t(getRegU32(&store,2)) || std::memcmp(ram+0xa000,colors,16))
+  throw std::runtime_error("Native StoreImage cannot decode a canonical libgraph descriptor");
+ SET_GPR_U32(&load,4,0x4000);SET_GPR_U32(&load,5,0xa000);
+ ps2_stubs::sceGsExecLoadImage(ram,&load,&runtime);
+ if (int32_t(getRegU32(&load,2)))
+  throw std::runtime_error("Native LoadImage cannot decode a canonical libgraph descriptor");
+ std::cout << "PASS: real libgraph packet ABI supports inline upload and native load/store roundtrip\n";
+}
+
+static void testGsImageTransferWidths() {
+ setenv("PS2_PORT_HEADLESS", "1", 1);
+ PS2Runtime runtime;
+ if (!runtime.initialize("Synthetic indexed transfer widths") || !runtime.syncCoreSubsystems())
+  throw std::runtime_error("Image width fixture initialization failed");
+ auto *ram = runtime.memory().getRDRAM();
+ uint32_t packetBytes = 0;
+ // Observe the SDK's actual packet, then feed it to the ordinary GS decoder.
+ runtime.memory().setGifArbiter(nullptr);
+ runtime.memory().setGifPacketCallback([&](const uint8_t *data, uint32_t size) {
+  packetBytes += size;
+  runtime.gs().processGIFPacket(data, size);
+ });
+ for (const unsigned format : {1u, 27u, 36u, 44u}) {
+  const unsigned payload = format == 1 ? 96 : format == 27 ? 32 : 16;
+  const uint16_t fields[5] = {0, 0, 16, 2, 0x2c00};
+  std::memcpy(ram + 0x4100, fields, sizeof(fields));
+  ram[0x410a] = 1; ram[0x410b] = format;
+  for (unsigned i = 0; i < 128; ++i) ram[0x10000 + i] = uint8_t(i * 13u + 1u);
+  R5900Context ctx{};
+  SET_GPR_U32(&ctx, 4, 0x4100); SET_GPR_U32(&ctx, 5, 0x10000);
+  packetBytes = 0;
+  ps2_stubs::sceGsExecLoadImage(ram, &ctx, &runtime);
+  if (int32_t(getRegU32(&ctx, 2)) || packetBytes != 96 + payload)
+   throw std::runtime_error("SDK image packet uses VRAM storage width instead of transfer width");
+  for (unsigned pixel = 0; pixel < 32; ++pixel) {
+   unsigned expected;
+   if (format == 1) expected = ram[0x10000 + pixel*3] | (ram[0x10001 + pixel*3] << 8) | (ram[0x10002 + pixel*3] << 16);
+   else if (format == 27) expected = ram[0x10000 + pixel];
+   else expected = (ram[0x10000 + pixel/2] >> ((pixel & 1)*4)) & 15;
+   if (runtime.gs().ReadVram(format, 0x2c00, 1, pixel % 16, pixel / 16) != expected)
+    throw std::runtime_error("Packed image transfer changed decoded texels");
+  }
+ }
+ std::cout << "PASS: 24-bit and high-lane indexed uploads use packed transfer sizes\n";
+}
+
+static void testGsImageBlockUnits() {
+ setenv("PS2_PORT_HEADLESS","1",1);PS2Runtime runtime;if(!runtime.initialize("Synthetic GS image block units"))throw std::runtime_error("Synthetic GS image initialization failed");
+ auto *ram=runtime.memory().getRDRAM();
+ auto image=[&](uint32_t at,uint16_t block){uint16_t h[5]={0,0,2,2,block};std::memcpy(ram+at,h,10);ram[at+10]=1;ram[at+11]=0;};
+ const uint8_t pixels[16]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
+ image(0x4000,3000);std::memcpy(ram+0x5000,pixels,16);
+ R5900Context load{};SET_GPR_U32(&load,4,0x4000);SET_GPR_U32(&load,5,0x5000);
+ ps2_stubs::sceGsExecLoadImage(ram,&load,&runtime);
+ if(int32_t(getRegU32(&load,2))!=0)throw std::runtime_error("sceGsExecLoadImage failed");
+ std::vector<uint32_t> claimed;
+ for(uint32_t size=16u<<20;size>=16u;size/=2u)while(const uint32_t a=runtime.guestMalloc(size,16u))claimed.push_back(a);
+ if(runtime.guestMalloc(16u,16u))throw std::runtime_error("fixture must exhaust the guest heap");
+ {
+  // A wide indexed texture must reach VRAM even when a title owns the heap.
+  const uint16_t fields[5] = {0, 0, 512, 64, 0x2818};
+  std::memcpy(ram + 0x4100, fields, sizeof(fields));
+  ram[0x410a] = 8;
+  ram[0x410b] = GS_PSM_T8;
+  for (uint32_t i = 0; i < 512u * 64u; ++i)
+   ram[0x10000 + i] = static_cast<uint8_t>(i * 13u + i / 512u + 1u);
+  R5900Context upload{};
+  SET_GPR_U32(&upload, 4, 0x4100);
+  SET_GPR_U32(&upload, 5, 0x10000);
+  ps2_stubs::sceGsExecLoadImage(ram, &upload, &runtime);
+  if (int32_t(getRegU32(&upload, 2)) != 0)
+   throw std::runtime_error("LoadImage rejected an indexed texture with an exhausted guest heap");
+  // LoadImage queues work; a direct VRAM assertion must wait for the worker.
+  runtime.gs().refreshDisplaySnapshot();
+  for (uint32_t y = 0; y < 64; ++y)
+   for (uint32_t x = 0; x < 512; ++x) {
+    const uint32_t offset = GSPSMT8::addrPSMT8(0x2818, 8, x, y);
+    if (runtime.memory().getGSVRAM()[offset] != ram[0x10000 + y * 512 + x])
+     throw std::runtime_error("Heap-independent LoadImage lost indexed texture pixels");
+   }
+ }
+ R5900Context store{};SET_GPR_U32(&store,4,0x4000);SET_GPR_U32(&store,5,0x6000);
+ ps2_stubs::sceGsExecStoreImage(ram,&store,&runtime);
+ if(int32_t(getRegU32(&store,2))!=0)throw std::runtime_error("sceGsExecStoreImage needs guest heap space (title-owned heap gets no photo)");
+ if(std::memcmp(ram+0x6000,pixels,16))throw std::runtime_error("sceGsExecStoreImage did not read block 3000 (vram_addr scaled)");
+ image(0x4000,0);std::memset(ram+0x6000,0,16);
+ R5900Context other{};SET_GPR_U32(&other,4,0x4000);SET_GPR_U32(&other,5,0x6000);
+ ps2_stubs::sceGsExecStoreImage(ram,&other,&runtime);
+ if(!std::memcmp(ram+0x6000,pixels,16))throw std::runtime_error("negative control: block 0 must not hold the image");
+ for(uint32_t a:claimed)runtime.guestFree(a);
+ std::cout<<"PASS: GS image vram_addr is block units; StoreImage works with an exhausted guest heap\n";
+}
+
 static void testGsParameterABI() {
  setenv("PS2_PORT_HEADLESS","1",1);PS2Runtime runtime;if(!runtime.initialize("Synthetic SCE GS parameter ABI"))throw std::runtime_error("Synthetic GS ABI initialization failed");
  for(unsigned field:{0u,1u}){
@@ -482,14 +824,14 @@ static void testInterlacedPresentationRows() {
   req.display2=636ull|(50ull<<12)|(4ull<<23)|(2559ull<<32)|(447ull<<44);
   auto image=backend.Present(req);if(image.width!=512||image.height!=448)throw std::runtime_error("Unexpected CPU bob output size");
   for(unsigned y=0;y<448;y++)for(unsigned x=0;x<512;x++) {
-   const unsigned source=frameMode?y/2:2*(y/2)+(n%2);const uint32_t expected=color(source);const size_t at=(y*640+x)*4;
+   const unsigned source=frameMode?y/2:y;const uint32_t expected=color(source);const size_t at=(y*640+x)*4;
    for(unsigned c=0;c<3;c++)if(image.pixels[at+c]!=uint8_t(expected>>(c*8))) {
     std::cout<<"Mismatch field="<<n<<" FFMD="<<frameMode<<" phase="<<n%2<<" x="<<x<<" y="<<y<<" source_row="<<source<<"\n";
-    throw std::runtime_error("CPU bob presentation differs from independently qualified GPU raw field rows");
+    throw std::runtime_error("CPU presentation differs from field-weave/frame-line-doubling contract");
    }
   }
  }
- std::cout<<"PASS: 32 CPU bob frames preserve GPU-qualified consecutive/even/odd source rows\n";
+ std::cout<<"PASS: 32 CPU frames preserve field weave and frame-mode line doubling\n";
 
 }
 
@@ -559,7 +901,67 @@ static void testGsAnalogCRT() {
 
 }
 
-int main() {
+static void testConcurrentVu0Server(PS2Runtime &runtime) {
+    // Synthetic server: wait for the EE to clear VI1, publish VI2=7, then end.
+    // Running the program to a cap and discarding it loses the later EE write.
+    auto *code=runtime.memory().getVU0Code();
+    std::memset(code,0,PS2_VU0_CODE_SIZE);
+    const auto pair=[&](unsigned at,uint32_t lower,uint32_t upper){
+        std::memcpy(code+at,&lower,4);std::memcpy(code+at+4,&upper,4);
+    };
+    constexpr uint32_t upperNop=0x000002ffu;
+    pair(0,(0x29u<<25)|(1u<<11)|0x7ffu,upperNop); // IBNE vi1,vi0,-1
+    pair(8,0,upperNop);                              // branch delay
+    pair(16,(0x08u<<25)|(2u<<16)|7u,upperNop|0x40000000u); // IADDIU vi2,vi0,7; E
+    pair(24,0,upperNop);                             // end delay
+    R5900Context ctx{};ctx.vi[1]=1;
+    runtime.vu0StartMicroProgram(runtime.memory().getRDRAM(),&ctx,0);
+    if(!ctx.vu0_concurrent || !PS2_VU0_BUSY(&ctx,&runtime) || ctx.vi[2]!=0)
+        throw std::runtime_error("VU0 server was discarded or advanced past its EE handshake");
+    ctx.vi[1]=0;
+    PS2_VU0_SYNC_WRITE(&ctx,&runtime);
+    PS2_VU0_INTERLOCK(&ctx,&runtime);
+    if(ctx.vu0_concurrent || ctx.vi[2]!=7 || PS2_VU0_BUSY(&ctx,&runtime))
+        throw std::runtime_error("VU0 server lost the EE register write or failed to publish its completed result");
+    std::memset(code,0,PS2_VU0_CODE_SIZE);
+    std::cout<<"PASS: concurrent VU0 server survives start budget, accepts EE handshake and publishes before interlock returns\n";
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && std::string(argv[1]) == "--gs-image-only") {
+        testGsLibgraphPacketABI();
+        testGsImageBlockUnits();
+        testGsImageTransferWidths();
+        return 0;
+    }
+    if(argc==2 && std::string(argv[1])=="--surface-frontend-only") {
+        testSurfaceTokenFrontend();
+        return 0;
+    }
+    if(argc==2 && std::string(argv[1])=="--mpeg-handoff-only") {
+        setenv("PS2_PORT_HEADLESS","1",1);
+        PS2Runtime runtime;
+        if(!runtime.initialize("Synthetic MPEG handoff")) return 2;
+        auto &ctx=runtime.cpu();
+        runtime.registerFunction(0x100000u,audioStart);
+        runtime.registerFunction(0x100004u,audioEnd);
+        runtime.registerFunction(0x100008u,audioCallback);
+        ctx.pc=0x100000u;runtime.eeScheduler().reset(runtime.memory().getRDRAM(),ctx);runtime.eeScheduler().run();
+        if(!audioReturnValid || audioCallbackCount!=500) return 4;
+        std::cout<<"PASS: legacy linear/ring 500 audio callbacks and consumed-byte return\n";
+        testIpuInputDma(runtime);
+        runtime.registerFunction(0x100000u,ownedStart);
+        runtime.registerFunction(0x100004u,ownedEnd);
+        runtime.registerFunction(0x100008u,ownedCallback);
+        ctx.pc=0x100000u;runtime.eeScheduler().reset(runtime.memory().getRDRAM(),ctx);runtime.eeScheduler().run();
+        if(!ownedFinished) return 5;
+        ownedLinear=true;ctx.pc=0x100000u;
+        runtime.eeScheduler().reset(runtime.memory().getRDRAM(),ctx);runtime.eeScheduler().run();
+        if(!ownedFinished) return 6;
+        ownedLinear=false;
+        std::cout<<"PASS: owned linear/ring rejection/retry, wrapped ring, incomplete PES, exactly-once sinks, EOF drain\n";
+        return 0;
+    }
     testInterlacedPresentationRows();
     testTrianglePixelCenters();
     testBilinearFeedbackQuads();
@@ -578,11 +980,16 @@ int main() {
     restoredPaths.elfDirectory = testCwd;
     PS2Runtime::setIoPaths(restoredPaths);
     testGsParameterABI();
+    testGsImageBlockUnits();
+    testGsImageTransferWidths();
+    testGsLibgraphPacketABI();
+    testVif1DirectImageSpan();
     testGsDisplayEnvironment();
     testGsAnalogCRT();
     testGsDoubleBufferGeometry();
     testLocalPadCommands();
     testRendererQueue();
+    testSurfaceTokenFrontend();
     // Instruction semantics identified while comparing the SotC runtime fork.
     // These independent boundary cases fail with host rounding and unaligned LQ/SQ.
     if (FPU_CVT_W_S(1.75f) != 1 || FPU_CVT_W_S(-1.75f) != -1 ||
@@ -670,6 +1077,7 @@ int main() {
     }
     PS2Runtime runtime;
     if (!runtime.initialize("Synthetic timer test")) return 2;
+    testConcurrentVu0Server(runtime);
     // An ELF starts after platform initialization; environment setup must not
     // silently turn the initially runnable DMA controller off.
     uint8_t *dmaRam = runtime.memory().getRDRAM();
@@ -916,6 +1324,15 @@ int main() {
         return 4;
     }
     std::cout << "PASS: 500 MPEG audio callbacks execute with exhausted guest heap and reused scratch records" << std::endl;
+    testIpuInputDma(runtime);
+    runtime.registerFunction(0x100000u, ownedStart);
+    runtime.registerFunction(0x100004u, ownedEnd);
+    runtime.registerFunction(0x100008u, ownedCallback);
+    ctx.pc=0x100000u;
+    runtime.eeScheduler().reset(runtime.memory().getRDRAM(),ctx);
+    runtime.eeScheduler().run();
+    if(!ownedFinished) throw std::runtime_error("Owned movie fixture stopped before completion");
+    std::cout<<"PASS: owned movie rejection/retry, original wrapped ring payload, incomplete PES, accepting sink exactly once\n";
     runtime.registerFunction(0x100000u, graphicsStart);
     runtime.registerFunction(0x100004u, graphicsEnd);
     runtime.registerFunction(0x100008u, graphicsIrq);

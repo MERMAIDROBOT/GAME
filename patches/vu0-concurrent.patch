@@ -1,0 +1,163 @@
+diff --git a/ps2xRecomp/include/ps2recomp/Translators/vu_translator.h b/ps2xRecomp/include/ps2recomp/Translators/vu_translator.h
+index fb672b6..429176a 100644
+--- a/ps2xRecomp/include/ps2recomp/Translators/vu_translator.h
++++ b/ps2xRecomp/include/ps2recomp/Translators/vu_translator.h
+@@ -13,6 +13,7 @@ namespace ps2recomp
+     public:
+         explicit VuTranslator(CodeGenerator &codeGenerator);
+         std::string translate(const Instruction &inst);
++        std::string translateTransfer(const Instruction &inst);
+ 
+     private:
+         CodeGenerator &m_codeGenerator;
+diff --git a/ps2xRecomp/src/lib/control_flow_emitter.cpp b/ps2xRecomp/src/lib/control_flow_emitter.cpp
+index 001c9af..a3f197e 100644
+--- a/ps2xRecomp/src/lib/control_flow_emitter.cpp
++++ b/ps2xRecomp/src/lib/control_flow_emitter.cpp
+@@ -439,9 +439,10 @@ namespace ps2recomp
+             if (m_branchInst.rs == COP2_BC)
+             {
+                 const uint8_t bcCond = static_cast<uint8_t>(m_branchInst.rt);
++                // BC2F/BC2T test whether a VU0 microprogram is still running (it advances while polled).
+                 return (bcCond == COP2_BC_BCF || bcCond == COP2_BC_BCFL)
+-                           ? "!(ctx->vu0_status & 0x1)"
+-                           : "(ctx->vu0_status & 0x1)";
++                           ? "!PS2_VU0_BUSY(ctx, runtime)"
++                           : "PS2_VU0_BUSY(ctx, runtime)";
+             }
+             break;
+         default:
+diff --git a/ps2xRecomp/src/lib/vu_translator.cpp b/ps2xRecomp/src/lib/vu_translator.cpp
+index 6cb94ab..16a8796 100644
+--- a/ps2xRecomp/src/lib/vu_translator.cpp
++++ b/ps2xRecomp/src/lib/vu_translator.cpp
+@@ -17,7 +17,24 @@ namespace ps2recomp
+     {
+     }
+ 
++    // COP2 transfers synchronize with a VU0 microprogram still running alongside the EE (no-op otherwise):
++    // reads advance it first, writes are passed to it after, and the interlocking forms (.I) and macro
++    // instructions wait for it to end, as the hardware does.
+     std::string VuTranslator::translate(const Instruction &inst)
++    {
++        const uint8_t format = inst.rs;
++        const bool interlock = (inst.raw & 1u) != 0u;
++        std::string body = translateTransfer(inst);
++        if (format == COP2_QMFC2 || format == COP2_CFC2)
++            return std::string(interlock ? "PS2_VU0_INTERLOCK(ctx, runtime); " : "PS2_VU0_SYNC_READ(ctx, runtime); ") + body;
++        if (format == COP2_QMTC2 || format == COP2_CTC2)
++            return std::string(interlock ? "PS2_VU0_INTERLOCK(ctx, runtime); " : "") + body + " PS2_VU0_SYNC_WRITE(ctx, runtime);";
++        if (format >= COP2_CO)
++            return "PS2_VU0_INTERLOCK(ctx, runtime); " + body;
++        return body;
++    }
++
++    std::string VuTranslator::translateTransfer(const Instruction &inst)
+     {
+         uint8_t format = inst.rs; // Use parsed rs field for COP2 format
+         uint8_t rt = inst.rt;
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index bf12c35..274c9d4 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -97,6 +97,7 @@ struct alignas(16) R5900Context
+     uint32_t vu0_fbrst3;    // FBRST3
+     uint32_t vu0_fbrst4;    // FBRST4
+     uint32_t vu0_itop;
++    uint32_t vu0_concurrent; // a VCALLMS microprogram still running alongside the EE (see vu0Concurrent)
+     uint32_t vu0_top;
+     uint32_t vu0_info;
+     uint32_t vu0_xitop; // VU0 XITOP - input ITOP for VIF/VU sync
+@@ -363,6 +364,11 @@ public:
+ 
+     void executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
+     void vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
++    // A VU0 microprogram that has not ended after its start budget keeps running alongside the EE, as on the
++    // hardware. The EE's VU0 register transfers synchronize with it: mode 0 = before QMFC2/CFC2 (advance the
++    // program, then publish its registers), 1 = after QMTC2/CTC2 (pass the EE's write to the program),
++    // 2 = interlock (QMFC2.I/QMTC2.I, macro instructions, the next VCALLMS: run the program to its end).
++    void vu0Concurrent(R5900Context *ctx, int mode);
+ 
+ public:
+     void handleSyscall(uint8_t *rdram, R5900Context *ctx);
+diff --git a/ps2xRuntime/include/ps2_runtime_macros.h b/ps2xRuntime/include/ps2_runtime_macros.h
+index ad1d032..220f344 100644
+--- a/ps2xRuntime/include/ps2_runtime_macros.h
++++ b/ps2xRuntime/include/ps2_runtime_macros.h
+@@ -749,6 +749,11 @@ inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
+ #define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : PS2_EXTRACT_EPI32_0(ctx_ptr->r[reg_idx]))
+ #define GPR_U64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0ULL : static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(ctx_ptr->r[reg_idx])))
+ #define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : PS2_EXTRACT_EPI64_0(ctx_ptr->r[reg_idx]))
++// VU0 microprogram running alongside the EE: synchronize at COP2 transfers (no-op otherwise).
++#define PS2_VU0_SYNC_READ(ctx_ptr, rt) do { if ((ctx_ptr)->vu0_concurrent) (rt)->vu0Concurrent((ctx_ptr), 0); } while (0)
++#define PS2_VU0_SYNC_WRITE(ctx_ptr, rt) do { if ((ctx_ptr)->vu0_concurrent) (rt)->vu0Concurrent((ctx_ptr), 1); } while (0)
++#define PS2_VU0_BUSY(ctx_ptr, rt) ((ctx_ptr)->vu0_concurrent ? ((rt)->vu0Concurrent((ctx_ptr), 0), (ctx_ptr)->vu0_concurrent != 0u) : false)
++#define PS2_VU0_INTERLOCK(ctx_ptr, rt) do { if ((ctx_ptr)->vu0_concurrent) (rt)->vu0Concurrent((ctx_ptr), 2); } while (0)
+ #define GPR_VEC(ctx_ptr, reg_idx) ((reg_idx == 0) ? _mm_setzero_si128() : ctx_ptr->r[reg_idx])
+ 
+ static inline void Ps2SetGprLow64(R5900Context *ctx, int reg, __m128i new_low)
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index d9c3fc5..91172d6 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1681,16 +1681,59 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
+         return;
+     }
+ 
++    // VCALLMS waits for a previous program still running alongside the EE.
++    if (ctx->vu0_concurrent)
++        vu0Concurrent(ctx, 2);
++
+     m_vu0.reset();
+     copyVu0ContextToState(ctx, m_vu0.state());
+     m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
+                   vu0Data, PS2_VU0_DATA_SIZE,
+                   m_gs, &m_memory,
+                   startPC, 0u, ctx->vu0_itop, 4096);
+-    finishVuProgram(m_vu0, vu0Code, PS2_VU0_CODE_SIZE, vu0Data, PS2_VU0_DATA_SIZE, m_gs, &m_memory, 4096, "VU0");
++    // Most programs end within the start budget. One that does not (for example a server loop that waits
++    // for the EE to hand it work through VI/VF registers) keeps running alongside the EE instead of being
++    // run to a cap and discarded; the EE's COP2 transfers then advance it.
++    constexpr uint32_t kStartSlices = 16u;
++    for (uint32_t n = 0; m_vu0.running() && n < kStartSlices; ++n)
++        m_vu0.resume(vu0Code, PS2_VU0_CODE_SIZE, vu0Data, PS2_VU0_DATA_SIZE, m_gs, &m_memory,
++                     m_vu0.state().top, m_vu0.state().itop, 4096);
++    ctx->vu0_concurrent = m_vu0.running() ? 1u : 0u;
+     copyVu0StateToContext(m_vu0.state(), ctx);
+ }
+ 
++void PS2Runtime::vu0Concurrent(R5900Context *ctx, int mode)
++{
++    if (!ctx->vu0_concurrent)
++        return;
++    uint8_t *const vu0Code = m_memory.getVU0Code();
++    uint8_t *const vu0Data = m_memory.getVU0Data();
++    if (!vu0Code || !vu0Data || !m_vu0.running())
++    {
++        ctx->vu0_concurrent = 0u;
++        return;
++    }
++    VU1State &state = m_vu0.state();
++    if (mode == 1)
++    {
++        // The EE's register file mirrors the program's since the last read; pass on what the EE wrote.
++        for (uint32_t i = 1; i < 32u; ++i)
++            _mm_storeu_ps(state.vf[i], ctx->vu0_vf[i]);
++        for (uint32_t i = 1; i < 16u; ++i)
++            state.vi[i] = static_cast<int16_t>(ctx->vi[i]);
++        state.q = ctx->vu0_q;
++        state.i = ctx->vu0_i;
++        return;
++    }
++    if (mode == 2)
++        finishVuProgram(m_vu0, vu0Code, PS2_VU0_CODE_SIZE, vu0Data, PS2_VU0_DATA_SIZE, m_gs, &m_memory, 4096, "VU0");
++    else
++        m_vu0.resume(vu0Code, PS2_VU0_CODE_SIZE, vu0Data, PS2_VU0_DATA_SIZE, m_gs, &m_memory,
++                     state.top, state.itop, 4096);
++    copyVu0StateToContext(state, ctx);
++    ctx->vu0_concurrent = m_vu0.running() ? 1u : 0u;
++}
++
+ void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
+ {
+     // VCALLMS and VCALLMSR both route here.

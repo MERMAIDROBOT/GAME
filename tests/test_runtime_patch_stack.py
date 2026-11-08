@@ -27,6 +27,7 @@ class RuntimePatchStack(unittest.TestCase):
         self.source.mkdir(); (self.lab / 'patches').mkdir(parents=True)
         base = ''.join(f'line {i}\n' for i in range(20))
         (self.source / 'f.txt').write_text(base)
+        (self.source / 'stable.txt').write_text('stable\n')
         for cmd in (['init', '-q'], ['add', '.'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base']):
             subprocess.run(['git', '-C', str(self.source), *cmd], check=True)
         self.base = base
@@ -64,6 +65,16 @@ class RuntimePatchStack(unittest.TestCase):
         (self.lab/'patches/two.patch').write_text(diff('missing context\n','replacement\n'))
         with self.assertRaisesRegex(RuntimeError,'stack does not apply'):self.apply()
         self.assertEqual((self.source/'f.txt').read_bytes(),before)
+
+    def test_appending_a_patch_preserves_unchanged_source_timestamps(self):
+        self.apply()
+        previous = self.source / 'f.txt'
+        original_timestamp = previous.stat().st_mtime_ns
+        (self.lab / 'patches/three.patch').write_text(diff('stable\n', 'updated\n', 'stable.txt'))
+        self.patches += ('patches/three.patch',)
+        self.apply()
+        self.assertEqual(previous.stat().st_mtime_ns, original_timestamp)
+        self.assertEqual((self.source / 'stable.txt').read_text(), 'updated\n')
 
 
 if __name__ == '__main__':

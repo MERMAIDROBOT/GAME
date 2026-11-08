@@ -132,9 +132,31 @@ def build_native_graphics(profile, private):
     return {GRAPHICS_PLUGIN: {'path': str(plugin), 'sha256': lab.digest(plugin), 'engine_sources_sha256': inventory}, **sdks}
 
 
+def require_native_link_space(build):
+    """Use the previous actual runner to budget a replacement plus LTO scratch.
+
+    This is a conservative check for rebuilds, not an estimate for an unseen
+    game's first build. Never remove a binary or cache to satisfy the budget.
+    """
+    build = Path(build)
+    binary = build / 'ps2xRuntime/ps2EntryRunner'
+    if not binary.is_file():
+        return {'estimated': False, 'reason': 'no_previous_runner'}
+    measured = binary.stat().st_size
+    required = 3 * measured + (64 << 20)
+    free = shutil.disk_usage(build).free
+    if free < required:
+        raise RuntimeError(f'Insufficient space for native relink: budget {required} bytes from '
+                           f'the previous {measured}-byte runner, have {free}. Relocate verified '
+                           'inactive artifacts before rebuilding; existing output is preserved.')
+    return dict(estimated=True, previous_runner_bytes=measured,
+                required_bytes=required, available_bytes=free)
+
+
 def build_native(profile, private):
     # Refuse active play before expensive source validation; builders retain their own locks.
     assert_runtime_slot_idle()
+    require_native_link_space(private / 'native-build')
     # The native product must consume current executable knowledge and a declared
     # memory contract; a linked runner is unsafe evidence if these are missing.
     from knowledge import load, plan, sha
@@ -154,6 +176,26 @@ def build_native(profile, private):
         lab.save(private/'analysis/native-build-stage.json',result)
         print('Pinned native source graph built. Conformance and gameplay remain unverified.')
         return
+    # Level overlays can call resident SDK/function interiors absent from the boot call graph.
+    from resident_closure import ensure as ensure_resident_closure
+    ensure_resident_closure(profile, private)
+    require_vu0_translation_compatibility(private)
+    # A legacy overlay may need regeneration. Refresh tools before taking the
+    # native slot: the compiler refresh owns its own exclusive slot.
+    overlay_record = Path(private) / 'analysis/overlay-translation.json'
+    if (profile.get('overlay_build') is not False and overlay_record.is_file()
+            and json.loads(overlay_record.read_text()).get('accepted_overlays')):
+        from tool_state import ensure
+        ensure(lab)
+    # Section-aware refresh can reveal previously clipped resident call sites.
+    # Close those calls after overlay preparation and before compiling either
+    # side, outside the native build slot (compiler refresh owns its own slot).
+    with slot('native-overlay-preflight'):
+        assert_idle()
+        from overlays import prepare_native_overlays
+        prepare_native_overlays(profile, private)
+    ensure_resident_closure(profile, private)
+    require_native_link_space(private / 'native-build')
     with slot('native-cmake-build'):
         assert_idle()
         apply_runtime_patch()
@@ -162,12 +204,20 @@ def build_native(profile, private):
             raise ValueError('Run translate first')
         corrections = lab.correct_generated_sqrt(generated)
         lab.save(private / 'analysis/sqrt-translation-corrections.json', corrections)
+        from generated_corrections import apply as apply_generated_corrections
+        generated_corrections = apply_generated_corrections(profile, private)
         raylib = lab.WORK / 'dependencies/raylib'
         if not raylib.exists() or not (PREFIX / 'lib/libavcodec.a').exists():
             raise ValueError('Run bootstrap-runtime before building game code')
         build = private / 'native-build'
         vu_directory,vu_record = '',None
         if profile.get('compiled_vu',False):
+            # Refresh the configured compiler before comparing its digest or
+            # generating VU sources. Building it only with the final runner
+            # silently leaves this build using the previous compiler's output.
+            if (build / 'build.ninja').is_file() and (build / 'ps2PortVuRecompiler').is_file():
+                logged([lab.ENV / 'bin/cmake', '--build', build, '--target',
+                        'ps2PortVuRecompiler', '-j', '2'], private / 'logs/vu-compiler-build.log')
             # Programs the packaged app recorded since the last build are compiled now; the first build of a
             # title has no vector compiler yet and runs VU code interpreted until the next build.
             from vectors import refresh_compiled, validated_sources
@@ -195,10 +245,10 @@ def build_native(profile, private):
             raise RuntimeError('Native build reported success without the runner binary')
         frameworks = build_native_graphics(profile, private)
         lab.save(record, {'success': True, 'binary': str(binary), 'sha256': lab.digest(binary), 'frameworks': frameworks,
-                         'runtime_verified': False, 'built_at': time.time(),
+                         'runtime_verified': False, 'built_at': time.time(), 'overlays': overlay_build_receipt(profile, private),
                          'vu_execution_supported':True,'compiled_vu':vu_record,
                          'runtime_patches': {name: lab.digest(lab.ROOT / name) for name in RUNTIME_PATCHES},
-                         'private_source_patches': {p.name: lab.digest(p) for p in title_patches}})
+                         'private_source_patches': {p.name: lab.digest(p) for p in title_patches}, 'generated_corrections': generated_corrections})
         print('Native runner linked locally. Gameplay remains unverified.')
 
 
@@ -298,16 +348,47 @@ def test_runtime(profile, private):
     print('Synthetic runtime in synchronous/worker modes, IOP imports, host input/presentation, 43 VU and 45 texture, palette and VRAM checks passed; no retail code executed.')
 
 
+def require_vu0_translation_compatibility(private):
+    """Never silently combine old resident emissions with the concurrent runtime."""
+    from overlays import vu0_sync_audit
+    report = vu0_sync_audit(Path(private) / 'generated')
+    if not report['passed']:
+        lab.save(Path(private) / 'analysis/vu0-translation-compatibility.json', report)
+        raise ValueError('Resident translation predates concurrent VU0 synchronization; '
+                         'retranslate in an isolated run and revalidate revision-specific corrections before building')
+    return {'checked': report['checked'], 'passed': True}
+
+
 def overlay_build_directory(profile, private):
-    """private/overlays when the profile opts in (`overlay_build: true`) and overlays were registered; else ''."""
-    if profile.get('overlay_build', False) is not True:
+    """Include accepted translated overlays automatically; false is an explicit boot-only opt-out."""
+    requested = profile.get('overlay_build')
+    if requested is False:
         return ''
+    if requested is not None and requested is not True:
+        raise ValueError('overlay_build must be a boolean')
     record = Path(private) / 'analysis/overlay-translation.json'
-    if not record.is_file() or not json.loads(record.read_text()).get('accepted_overlays'):
-        raise ValueError('overlay_build is set but no overlays were registered; run translate-overlays')
-    if not json.loads(record.read_text()).get('syntax_sample', {}).get('success'):
+    data = json.loads(record.read_text()) if record.is_file() else {}
+    if not data.get('accepted_overlays'):
+        if requested is True:
+            raise ValueError('overlay_build is set but no overlays were registered; run translate-overlays')
+        return ''
+    if not data.get('syntax_sample', {}).get('success'):
         raise ValueError('Overlay sources have not passed the syntax sample; run translate-overlays')
     return str(Path(private) / 'overlays')
+
+
+def overlay_build_receipt(profile, private):
+    directory = overlay_build_directory(profile, private)
+    if not directory:
+        return None
+    root = Path(private)
+    from knowledge import load, sha
+    data = json.loads((root / 'analysis/overlay-translation.json').read_text())
+    bank = sha(json.dumps(load(), sort_keys=True).encode())
+    if data.get('knowledge_bank_sha256') != bank or data.get('qualified_metadata_version') != 2:
+        raise ValueError('Overlays predate current instruction knowledge or link metadata; rebuild before packaging')
+    return {'translation_sha256': lab.digest(root / 'analysis/overlay-translation.json'),
+            'manifest_sha256': lab.digest(Path(directory) / 'overlay_manifest.cpp')}
 
 
 # Applied in order over the pinned PS2Recomp revision. The IOP patch carries the SPU2 device,
@@ -316,8 +397,10 @@ def overlay_build_directory(profile, private):
 # kernel/IOP/CD/GS/MPEG behaviour a second title needed (see ENGINE.md "Runtime title conformance").
 RUNTIME_PATCHES = ('patches/runtime-diagnostics.patch', 'patches/ps2xIOP-port-lab.patch', 'patches/scalar-fpu.patch',
                    'patches/runtime-title-conformance.patch', 'patches/scalar-fpu-compare.patch',
-                   'patches/runtime-hotpaths.patch', 'patches/native-pcm.patch','patches/host-input.patch','patches/ee64-varargs.patch','patches/sdk-audio-policy.patch','patches/gif-image2.patch', 'patches/mpeg-stream-callbacks.patch','patches/host-input-events.patch','patches/touch-direction-recovery.patch','patches/native-save-root.patch','patches/host-clock-accounting.patch','patches/native-callback-context-lifetime.patch','patches/overlay-dispatch.patch','patches/stub-interior-entries.patch','patches/mmi-reference-forms.patch','patches/vu0-reference-forms.patch','patches/link-branch-reference.patch','patches/fpu-reference-flags.patch','patches/vu-micro-reference.patch','patches/gs-host-rounding.patch','patches/vu-run-to-end.patch','patches/vu-vf0-constant.patch','patches/iop-shared-pool.patch','patches/presentation-fidelity.patch','patches/gpu-renderer-host.patch','patches/window-thread-failure.patch','patches/hd-frame-stride.patch','patches/vsync-setting.patch','patches/guest-heap-exact.patch','patches/cdvdfsv-resident.patch','patches/sif-module-load-report.patch','patches/iop-module-buffer.patch','patches/dma-watch.patch','patches/mpeg-stream-types.patch')
+                   'patches/runtime-hotpaths.patch', 'patches/native-pcm.patch','patches/host-input.patch','patches/ee64-varargs.patch','patches/sdk-audio-policy.patch','patches/gif-image2.patch', 'patches/mpeg-stream-callbacks.patch','patches/host-input-events.patch','patches/touch-direction-recovery.patch','patches/native-save-root.patch','patches/host-clock-accounting.patch','patches/native-callback-context-lifetime.patch','patches/overlay-dispatch.patch','patches/stub-interior-entries.patch','patches/mmi-reference-forms.patch','patches/vu0-reference-forms.patch','patches/link-branch-reference.patch','patches/fpu-reference-flags.patch','patches/vu-micro-reference.patch','patches/gs-host-rounding.patch','patches/vu-run-to-end.patch','patches/vu-vf0-constant.patch','patches/iop-shared-pool.patch','patches/presentation-fidelity.patch','patches/gpu-renderer-host.patch','patches/window-thread-failure.patch','patches/hd-frame-stride.patch','patches/vsync-setting.patch','patches/guest-heap-exact.patch','patches/cdvdfsv-resident.patch','patches/sif-module-load-report.patch','patches/iop-module-buffer.patch','patches/dma-watch.patch','patches/mpeg-stream-types.patch','patches/mpeg-title-owned-input.patch','patches/native-frame-effects.patch','patches/source-chain-scratchpad.patch','patches/native-mac-surface.patch','patches/gs-image-block-units.patch','patches/vif1-direct-image-span.patch','patches/dbcman-v2-controller.patch','patches/vu0-concurrent.patch')
 
+
+RUNTIME_PATCHES += ('patches/mpeg-multistream-continuity.patch',)
 
 def private_source_patches(profile, private):
     """Title-specific source patches named by a private profile, resolved inside its private directory.
@@ -372,8 +455,8 @@ def _stack_already_applied(patches, checked_paths=None, compare_worktree=True):
 def apply_runtime_patch():
     """Bring the shared tool checkout to pinned revision + the public patch stack (idempotent).
 
-    If the stack is not exactly applied, peel applied patches off from the top, then apply the
-    whole stack in order. Unknown edits fail explicitly."""
+    Preserve a proven unchanged prefix and replace only the differing suffix.
+    Unknown edits fail explicitly before any mutation."""
     patches = []
     for name in RUNTIME_PATCHES:
         patch = lab.ROOT / name
@@ -382,7 +465,8 @@ def apply_runtime_patch():
         patches.append(patch)
     record = _applied_stack_dir()
     if _stack_already_applied(patches):
-        if not record.exists():
+        recorded = sorted(record.glob('*.patch')) if record.exists() else []
+        if len(recorded) != len(patches) or any(a.read_bytes() != b.read_bytes() for a,b in zip(recorded,patches)):
             _record_applied_stack(patches)
         return
     recorded = sorted(record.glob('*.patch')) if record.exists() else []
@@ -394,11 +478,18 @@ def apply_runtime_patch():
     old=recorded if recorded and _stack_already_applied(recorded,checked_paths=paths) else []
     if not old and not _stack_already_applied([],checked_paths=paths):
         raise RuntimeError('Unknown tool source edits; checkout left unchanged. Use isolated locked tool sources.')
+    # Keep a proven, unchanged prefix in place. Rewriting its headers changes
+    # timestamps and can recompile every translated function for one new fix.
+    common = 0
+    for previous, current in zip(old, patches):
+        if previous.read_bytes() != current.read_bytes():
+            break
+        common += 1
     removed=[];applied=[]
     try:
-        for patch in reversed(old):
+        for patch in reversed(old[common:]):
             subprocess.run(['git','-C',str(lab.SOURCE),'apply','--reverse',str(patch)],check=True);removed.append(patch)
-        for patch in patches:
+        for patch in patches[common:]:
             subprocess.run(['git','-C',str(lab.SOURCE),'apply',str(patch)],check=True);applied.append(patch)
     except Exception:
         for patch in reversed(applied):subprocess.run(['git','-C',str(lab.SOURCE),'apply','--reverse',str(patch)],check=True)
@@ -593,6 +684,33 @@ def stage_runtime_disc(private, destination):
     return root
 
 
+def stage_native_asset(source, destination, expected_pin):
+    """Stage a verified immutable launch asset outside protected Documents paths.
+
+    Versioned destinations are never overwritten. Mutable caches and saves do not use this path.
+    """
+    from launch_config import directory_pin
+    source, destination = Path(source), Path(destination)
+    if directory_pin(source)['sha256'] != expected_pin:
+        raise ValueError('Native launch asset source pin changed')
+    if destination.is_symlink():
+        raise ValueError('Unsafe staged native asset path')
+    if destination.exists():
+        if directory_pin(destination)['sha256'] != expected_pin:
+            raise ValueError('Existing immutable native asset differs from pin')
+        return destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + '.staging')
+    if temporary.exists() or temporary.is_symlink():
+        raise ValueError('Native asset staging already exists; preserve it for inspection')
+    if platform.system() != 'Darwin' or subprocess.run(['/bin/cp', '-cR', str(source), str(temporary)],capture_output=True).returncode:
+        shutil.copytree(source, temporary)
+    if directory_pin(temporary)['sha256'] != expected_pin:
+        raise ValueError('Staged native launch asset differs from pin')
+    temporary.replace(destination)
+    return destination
+
+
 def verify_graph_conformance(stage, private):
     """Bind packaging to successful checks of this exact source-built runner."""
     from native_graph import verify_source_chain
@@ -629,17 +747,55 @@ def verify_graph_conformance(stage, private):
                     raise ValueError('Conformance case log is missing or changed')
 
 
-def package_local(profile, private):
+def copy_bundle_file(source, destination):
+    """Separate writable inode, shared APFS blocks where available; portable copy otherwise."""
+    if platform.system() != 'Darwin' or subprocess.run(
+            ['/bin/cp', '-c', str(source), str(destination)], capture_output=True).returncode:
+        shutil.copy2(source, destination)
+
+
+def require_signing_space(destination, binary, frameworks):
+    """Ad-hoc signing can rewrite entire Mach-O files despite APFS clone staging.
+
+    Budget a staged rewrite plus the signer temporary copy. Do not silently delete
+    user data, partially stage an app, or turn a low-space error into a signing mystery.
+    """
+    destination = Path(destination)
+    probe = destination
+    while not probe.exists():
+        probe = probe.parent
+    inputs = [Path(binary), *(Path(p) for p in frameworks.values())]
+    required = 2 * sum(p.stat().st_size for p in inputs) + (32 << 20)
+    free = shutil.disk_usage(probe).free
+    if free < required:
+        raise RuntimeError(f'Insufficient temporary space for local app signing: need {required} bytes, '
+                           f'have {free} bytes. Preserve the build; free space before packaging.')
+    return dict(required_bytes=required, available_bytes=free)
+
+
+@exclusive('local-app-package')
+def package_local(profile, private, *, output_directory=None):
     """Create a local debug app. Never include it in the reusable source ZIP."""
+    assert_runtime_slot_idle()
     stage = json.loads((private / 'analysis/native-build-stage.json').read_text())
+    if 'patches/vu0-concurrent.patch' in stage.get('runtime_patches', {}):
+        require_vu0_translation_compatibility(private)
+    if stage.get('overlays') != overlay_build_receipt(profile, private):
+        raise ValueError('Native build predates or differs from the accepted overlays; rebuild before packaging')
+    from generated_corrections import verify as verify_generated_corrections
+    verify_generated_corrections(profile, private, stage.get('generated_corrections'))
     binary = Path(stage['binary'])
     if lab.digest(binary) != stage['sha256']:
         raise ValueError('Native binary differs from build record')
-    app = lab.ROOT.parent / (profile['title'].replace('/', '-') + ' (Debug).app')
+    output = lab.ROOT.parent if output_directory is None else Path(output_directory)
+    if not output.is_absolute():
+        raise ValueError('Local package output directory must be an explicit absolute path')
+    app = output / (profile['title'].replace('/', '-') + ' (Debug).app')
     if app.exists() or app.is_symlink():
         raise ValueError('Package destination already exists; preserve it and choose a new isolated profile title/output')
     from native_graph import framework_inputs
     frameworks=framework_inputs(stage,private)
+    require_signing_space(app.parent, binary, frameworks)
     if stage.get('source_graph_recipe_sha256'):
         verify_graph_conformance(stage,private)
     from launch_config import prepare as prepare_launch
@@ -663,6 +819,10 @@ def package_local(profile, private):
     if application_storage:
         storage = Path.home() / 'Library/Application Support/PS2 Port Lab' / profile['id']
         runtime_disc = stage_runtime_disc(private, storage / 'disc-root')
+        for key, asset in launch['assets'].items():
+            if key == 'PS2_PORT_TEX_PACK':
+                staged = stage_native_asset(asset['path'], storage / 'assets' / asset['sha256'], asset['sha256'])
+                launch['Environment'][key] = str(staged)
         for folder in ('logs', 'cache/gpu-pipelines'):
             (storage / folder).mkdir(parents=True, exist_ok=True)
         if 'PS2_PORT_HW_GS_PIPELINE_CACHE_DIR' in launch['Environment']:
@@ -674,10 +834,10 @@ def package_local(profile, private):
     resources.mkdir(parents=True, exist_ok=True)
     if frameworks:
         folder=app/'Contents/Frameworks';folder.mkdir()
-        for name,path in frameworks.items():shutil.copy2(path,folder/name)
+        for name,path in frameworks.items():copy_bundle_file(path,folder/name)
     shutil.copy2(lab.ROOT / 'CONTROLS.md', resources / 'CONTROLS.md')
     staged_runner = macos / 'ps2EntryRunner.next'
-    shutil.copy2(binary, staged_runner)
+    copy_bundle_file(binary, staged_runner)
     staged_runner.replace(macos / 'ps2EntryRunner')
     config = {'Executable': str(lab.boot_executable(runtime_disc, profile)),
               'DiscDirectory': str(runtime_disc), 'LogFile': str(storage / 'logs/finder-launch.log'),
@@ -726,3 +886,13 @@ def package_local(profile, private):
              'requires_private_cd_image': str(image) if image else None})
     print(f'Local debug app: {app}')
     print('Contains generated game code. Keep local; do not publish or include in the source ZIP.')
+
+RUNTIME_PATCHES += ('patches/vu-product-underflow.patch',)
+RUNTIME_PATCHES += ('patches/link-branch-resume.patch',)
+RUNTIME_PATCHES += ('patches/gs-load-image-host-packet.patch',)
+RUNTIME_PATCHES += ('patches/gs-image-transfer-width.patch',)
+RUNTIME_PATCHES += ('patches/host-frame-resource-lifetime.patch',)
+RUNTIME_PATCHES += ('patches/libgraph-image-packet-abi.patch',)
+RUNTIME_PATCHES += ('patches/discovered-sdk-bindings.patch',)
+
+RUNTIME_PATCHES += ('patches/mutable-jump-table-entries.patch',)

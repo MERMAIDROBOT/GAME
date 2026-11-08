@@ -7,6 +7,8 @@
 // loaded is the one that runs; otherwise the caller falls back to the boot program's table.
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 struct R5900Context;
@@ -74,6 +76,29 @@ public:
             last_ = &overlay;
             return {true, slot(overlay, address)};
         }
+        // Bounded opt-in evidence only: never relax residency or dispatch a
+        // different program because a continuation is missing.
+        if (last_ && covers(*last_, address) && slot(*last_, address) &&
+            std::getenv("PS2_PORT_OVERLAY_MISS_TRACE") && misses_ < 8u) {
+            ++misses_;
+            const uint32_t physical = address & (kRamBytes - 1u);
+            uint32_t instruction = 0;
+            std::memcpy(&instruction, rdram + physical, sizeof(instruction));
+            std::fprintf(stderr, "[overlay-miss] pc=%08x word=%08x\n", address, instruction);
+            for (const auto &overlay : overlays_) {
+                if (!covers(overlay, address)) continue;
+                std::fprintf(stderr, "[overlay-miss] candidate=%s callable=%u", overlay.id,
+                             slot(overlay, address) != nullptr);
+                for (uint32_t i = 0; i < overlay.signatureWords; ++i) {
+                    const auto &sig = overlay.signature[i];
+                    uint32_t actual = 0;
+                    const uint32_t at = sig.address & (kRamBytes - 1u);
+                    if (at <= kRamBytes - 4u) std::memcpy(&actual, rdram + at, 4);
+                    std::fprintf(stderr, " %08x:%08x/%08x", sig.address, actual, sig.value);
+                }
+                std::fputc('\n', stderr);
+            }
+        }
         return {false, nullptr};
     }
 
@@ -87,6 +112,7 @@ private:
 
     std::vector<OverlayTable> overlays_;
     const OverlayTable *last_ = nullptr;
+    uint32_t misses_ = 0;
 };
 
 inline OverlayRegistry &overlayRegistry() {

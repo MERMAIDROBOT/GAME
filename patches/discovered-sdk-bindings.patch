@@ -1,0 +1,66 @@
+--- a/ps2xRecomp/src/lib/ps2_recompiler.cpp
++++ b/ps2xRecomp/src/lib/ps2_recompiler.cpp
+@@ -1087,6 +1087,12 @@
+ 
+             for (auto &function : m_functions)
+             {
++                // Address-qualified SDK contracts retain their canonical name,
++                // including policies that deliberately require the real body.
++                const auto binding = m_stubHandlerBindingsByStart.find(function.start);
++                if (binding != m_stubHandlerBindingsByStart.end() &&
++                    ps2_port::requires_compiled_sdk_body(binding->second))
++                    function.name = binding->second;
+                 m_reporter.recordFunctionProcessed();
+                 const bool correctnessCritical = isCorrectnessCriticalFunction(function);
+ 
+@@ -1169,6 +1174,50 @@
+ #endif
+             }
+ 
++            // A stripped ELF may omit a configured SDK entry from its initial
++            // function map. Seed qualified native contracts BEFORE treating late
++            // entries as guest continuations, or a hardware-polling SDK body can
++            // silently replace the requested native service.
++            std::vector<uint32_t> nativeStarts;
++            for (const auto &[address, name] : m_stubHandlerBindingsByStart)
++            {
++                Function candidate; candidate.start = address; candidate.name = name;
++                if ((address & 3u) || ps2_port::requires_compiled_sdk_body(name) ||
++                    !hasResolvedStubHandler(candidate)) continue;
++                const auto section = std::find_if(m_sections.begin(), m_sections.end(),
++                    [&](const Section &part) { return part.isCode && address >= part.address &&
++                        uint64_t(address) + 4u <= uint64_t(part.address) + part.size; });
++                if (section != m_sections.end()) nativeStarts.push_back(address);
++            }
++            std::sort(nativeStarts.begin(), nativeStarts.end());
++            for (uint32_t address : nativeStarts)
++            {
++                auto found = std::find_if(m_functions.begin(), m_functions.end(),
++                    [&](const Function &f) { return f.start == address; });
++                if (found == m_functions.end())
++                {
++                    const auto section = std::find_if(m_sections.begin(), m_sections.end(),
++                        [&](const Section &part) { return part.isCode && address >= part.address &&
++                            uint64_t(address) + 4u <= uint64_t(part.address) + part.size; });
++                    Function added;
++                    added.start = address; added.end = section->address + section->size;
++                    added.name = m_stubHandlerBindingsByStart.at(address);
++                    for (const auto &f : m_functions)
++                        if (f.start > address && f.start < added.end) added.end = f.start;
++                    const auto next = std::upper_bound(nativeStarts.begin(), nativeStarts.end(), address);
++                    if (next != nativeStarts.end() && *next < added.end) added.end = *next;
++                    m_functions.push_back(std::move(added));
++                    found = std::prev(m_functions.end());
++                    m_reporter.recordFunctionProcessed();
++                    m_reporter.recordFunctionStubbed();
++                }
++                found->isStub = true; found->isSkipped = false; found->isRecompiled = false;
++                // Only the canonical SDK address is native. Interior game entry
++                // points are still discovered from their actual instructions.
++                m_entryPointHintStarts.erase(address);
++            }
++            std::sort(m_functions.begin(), m_functions.end(),
++                [](const Function &a, const Function &b) { return a.start < b.start; });
+             discoverAdditionalEntryPoints();
+ 
+             if (failedCount > 0)

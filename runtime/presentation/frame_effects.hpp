@@ -1,0 +1,260 @@
+// Frame-only carryforward of the accepted Kelly raylib presentation enhancements.
+// Local source provenance: retained raylib rtextures.c (Claude, Oct 13-21, 2026).
+// Raylib portions: zlib/libpng license; FSR1-derived GLSL: AMD 2021 MIT (see FSR1-LICENSE.txt).
+#pragma once
+#include "raylib.h"
+#include "rlgl.h"
+#include <cstdlib>
+#include <cmath>
+static const char *ps2UpscaleFs =
+"#version 330\n"
+"in vec2 fragTexCoord; in vec4 fragColor; out vec4 finalColor;\n"
+"uniform sampler2D texture0; uniform vec4 colDiffuse; uniform vec2 texelSize; uniform float sharpness; uniform int mode;\n"
+"vec3 tap(vec2 p){ return texture(texture0,p).rgb; }\n"
+"vec3 bicubic(vec2 uv){ vec2 ts=1.0/texelSize; vec2 sp=uv*ts; vec2 t1=floor(sp-0.5)+0.5; vec2 f=sp-t1;\n"
+" vec2 w0=f*(-0.5+f*(1.0-0.5*f)); vec2 w1=1.0+f*f*(-2.5+1.5*f); vec2 w2=f*(0.5+f*(2.0-1.5*f)); vec2 w3=f*f*(-0.5+0.5*f);\n"
+" vec2 w12=w1+w2; vec2 o12=w2/w12; vec2 p0=(t1-1.0)*texelSize; vec2 p3=(t1+2.0)*texelSize; vec2 p12=(t1+o12)*texelSize;\n"
+" return tap(vec2(p0.x,p0.y))*w0.x*w0.y + tap(vec2(p12.x,p0.y))*w12.x*w0.y + tap(vec2(p3.x,p0.y))*w3.x*w0.y\n"
+"      + tap(vec2(p0.x,p12.y))*w0.x*w12.y + tap(vec2(p12.x,p12.y))*w12.x*w12.y + tap(vec2(p3.x,p12.y))*w3.x*w12.y\n"
+"      + tap(vec2(p0.x,p3.y))*w0.x*w3.y + tap(vec2(p12.x,p3.y))*w12.x*w3.y + tap(vec2(p3.x,p3.y))*w3.x*w3.y; }\n"
+"void main(){ vec3 c=(mode==2)?tap(fragTexCoord):clamp(bicubic(fragTexCoord),0.0,1.0);\n"
+" vec3 n=tap(fragTexCoord-vec2(0.0,texelSize.y)), s=tap(fragTexCoord+vec2(0.0,texelSize.y));\n"
+" vec3 e=tap(fragTexCoord+vec2(texelSize.x,0.0)), w=tap(fragTexCoord-vec2(texelSize.x,0.0));\n"
+" vec3 mn=min(min(min(n,s),min(e,w)),c), mx=max(max(max(n,s),max(e,w)),c);\n"
+" vec3 amp=sqrt(clamp(min(mn,2.0-mx)/max(mx,vec3(1e-4)),0.0,1.0));\n"
+" vec3 wgt=amp*(-1.0/mix(8.0,5.0,clamp(sharpness,0.0,1.0)));\n"
+" vec3 r=(c+(n+s+e+w)*wgt)/(1.0+4.0*wgt);\n"
+" finalColor=vec4(clamp(r,0.0,1.0),1.0)*colDiffuse*fragColor; }\n";
+
+// Claude 2026-10-14 (WORKLOG 115): PS2_PORT_ENHANCE_UPSCALE=3 -> AMD FidelityFX Super Resolution 1.0 EASU
+// (edge-adaptive spatial upsampling; ported from ffx_fsr1.h, MIT licence, Copyright (c) 2021 Advanced Micro
+// Devices, Inc.) followed by the same contrast-adaptive sharpening as mode 1 (PS2_PORT_ENHANCE_SHARPNESS).
+// Taps are clamped to the source rectangle so the unused texture area never bleeds in.
+static const char *ps2FsrFs =
+"#version 330\n"
+"in vec2 fragTexCoord; in vec4 fragColor; out vec4 finalColor;\n"
+"uniform sampler2D texture0; uniform vec4 colDiffuse; uniform vec2 texSize; uniform vec4 srcRect; uniform float sharpness;\n"
+"vec3 T(vec2 p){ p=clamp(p,srcRect.xy,srcRect.zw); return texelFetch(texture0,ivec2(p),0).rgb; }\n"
+"float L(vec3 c){ return c.b*0.5+(c.r*0.5+c.g); }\n"
+"void setF(inout vec2 dir,inout float len,vec2 pp,int q,float lA,float lB,float lC,float lD,float lE){\n"
+" float w = q==0?(1.0-pp.x)*(1.0-pp.y):q==1?pp.x*(1.0-pp.y):q==2?(1.0-pp.x)*pp.y:pp.x*pp.y;\n"
+" float dc=lD-lC, cb=lC-lB; float lenX=max(abs(dc),abs(cb)); lenX=1.0/max(lenX,1e-5);\n"
+" float dirX=lD-lB; dir.x+=dirX*w; lenX=clamp(abs(dirX)*lenX,0.0,1.0); lenX*=lenX; len+=lenX*w;\n"
+" float ec=lE-lC, ca=lC-lA; float lenY=max(abs(ec),abs(ca)); lenY=1.0/max(lenY,1e-5);\n"
+" float dirY=lE-lA; dir.y+=dirY*w; lenY=clamp(abs(dirY)*lenY,0.0,1.0); lenY*=lenY; len+=lenY*w; }\n"
+"void tapF(inout vec3 aC,inout float aW,vec2 off,vec2 dir,vec2 len,float lob,float clp,vec3 c){\n"
+" vec2 v=vec2(off.x*dir.x+off.y*dir.y, off.x*(-dir.y)+off.y*dir.x); v*=len; float d2=min(v.x*v.x+v.y*v.y,clp);\n"
+" float wB=0.4*d2-1.0, wA=lob*d2-1.0; wB*=wB; wA*=wA; wB=1.5625*wB-0.5625; float w=wB*wA; aC+=c*w; aW+=w; }\n"
+"void main(){\n"
+" vec2 p=fragTexCoord*texSize-0.5; vec2 fp=floor(p); vec2 pp=p-fp; vec2 c0=fp+0.5;\n"
+" vec3 b=T(c0+vec2(0,-1)), c=T(c0+vec2(1,-1)), e=T(c0+vec2(-1,0)), f=T(c0), g=T(c0+vec2(1,0)), h=T(c0+vec2(2,0));\n"
+" vec3 i=T(c0+vec2(-1,1)), j=T(c0+vec2(0,1)), k=T(c0+vec2(1,1)), l=T(c0+vec2(2,1)), n=T(c0+vec2(0,2)), o=T(c0+vec2(1,2));\n"
+" float bL=L(b),cL=L(c),eL=L(e),fL=L(f),gL=L(g),hL=L(h),iL=L(i),jL=L(j),kL=L(k),lL=L(l),nL=L(n),oL=L(o);\n"
+" vec2 dir=vec2(0.0); float len=0.0;\n"
+" setF(dir,len,pp,0,bL,eL,fL,gL,jL); setF(dir,len,pp,1,cL,fL,gL,hL,kL); setF(dir,len,pp,2,fL,iL,jL,kL,nL); setF(dir,len,pp,3,gL,jL,kL,lL,oL);\n"
+" float dirR=dot(dir,dir); bool zro=dirR<(1.0/32768.0); dirR=inversesqrt(max(dirR,1e-12)); if(zro){dirR=1.0;dir.x=1.0;} dir*=dirR;\n"
+" len=len*0.5; len*=len; float stretch=dot(dir,dir)/max(abs(dir.x),abs(dir.y));\n"
+" vec2 len2=vec2(1.0+(stretch-1.0)*len, 1.0-0.5*len); float lob=0.5+((1.0/4.0-0.04)-0.5)*len; float clp=1.0/lob;\n"
+" vec3 mn=min(min(f,g),min(j,k)), mx=max(max(f,g),max(j,k));\n"
+" vec3 aC=vec3(0.0); float aW=0.0;\n"
+" tapF(aC,aW,vec2(0,-1)-pp,dir,len2,lob,clp,b); tapF(aC,aW,vec2(1,-1)-pp,dir,len2,lob,clp,c);\n"
+" tapF(aC,aW,vec2(-1,1)-pp,dir,len2,lob,clp,i); tapF(aC,aW,vec2(0,1)-pp,dir,len2,lob,clp,j);\n"
+" tapF(aC,aW,vec2(0,0)-pp,dir,len2,lob,clp,f); tapF(aC,aW,vec2(-1,0)-pp,dir,len2,lob,clp,e);\n"
+" tapF(aC,aW,vec2(1,1)-pp,dir,len2,lob,clp,k); tapF(aC,aW,vec2(2,1)-pp,dir,len2,lob,clp,l);\n"
+" tapF(aC,aW,vec2(2,0)-pp,dir,len2,lob,clp,h); tapF(aC,aW,vec2(1,0)-pp,dir,len2,lob,clp,g);\n"
+" tapF(aC,aW,vec2(1,2)-pp,dir,len2,lob,clp,o); tapF(aC,aW,vec2(0,2)-pp,dir,len2,lob,clp,n);\n"
+" vec3 up=min(mx,max(mn,aC/max(aW,1e-5)));\n"
+" vec3 amp=sqrt(clamp(min(mn,2.0-mx)/max(mx,vec3(1e-4)),0.0,1.0));\n"
+" vec3 wgt=amp*(-1.0/mix(8.0,5.0,clamp(sharpness,0.0,1.0)));\n"
+" vec3 blur=mix(mix(f,g,pp.x),mix(j,k,pp.x),pp.y);\n"
+" vec3 r=(up+4.0*blur*wgt)/(1.0+4.0*wgt);\n"
+" finalColor=vec4(clamp(r,0.0,1.0),1.0)*colDiffuse*fragColor; }\n";
+// Claude 2026-10-19 (WORKLOG 127): FXAA (Lottes' public FXAA, console variant) for HD frames. When dynamic
+// SSAA drops to X4 (one sample per HD pixel) to hold 60 fps, edges alias; this pass costs well under 1 ms.
+static const char *ps2FxaaFs =
+"#version 330\n"
+"in vec2 fragTexCoord; in vec4 fragColor; out vec4 finalColor;\n"
+"uniform sampler2D texture0; uniform vec2 texelSize;\n"
+"float lum(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }\n"
+"void main(){\n"
+" vec2 uv=fragTexCoord; vec3 m=texture(texture0,uv).rgb;\n"
+" vec3 nw=texture(texture0,uv+vec2(-1.0,-1.0)*texelSize).rgb, ne=texture(texture0,uv+vec2(1.0,-1.0)*texelSize).rgb;\n"
+" vec3 sw=texture(texture0,uv+vec2(-1.0,1.0)*texelSize).rgb, se=texture(texture0,uv+vec2(1.0,1.0)*texelSize).rgb;\n"
+" float lM=lum(m), lNW=lum(nw), lNE=lum(ne), lSW=lum(sw), lSE=lum(se);\n"
+" float lMin=min(lM,min(min(lNW,lNE),min(lSW,lSE))), lMax=max(lM,max(max(lNW,lNE),max(lSW,lSE)));\n"
+" if (lMax-lMin < max(0.0312, lMax*0.125)) { finalColor=vec4(m,1.0); return; }\n"
+" vec2 dir=vec2(-((lNW+lNE)-(lSW+lSE)), (lNW+lSW)-(lNE+lSE));\n"
+" float red=max((lNW+lNE+lSW+lSE)*(0.25/8.0), 1.0/128.0);\n"
+" float rcp=1.0/(min(abs(dir.x),abs(dir.y))+red);\n"
+" dir=clamp(dir*rcp, vec2(-8.0), vec2(8.0))*texelSize;\n"
+" vec3 a=0.5*(texture(texture0,uv+dir*(1.0/3.0-0.5)).rgb+texture(texture0,uv+dir*(2.0/3.0-0.5)).rgb);\n"
+" vec3 b=a*0.5+0.25*(texture(texture0,uv+dir*-0.5).rgb+texture(texture0,uv+dir*0.5).rgb);\n"
+" float lB=lum(b); finalColor=vec4((lB<lMin||lB>lMax)?a:b, 1.0); }\n";
+// Claude 2026-10-20: set while the FXAA pre-pass draws a frame into its render texture - that inner draw keeps
+// its own rectangle (widescreen placement is for the window only).
+static int ps2InFxaaPass = 0;
+static inline void ps2PortDrawFrame(Texture2D texture, Rectangle source, Rectangle dest, Vector2 origin, float rotation, Color tint)
+{
+    static int ps2UpState = 0; static Shader ps2Up = { 0 }; static int ps2LocTexel = -1, ps2LocSharp = -1, ps2LocMode = -1, ps2Mode = 1; static float ps2Sharp = 0.6f;
+    if (ps2UpState == 0)
+    {
+        const char *on = getenv("PS2_PORT_ENHANCE_UPSCALE");
+        ps2UpState = (on && (on[0] == '1' || on[0] == '2' || on[0] == '3')) ? 1 : -1;
+        if (on && on[0] == '2') ps2Mode = 2;  // light: bilinear + sharpen only
+        if (on && on[0] == '3') ps2Mode = 3;  // Claude (WORKLOG 115): FSR 1 EASU + sharpen
+        if (ps2UpState == 1)
+        {
+            ps2Up = LoadShaderFromMemory(NULL, ps2Mode == 3 ? ps2FsrFs : ps2UpscaleFs);
+            if (ps2Up.id == 0 || ps2Up.id == rlGetShaderIdDefault()) ps2UpState = -1;
+            else
+            {
+                ps2LocTexel = GetShaderLocation(ps2Up, ps2Mode == 3 ? "texSize" : "texelSize"); ps2LocSharp = GetShaderLocation(ps2Up, "sharpness"); ps2LocMode = GetShaderLocation(ps2Up, ps2Mode == 3 ? "srcRect" : "mode");
+                const char *sh = getenv("PS2_PORT_ENHANCE_SHARPNESS"); if (sh) ps2Sharp = (float)atof(sh);
+                TraceLog(LOG_INFO, "PS2 PORT: enhanced upscaler enabled (sharpness %.2f)", ps2Sharp);
+            }
+        }
+    }
+    // Claude 2026-10-13 (WORKLOG 89): anamorphic widescreen. Game frames (512-wide source) are drawn into
+    // the largest centred 16:9 rectangle; movies (640-wide) keep 4:3. PS2_PORT_ENHANCE_WIDESCREEN=1.
+    // WORKLOG 93: the frame texture is 640x512 in the shipped (progressive) configuration, not 640x480.
+    {
+        static int ps2Wide = -1;
+        if (ps2Wide < 0) { const char *w = getenv("PS2_PORT_ENHANCE_WIDESCREEN"); ps2Wide = (w && w[0] == '1') ? 1 : 0; }
+        {
+            static int dbg = -1; static int n = 0;
+            if (dbg < 0) { const char *v = getenv("PS2_PORT_ENHANCE_DRAWDEBUG"); dbg = (v && v[0] == '1') ? 1 : 0; }
+            if (dbg && (n++ % 120) == 0)
+                TraceLog(LOG_WARNING, "PS2 PORT DRAW tex=%dx%d src=%.0f,%.0f %.0fx%.0f dst=%.0fx%.0f screen=%dx%d",
+                         texture.width, texture.height, source.x, source.y, source.width, source.height,
+                         dest.width, dest.height, GetScreenWidth(), GetScreenHeight());
+        }
+        // Claude 2026-10-20: HD scanout frames (the GPU renderers' 2x-4x). Game frames are 512x448 multiples
+        // (1024x896, 1536x1344, 2048x1792): drawn 16:9 like the 512-wide frames below. Movies come as 640x448
+        // multiples (1280x896, 1920x1344, 2560x1792) and follow PS2_PORT_ENHANCE_MOVIE_FILL (off: 4:3 pillarbox).
+        const int onWindow = !ps2InFxaaPass;
+        const int hdGame = onWindow && texture.width >= 1024 && texture.width % 512 == 0 && texture.height == texture.width / 512 * 448;
+        const int hdMovie = onWindow && texture.width >= 1280 && texture.width % 640 == 0 && texture.height == texture.width / 640 * 448;
+        if (ps2Wide && hdGame && fabsf(source.width) > 0.9f*(float)texture.width)
+        {
+            const float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
+            float w = sw, h = sw*9.0f/16.0f;
+            if (h > sh) { h = sh; w = sh*16.0f/9.0f; }
+            dest.x = (sw - w)*0.5f; dest.y = (sh - h)*0.5f; dest.width = w; dest.height = h;
+            origin.x = 0.0f; origin.y = 0.0f; rotation = 0.0f;
+        }
+        else if (ps2Wide && hdMovie && fabsf(source.width) > 0.9f*(float)texture.width)
+        {
+            static int hfill = -1;
+            if (hfill < 0) { const char *m = getenv("PS2_PORT_ENHANCE_MOVIE_FILL"); hfill = (m && m[0] == 'o') ? 0 : (m && m[0] == 's') ? 2 : 1; }
+            const float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
+            float w = sw, h = sw*9.0f/16.0f;
+            if (h > sh) { h = sh; w = sh*16.0f/9.0f; }
+            if (hfill == 0) { w = h*4.0f/3.0f; }    // the 16:9 area's height, 4:3 wide: pillarboxed
+            else if (hfill == 1) { const float keep = fabsf(source.height)*0.75f; source.y += (fabsf(source.height) - keep)*0.5f; source.height = (source.height < 0.0f) ? -keep : keep; }
+            dest.x = (sw - w)*0.5f; dest.y = (sh - h)*0.5f; dest.width = w; dest.height = h;
+            origin.x = 0.0f; origin.y = 0.0f; rotation = 0.0f;
+        }
+        else if (ps2Wide && texture.width == 640 && (texture.height == 480 || texture.height == 512) && fabsf(source.width) > 400.0f && fabsf(source.width) < 600.0f)
+        {
+            const float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
+            float w = sw, h = sw*9.0f/16.0f;
+            if (h > sh) { h = sh; w = sh*16.0f/9.0f; }
+            dest.x = (sw - w)*0.5f; dest.y = (sh - h)*0.5f; dest.width = w; dest.height = h;
+            origin.x = 0.0f; origin.y = 0.0f; rotation = 0.0f;
+        }
+        // Claude 2026-10-13 (WORKLOG 99): movies/legal screens (640-wide 4:3 sources) fill 16:9 by trimming
+        // 12.5% top and bottom (no distortion). PS2_PORT_ENHANCE_MOVIE_FILL=crop (default with widescreen),
+        // =stretch (full frame, horizontally stretched) or =off (pillarboxed 4:3 as before).
+        else if (ps2Wide && texture.width == 640 && (texture.height == 480 || texture.height == 512) && fabsf(source.width) >= 600.0f)
+        {
+            static int fill = -1;
+            if (fill < 0) { const char *m = getenv("PS2_PORT_ENHANCE_MOVIE_FILL"); fill = (m && m[0] == 'o') ? 0 : (m && m[0] == 's') ? 2 : 1; }
+            if (fill)
+            {
+                const float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
+                float w = sw, h = sw*9.0f/16.0f;
+                if (h > sh) { h = sh; w = sh*16.0f/9.0f; }
+                if (fill == 1) { const float keep = fabsf(source.height)*0.75f; source.y += (fabsf(source.height) - keep)*0.5f; source.height = (source.height < 0.0f) ? -keep : keep; }
+                dest.x = (sw - w)*0.5f; dest.y = (sh - h)*0.5f; dest.width = w; dest.height = h;
+                origin.x = 0.0f; origin.y = 0.0f; rotation = 0.0f;
+            }
+        }
+    }
+    // Claude 2026-10-19 (WORKLOG 127): FXAA pre-pass on HD frames into a same-size render texture, then the
+    // usual upscale draws from it. PS2_PORT_ENHANCE_FXAA=1.
+    {
+        static int fxOn = -1, inFx = 0, fxLoc = -1; static Shader fx = { 0 }; static RenderTexture2D fxRT = { 0 };
+        if (fxOn < 0)
+        {
+            const char *v = getenv("PS2_PORT_ENHANCE_FXAA"); fxOn = (v && v[0] == '1') ? 1 : 0;
+            if (fxOn)
+            {
+                fx = LoadShaderFromMemory(NULL, ps2FxaaFs);
+                if (fx.id == 0 || fx.id == rlGetShaderIdDefault()) fxOn = 0;
+                else { fxLoc = GetShaderLocation(fx, "texelSize"); TraceLog(LOG_INFO, "PS2 PORT: FXAA enabled for HD frames"); }
+            }
+        }
+        if (fxOn == 1 && !inFx && texture.id > 0 && texture.width >= 1000 && texture.width <= 2048 && texture.height >= 800 && texture.height <= 1792)
+        {
+            if (fxRT.texture.width != texture.width || fxRT.texture.height != texture.height)
+            {
+                if (fxRT.id) UnloadRenderTexture(fxRT);
+                fxRT = LoadRenderTexture(texture.width, texture.height);
+                if (fxRT.id) SetTextureFilter(fxRT.texture, TEXTURE_FILTER_BILINEAR);
+            }
+            if (fxRT.id)
+            {
+                inFx = 1; ps2InFxaaPass = 1;
+                BeginTextureMode(fxRT);
+                BeginShaderMode(fx);
+                const float tx[2] = { 1.0f/(float)texture.width, 1.0f/(float)texture.height };
+                SetShaderValue(fx, fxLoc, tx, SHADER_UNIFORM_VEC2);
+                DrawTexturePro(texture, Rectangle{ 0, 0, (float)texture.width, (float)texture.height },
+                               Rectangle{ 0, 0, (float)texture.width, (float)texture.height }, Vector2{ 0, 0 }, 0.0f, WHITE);
+                EndShaderMode();
+                EndTextureMode();
+                inFx = 0; ps2InFxaaPass = 0;
+                texture = fxRT.texture;
+                // Render textures are stored bottom-up: sample the same region, flipped.
+                source.y = (float)texture.height - source.y - fabsf(source.height); source.height = -source.height;
+            }
+        }
+    }
+    // Claude 2026-10-19 (WORKLOG 126): also upscale HD scanout frames (e.g. 1024x896 shown full screen at
+    // 1440p); before, they fell through to a plain bilinear stretch and looked soft and stair-stepped.
+    // The window rectangle is in logical points; shader sampling is in drawable pixels.
+    const float ps2PixelX = GetScreenWidth() > 0 ? (float)GetRenderWidth() / GetScreenWidth() : 1.0f;
+    const float ps2PixelY = GetScreenHeight() > 0 ? (float)GetRenderHeight() / GetScreenHeight() : 1.0f;
+    const bool ps2UseUp = (ps2UpState == 1) && (texture.id > 0) &&
+                          ((texture.width == 640 && (texture.height == 480 || texture.height == 512)) ||
+                           (texture.width >= 512 && texture.width <= 2048 && texture.height >= 448 && texture.height <= 1792)) &&
+                          (fabsf(dest.width) * ps2PixelX > fabsf(source.width) || fabsf(dest.height) * ps2PixelY > fabsf(source.height));
+    if (ps2UseUp)
+    {
+        BeginShaderMode(ps2Up);
+        if (ps2Mode == 3)
+        {
+            // Claude (WORKLOG 115): texel-space size and the source rectangle's texel-centre bounds for clamping.
+            const float size[2] = { (float)texture.width, (float)texture.height };
+            // Claude 2026-10-21: a negative width/height means flipped (raylib), the region still runs from x/y to
+            // x/y + |w|/|h|. min/max of the signed ends put a flipped source (the FXAA render texture) outside the
+            // texture: the clamp collapsed every row to one line (vertical streaks, full screen only).
+            const float sx0 = source.x, sx1 = source.x + fabsf(source.width);
+            const float sy0 = source.y, sy1 = source.y + fabsf(source.height);
+            const float rect[4] = { fmaxf(sx0, 0.0f) + 0.5f, fmaxf(sy0, 0.0f) + 0.5f,
+                                    fminf(sx1, size[0]) - 0.5f, fminf(sy1, size[1]) - 0.5f };
+            SetShaderValue(ps2Up, ps2LocTexel, size, SHADER_UNIFORM_VEC2);
+            SetShaderValue(ps2Up, ps2LocMode, rect, SHADER_UNIFORM_VEC4);
+        }
+        else
+        {
+            const float texel[2] = { 1.0f/(float)texture.width, 1.0f/(float)texture.height };
+            SetShaderValue(ps2Up, ps2LocTexel, texel, SHADER_UNIFORM_VEC2);
+            SetShaderValue(ps2Up, ps2LocMode, &ps2Mode, SHADER_UNIFORM_INT);
+        }
+        SetShaderValue(ps2Up, ps2LocSharp, &ps2Sharp, SHADER_UNIFORM_FLOAT);
+    }
+
+    DrawTexturePro(texture, source, dest, origin, rotation, tint);
+    if (ps2UseUp) EndShaderMode();
+}

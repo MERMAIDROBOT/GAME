@@ -20,6 +20,8 @@ inline uint32_t u(float value) { return std::bit_cast<uint32_t>(value); }
 struct Lane {
     uint32_t bits;
     bool overflow, underflow;
+    // Sony VU manual v6 p42: an intermediate product underflow sets US, not ZS.
+    bool productUnderflow = false;
 };
 
 inline double value(uint32_t bits) { return ps2_port_fpu::ps2_to_double(f(bits)); }
@@ -71,12 +73,18 @@ inline Lane lane(Op op, uint32_t a, uint32_t b, uint32_t accumulator) {
     case Op::Sub: return flagged(u(ps2_fsub(f(a), f(b))), value(a) - value(b));
     case Op::Mul: return flagged(u(ps2_fmul(f(a), f(b))), value(a) * value(b));
     case Op::Madd: {  // the product is rounded first; the flags are those of the final add
-        const uint32_t p = lane(Op::Mul, a, b, 0).bits;
-        return flagged(u(ps2_fadd(f(accumulator), f(p))), value(accumulator) + value(p));
+        const Lane product = lane(Op::Mul, a, b, 0);
+        const uint32_t p = product.bits;
+        Lane result = flagged(u(ps2_fadd(f(accumulator), f(p))), value(accumulator) + value(p));
+        result.productUnderflow = product.underflow;
+        return result;
     }
     case Op::Msub: {
-        const uint32_t p = lane(Op::Mul, a, b, 0).bits;
-        return flagged(u(ps2_fsub(f(accumulator), f(p))), value(accumulator) - value(p));
+        const Lane product = lane(Op::Mul, a, b, 0);
+        const uint32_t p = product.bits;
+        Lane result = flagged(u(ps2_fsub(f(accumulator), f(p))), value(accumulator) - value(p));
+        result.productUnderflow = product.underflow;
+        return result;
     }
     case Op::Max: return {order(a, b) >= 0 ? a : b, false, false};
     case Op::Mini: return {order(a, b) <= 0 ? a : b, false, false};

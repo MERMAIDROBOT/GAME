@@ -1,0 +1,173 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+@@ -89,6 +89,7 @@
+                 {
+                     return false;
+                 }
++
+ 
+                 static uint32_t s_feedLogCount = 0u;
+                 const bool shouldLog = (s_feedLogCount < 32u);
+@@ -1144,7 +1145,31 @@
+             }
+         }
+ 
+-        std::vector<MpegRegisteredCallback> matchingStreamCallbacks(uint32_t mpegAddr, uint32_t streamType)
++        // libmpeg identifies a PES packet by a 40-bit id: stream_id << 32, plus for private stream 1 the four
++        // substream header bytes (FF A0|A1 00 ch for PCM/ADPCM). sceMpegAddStrCallback(type, ch) registers
++        // _type2id(type, ch) = base | ch << shift, and the demux delivers a packet only to callbacks whose
++        // id equals (packet id & mask). Movies with several audio tracks (languages) interleave them; a title
++        // that selected one channel must not receive the others. Table = libmpeg's {base, mask} per type.
++        struct MpegStreamTypeId { uint64_t id; uint64_t mask; };
++        constexpr MpegStreamTypeId kMpegStreamTypeIds[10] = {
++            {0xE000000000ull, 0xFF00000000ull}, {0xBDFFC00000ull, 0xFFFFFFFFFFull},
++            {0xBDFFA00000ull, 0xFFFFFFFFFFull}, {0xBDFFA10000ull, 0xFFFFFFFFFFull},
++            {0xBDFF900000ull, 0xFFFFFFFFFFull}, {0xC000000000ull, 0xFF00000000ull},
++            {0xBD80000000ull, 0xFFFF000000ull}, {0xBDA0000000ull, 0xFFFF000000ull},
++            {0xBD88000000ull, 0xFFFF000000ull}, {0xBD90000000ull, 0xFFFF000000ull}};
++
++        bool streamCallbackMatches(const MpegRegisteredCallback &callback, uint64_t packetId)
++        {
++            if (callback.type >= 10u)
++                return false;
++            const MpegStreamTypeId &entry = kMpegStreamTypeIds[callback.type];
++            const unsigned shift = entry.mask == 0xFFFFFFFFFFull ? 0u : entry.mask == 0xFFFF000000ull ? 24u : 32u;
++            const uint64_t id = entry.id | (static_cast<uint64_t>(callback.streamId) << shift);
++            return id == (packetId & entry.mask);
++        }
++
++        // packetId == 0: unknown (legacy callers) - match by type only.
++        std::vector<MpegRegisteredCallback> matchingStreamCallbacks(uint32_t mpegAddr, uint32_t streamType, uint64_t packetId = 0u)
+         {
+             std::vector<MpegRegisteredCallback> out;
+             auto it = g_mpeg_stub_state.callbacksByMpeg.find(mpegAddr);
+@@ -1155,7 +1180,8 @@
+ 
+             for (const MpegRegisteredCallback &callback : it->second)
+             {
+-                if (callback.stream && callback.type == streamType)
++                if (callback.stream && callback.type == streamType &&
++                    (packetId == 0u || streamCallbackMatches(callback, packetId)))
+                 {
+                     out.push_back(callback);
+                 }
+@@ -1169,7 +1195,8 @@
+                                       uint32_t len,
+                                       std::vector<MpegStreamCallbackEvent> &callbackEvents,
+                                       int64_t pts90k = -1,
+-                                      int64_t dts90k = -1)
++                                      int64_t dts90k = -1,
++                                      uint64_t packetId = 0u)
+         {
+             MpegStreamCallbackEvent event{};
+             event.mpegAddr = mpegAddr;
+@@ -1178,7 +1205,7 @@
+             event.len = len;
+             event.pts = pts90k >= 0 ? static_cast<uint64_t>(pts90k) : 0xFFFFFFFFFFFFFFFFull;
+             event.dts = dts90k >= 0 ? static_cast<uint64_t>(dts90k) : 0xFFFFFFFFFFFFFFFFull;
+-            event.callbacks = matchingStreamCallbacks(mpegAddr, streamType);
++            event.callbacks = matchingStreamCallbacks(mpegAddr, streamType, packetId);
+             if (!event.callbacks.empty())
+             {
+                 callbackEvents.push_back(std::move(event));
+@@ -1370,7 +1397,8 @@
+                                 static_cast<uint32_t>(packetEnd - payloadStart),
+                                 callbackEvents,
+                                 pes.pts90k,
+-                                pes.dts90k);
++                                pes.dts90k,
++                                static_cast<uint64_t>(streamId) << 32u);
+                         }
+                         if (!titleOwned)
+                             feedElementaryStream(
+@@ -1387,6 +1415,10 @@
+                     const size_t payloadStart = pes.payloadOffset;
+                     if (payloadStart < packetEnd && payloadStart < playback.pssGuestAddrs.size())
+                     {
++                        uint64_t packetId = static_cast<uint64_t>(streamId) << 32u;
++                        if (streamId == 0xBDu && payloadStart + 4u <= packetEnd)
++                            for (unsigned b = 0; b < 4u; ++b)
++                                packetId |= static_cast<uint64_t>(buffer[payloadStart + b]) << (24u - 8u * b);
+                         queueStreamCallbackEvent(
+                             mpegAddr,
+                             kMpegStrPCM,
+@@ -1394,7 +1426,8 @@
+                             static_cast<uint32_t>(packetEnd - payloadStart),
+                             callbackEvents,
+                             pes.pts90k,
+-                            pes.dts90k);
++                            pes.dts90k,
++                            packetId);
+                         queueStreamCallbackEvent(
+                             mpegAddr,
+                             kMpegStrADPCM,
+@@ -1402,7 +1435,8 @@
+                             static_cast<uint32_t>(packetEnd - payloadStart),
+                             callbackEvents,
+                             pes.pts90k,
+-                            pes.dts90k);
++                            pes.dts90k,
++                            packetId);
+                     }
+                 }
+ 
+@@ -2178,22 +2212,34 @@
+             auto &playback = getPlaybackState(mpegAddr);
+             if (playback.sawInput && playback.cdStreamGeneration != g_mpeg_stub_state.cdStreamGeneration)
+                 playback = makeFreshPlaybackState();
+-            // Probe host-owned bytes, but callback addresses always refer to the original ring.
++            // Probe host-owned bytes, but callback addresses always refer to the original ring. Start with a
++            // window that holds a few 2 KiB packs and grow it only while no complete packet is found: probing
++            // the whole 128 KiB on every call (each packet erasing the buffer front) cost more than a frame.
+             MpegPlaybackState probe;
+-            const uint32_t probeBytes = std::min<uint32_t>(available, 128u * 1024u);
+-            probe.pssBuffer.reserve(probeBytes);
+-            probe.pssGuestAddrs.reserve(probeBytes);
+-            uint32_t offset = data - base;
+-            for (uint32_t i = 0; i < probeBytes; ++i)
+-            {
+-                probe.pssBuffer.push_back(rdram[base + offset]);
+-                probe.pssGuestAddrs.push_back(ringBase + offset);
+-                if (++offset == ringSize) offset = 0u;
+-            }
+             std::vector<MpegStreamCallbackEvent> events;
+             size_t callbackStart = 0u;
+-            processPssBuffer(mpegAddr, probe, events, false, &callbackStart);
+-            packet->acceptedBytes = probeBytes - probe.pssBuffer.size();
++            uint32_t probeBytes = 0u;
++            for (uint32_t window = 16u * 1024u;; window *= 2u)
++            {
++                probeBytes = std::min<uint32_t>({available, window, 128u * 1024u});
++                probe = MpegPlaybackState{};
++                probe.pssBuffer.resize(probeBytes);
++                probe.pssGuestAddrs.resize(probeBytes);
++                uint32_t offset = data - base;
++                for (uint32_t i = 0; i < probeBytes; ++i)
++                {
++                    probe.pssBuffer[i] = rdram[base + offset];
++                    probe.pssGuestAddrs[i] = ringBase + offset;
++                    if (++offset == ringSize) offset = 0u;
++                }
++                events.clear();
++                callbackStart = 0u;
++                processPssBuffer(mpegAddr, probe, events, false, &callbackStart);
++                if (probe.pssBuffer.size() < probeBytes || !events.empty() || probeBytes == available ||
++                    probeBytes >= 128u * 1024u)
++                    break;
++            }
++            packet->acceptedBytes = probeBytes - static_cast<uint32_t>(probe.pssBuffer.size());
+             packet->rejectedBytes = callbackStart;
+             if (!events.empty())
+             {
+@@ -2657,7 +2703,9 @@
+             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
+             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+             const bool titleOwned = titleOwnsVideoUnlocked(mpegAddr);
+-            if (titleOwned)
++            // The IPU input belongs to the stream being demuxed. A decoder thread of an earlier movie that is
++            // still asking for pictures must not take it back from the current one.
++            if (titleOwned && g_mpegIpuOwner == 0u)
+                 g_mpegIpuOwner = mpegAddr;
+             // A title that owns the video still holds stream data after the disc stream ends.
+             if (playback.decodedFrames.empty() &&
