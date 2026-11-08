@@ -1,0 +1,396 @@
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1,3 +1,4 @@
++#include "ps2port_surface/mac_surface_presenter.hpp"
+ #include "ps2_runtime.h"
+ #include "host_frame_effects.hpp"
+ #include "overlay_dispatch.hpp"
+@@ -441,6 +442,12 @@
+ // Implemented by the window-thread keyboard event collector in ps2_pad.cpp.
+ bool ps2PortConsumeControlsToggle();
+ 
++#if defined(__APPLE__)
++static ps2port::MacSurfacePresenter surfacePresenter;
++static void* surfaceProducerHandle=nullptr;
++#endif
++static std::uint64_t presentationWindowEpoch=0;
++
+ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
+ {
+     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
+@@ -454,6 +461,16 @@
+     static bool s_hasUploadedFrame = false;
+     static std::vector<uint8_t> s_scratch;
+     static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
++    static std::uint64_t uploadedWindowEpoch=~std::uint64_t(0);
++    if (uploadedWindowEpoch!=presentationWindowEpoch) {
++        uploadedWindowEpoch=presentationWindowEpoch;
++        s_lastPresentationTick=std::numeric_limits<uint64_t>::max();
++        s_hasLatchedInitialFrame=false;s_lastCompletedStamp={};
++        s_lastDisplayFbp=s_lastSourceFbp=std::numeric_limits<uint32_t>::max();
++        s_lastPreferred=false;s_lastWidth=s_lastHeight=0;s_hasUploadedFrame=false;
++        s_scratch.clear();s_uploadBuffer.assign(DEFAULT_FB_SIZE,0);
++    }
++
+ 
+     // The executor owns scheduler state. Presentation reads its atomically
+     // published GS clock instead of racing the scheduler's non-atomic counter.
+@@ -518,6 +535,23 @@
+         completedStamp.ingressSequence == s_lastCompletedStamp.ingressSequence) {
+         outWidth=s_lastWidth;outHeight=s_lastHeight;return;
+     }
++#if defined(__APPLE__)
++    ps2port::SurfaceToken token{};
++    if (ps2port::decodeSurfaceToken(s_scratch,&token)) {
++        if (token.width!=width || token.height!=height)
++            throw std::runtime_error("Surface dimensions differ from latched field");
++        if (!surfacePresenter.acquire(token)) {outWidth=s_lastWidth;outHeight=s_lastHeight;return;}
++        if (tex.width!=int(width) || tex.height!=int(height)) {
++            UnloadTexture(tex);Image blank=GenImageColor(width,height,BLACK);
++            tex=LoadTextureFromImage(blank);UnloadImage(blank);SetTextureFilter(tex,TEXTURE_FILTER_BILINEAR);
++        }
++        if (!surfacePresenter.copyAcquired(tex.id,token)) {outWidth=s_lastWidth;outHeight=s_lastHeight;return;}
++        s_lastCompletedStamp=completedStamp;
++        PresentationPacing::uploaded(completedStamp.tick,completedStamp.generation,completedStamp.ingressSequence);
++        outWidth=s_lastWidth=width;outHeight=s_lastHeight=height;s_hasUploadedFrame=true;
++        return;
++    }
++#endif
+     s_lastCompletedStamp=completedStamp;
+     PresentationPacing::uploaded(completedStamp.tick, completedStamp.generation, completedStamp.ingressSequence);
+     // A GPU renderer can deliver its picture above 640 pixels wide: upload it whole instead of cropping.
+@@ -664,7 +698,10 @@
+ 
+         if (IsWindowReady())
+         {
+-            CloseWindow();
++            #if defined(__APPLE__)
++        if (!surfacePresenter.shutdown()) throw std::runtime_error("Surface context shutdown failed");
++#endif
++        CloseWindow();
+         }
+ 
+         m_loadedModules.clear();
+@@ -811,6 +848,11 @@
+         std::unique_ptr<GSRasterBackend> backend(factory());
+         if (!backend || !backend->OwnsRawGS())
+             throw std::runtime_error("GS plugin returned no raw GS owner");
++#if defined(__APPLE__)
++        surfaceProducerHandle=plugin;
++        if (const char* zero=std::getenv("PS2_PORT_HW_GS_ZERO_COPY"); zero && zero[0]=='1' && zero[1]==0)
++            if (!surfacePresenter.configureProducer(plugin)) throw std::runtime_error("Surface producer API missing from loaded plugin");
++#endif
+         m_gs.setRasterBackend(std::move(backend));
+         std::cerr << "[gpu] GS renderer plugin attached: " << pluginPath << std::endl;
+         // The module stays loaded: the backend's code lives in it.
+@@ -888,7 +930,15 @@
+             return true;
+         }
+ #if defined(PLATFORM_VITA)
+-        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
++        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); ++presentationWindowEpoch;
++#if defined(__APPLE__)
++        if (surfaceProducerHandle) {
++            const char* zero=std::getenv("PS2_PORT_HW_GS_ZERO_COPY");
++            if (zero && zero[0]=='1' && zero[1]==0 && !surfacePresenter.configureProducer(surfaceProducerHandle))
++                throw std::runtime_error("Cannot bind surface producer to recreated window");
++        }
++#endif
++ // raylib vita does not support audio
+ #else
+         SetConfigFlags(FLAG_WINDOW_RESIZABLE | (PresentationPacing::vsync() ? FLAG_VSYNC_HINT : 0));
+         int windowWidth = HOST_WINDOW_WIDTH, windowHeight = HOST_WINDOW_HEIGHT;
+@@ -900,7 +950,15 @@
+         }
+         if (const char *hd = std::getenv("PS2_PORT_ENHANCE_HIDPI"); hd && hd[0] == '1' && !hd[1])
+             SetConfigFlags(FLAG_WINDOW_HIGHDPI);
+-        InitWindow(windowWidth, windowHeight, title);
++        InitWindow(windowWidth, windowHeight, title); ++presentationWindowEpoch;
++#if defined(__APPLE__)
++        if (surfaceProducerHandle) {
++            const char* zero=std::getenv("PS2_PORT_HW_GS_ZERO_COPY");
++            if (zero && zero[0]=='1' && zero[1]==0 && !surfacePresenter.configureProducer(surfaceProducerHandle))
++                throw std::runtime_error("Cannot bind surface producer to recreated window");
++        }
++#endif
++
+         InitAudioDevice();
+         m_audioBackend.setAudioReady(IsAudioDeviceReady());
+ #endif
+@@ -2850,6 +2908,9 @@
+     }
+     if (!headless) {
+         UnloadTexture(frameTex);
++        #if defined(__APPLE__)
++        if (!surfacePresenter.shutdown()) throw std::runtime_error("Surface context shutdown failed");
++#endif
+         CloseWindow();
+     }
+ 
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -1,3 +1,4 @@
++#include "ps2port_surface/surface_token.hpp"
+ #include <cstdio>
+ #include <chrono>
+ #include <cstdlib>
+@@ -668,19 +669,22 @@
+         const auto now = std::chrono::steady_clock::now();
+         if (reports < 256u && now - lastReport >= std::chrono::seconds(2)) {
+             size_t nonblack = 0;
+-            for (uint32_t y = 0; y < frame.height; ++y)
++            ps2port::SurfaceToken profileToken{};
++            const bool surfacePayload = ps2port::decodeSurfaceToken(frame.pixels, &profileToken);
++            const size_t stride = surfacePayload ? 0u : gsHostFrameStride(frame.width, frame.height, frame.pixels.size());
++            for (uint32_t y = 0; stride && y < frame.height; ++y)
+                 for (uint32_t x = 0; x < frame.width; ++x) {
+-                    const size_t offset = (size_t(y) * kHostFrameWidth + x) * 4u;
++                    const size_t offset = size_t(y) * stride + x * 4u;
+                     if (offset + 2u < frame.pixels.size() &&
+                         (frame.pixels[offset] || frame.pixels[offset + 1u] || frame.pixels[offset + 2u]))
+                         ++nonblack;
+                 }
+-            std::fprintf(stderr, "[port-lab presentation] valid=%u size=%ux%u nonblack=%zu display=%u source=%u preferred=%u pmode=%llu dispfb1=%llu dispfb2=%llu ctx0=%u:%u:%u ctx1=%u:%u:%u\n",
++            std::fprintf(stderr, "[port-lab presentation] valid=%u size=%ux%u nonblack=%zu display=%u source=%u preferred=%u pmode=%llu dispfb1=%llu dispfb2=%llu ctx0=%u:%u:%u ctx1=%u:%u:%u payload=%s\n",
+                 unsigned(hasFrame), frame.width, frame.height, nonblack, frame.displayFbp, frame.sourceFbp,
+                 unsigned(frame.usedPreferred), static_cast<unsigned long long>(request.pmode),
+                 static_cast<unsigned long long>(request.dispfb1), static_cast<unsigned long long>(request.dispfb2),
+                 request.contextFrames[0].fbp, request.contextFrames[0].fbw, unsigned(request.contextFrames[0].psm),
+-                request.contextFrames[1].fbp, request.contextFrames[1].fbw, unsigned(request.contextFrames[1].psm));
++                request.contextFrames[1].fbp, request.contextFrames[1].fbw, unsigned(request.contextFrames[1].psm), surfacePayload ? "surface-unmeasured" : "pixels");
+             lastReport = now;
+             ++reports;
+         }
+@@ -758,6 +762,14 @@
+     if (outUsedPreferred)
+         *outUsedPreferred = m_hostPresentationUsedPreferred;
+ 
++    ps2port::SurfaceToken token{};
++    if (ps2port::decodeSurfaceToken(m_hostPresentationFrame,&token)) {
++        if (token.width!=outWidth || token.height!=outHeight) {
++            outPixels.clear();outWidth=outHeight=0;return false;
++        }
++        outPixels=m_hostPresentationFrame;
++        return true;
++    }
+     const size_t packedRowBytes = static_cast<size_t>(outWidth) * 4u;
+     outPixels.resize(packedRowBytes * static_cast<size_t>(outHeight));
+     if (outWidth != 0u && outHeight != 0u)
+--- /dev/null
++++ b/ps2xRuntime/include/ps2port_surface/mac_surface_presenter.hpp
+@@ -0,0 +1,132 @@
++#pragma once
++#include "surface_consumer.hpp"
++#include "surface_token.hpp"
++#if defined(__APPLE__)
++#include <OpenGL/OpenGL.h>
++#include <OpenGL/gl3.h>
++#include <IOSurface/IOSurface.h>
++#include <dlfcn.h>
++
++namespace ps2port {
++// One instance per window/context. Call shutdown BEFORE destroying that context.
++// The originating producer stays loaded until its last GPU consumer releases.
++class MacSurfacePresenter {
++    using Wait = void* (*)(std::uint64_t*,std::uint32_t*,std::uint32_t*,int);
++    using Release = void (*)(std::uint64_t);
++    Wait wait_ = nullptr;
++    Release release_ = nullptr;
++    void* module_ = nullptr;
++    CGLContextObj context_ = nullptr;
++    GLuint rectangle_ = 0, read_ = 0, draw_ = 0;
++    GLsync fence_ = nullptr;
++    SurfaceConsumer consumer_;
++    IOSurfaceRef acquired_ = nullptr;
++    SurfaceToken acquiredToken_{};
++    bool bindProducer(void* loaderHandle=nullptr) {
++        auto lookup=loaderHandle?loaderHandle:RTLD_DEFAULT;
++        auto wait = reinterpret_cast<Wait>(dlsym(lookup,"hwgs_surface_wait"));
++        auto release = reinterpret_cast<Release>(dlsym(lookup,"hwgs_surface_release"));
++        if (module_) return loaderHandle ? wait==wait_ && release==release_ : true;
++        Dl_info wi{},ri{};
++        if (!wait || !release || !dladdr(reinterpret_cast<void*>(wait),&wi) ||
++            !dladdr(reinterpret_cast<void*>(release),&ri) || wi.dli_fbase!=ri.dli_fbase) return false;
++        module_=dlopen(wi.dli_fname,RTLD_NOW|RTLD_LOCAL);
++        if (!module_) return false;
++        // Resolve against the pinned handle, not a replaceable global lookup.
++        wait_=reinterpret_cast<Wait>(dlsym(module_,"hwgs_surface_wait"));
++        release_=reinterpret_cast<Release>(dlsym(module_,"hwgs_surface_release"));
++        if (!wait_ || !release_) {dlclose(module_);module_=nullptr;return false;}
++        return true;
++    }
++    bool retire(bool drain) {
++        if (!consumer_.busy()) return true;
++        if (!context_ || CGLGetCurrentContext()!=context_) return false;
++        SurfaceCompletion completion=SurfaceCompletion::pending;
++        if (drain || !fence_) {
++            // A forced timeout is insufficient. This completes all prior work
++            // in the context before making the IOSurface writable again.
++            glFinish(); completion=SurfaceCompletion::complete;
++        } else {
++            const auto result=glClientWaitSync(fence_,GL_SYNC_FLUSH_COMMANDS_BIT,0);
++            if (result==GL_ALREADY_SIGNALED || result==GL_CONDITION_SATISFIED)
++                completion=SurfaceCompletion::complete;
++            else if (result==GL_WAIT_FAILED) {
++                // A broken fence is not completion; explicitly drain this
++                // still-current context before returning its backing storage.
++                glFinish();completion=SurfaceCompletion::complete;
++            }
++        }
++        if (!consumer_.retire(completion,release_)) return false;
++        acquired_=nullptr;acquiredToken_={};
++        if (fence_) {glDeleteSync(fence_);fence_=nullptr;}
++        return true;
++    }
++public:
++    MacSurfacePresenter() = default;
++    MacSurfacePresenter(const MacSurfacePresenter&)=delete;
++    MacSurfacePresenter& operator=(const MacSurfacePresenter&)=delete;
++    ~MacSurfacePresenter() { shutdown(); }
++    bool configureProducer(void* loaderHandle) {
++        if (!loaderHandle || consumer_.busy()) return false;
++        return bindProducer(loaderHandle);
++    }
++    bool ready() {
++        auto current=CGLGetCurrentContext();
++        if (!current || (context_ && current!=context_)) return false;
++        context_=current;
++        return retire(false);
++    }
++    bool acquire(const SurfaceToken& token) {
++        if (!validSurfaceToken(token) || !ready() || !bindProducer()) return false;
++        auto serial=token.serial;std::uint32_t w=0,h=0;
++        auto* surface=static_cast<IOSurfaceRef>(wait_(&serial,&w,&h,0));
++        if (!surface) return false; // stale tokens are rejected; keep the last window picture
++        consumer_.acquired(serial);
++        if (serial!=token.serial || w!=token.width || h!=token.height) {retire(true);return false;}
++        acquired_=surface;acquiredToken_=token;
++        return true;
++    }
++    bool copyAcquired(GLuint destination,const SurfaceToken& token) {
++        if (!destination || !acquired_ || consumer_.serial()!=token.serial || token.width!=acquiredToken_.width || token.height!=acquiredToken_.height || CGLGetCurrentContext()!=context_) return false;
++        const auto w=token.width,h=token.height;
++        auto surface=acquired_;
++        if (!rectangle_) {glGenTextures(1,&rectangle_);glGenFramebuffers(1,&read_);glGenFramebuffers(1,&draw_);}
++        GLint oldRead=0,oldDraw=0,oldRect=0;GLfloat clear[4];GLboolean mask[4];
++        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&oldRead);glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&oldDraw);
++        glGetIntegerv(GL_TEXTURE_BINDING_RECTANGLE,&oldRect);glGetFloatv(GL_COLOR_CLEAR_VALUE,clear);glGetBooleanv(GL_COLOR_WRITEMASK,mask);
++        const bool scissor=glIsEnabled(GL_SCISSOR_TEST);
++        glBindTexture(GL_TEXTURE_RECTANGLE,rectangle_);
++        bool ok=CGLTexImageIOSurface2D(context_,GL_TEXTURE_RECTANGLE,GL_RGBA,GLsizei(w),GLsizei(h),GL_BGRA,GL_UNSIGNED_INT_8_8_8_8_REV,surface,0)==kCGLNoError;
++        if (ok) {
++            glBindFramebuffer(GL_READ_FRAMEBUFFER,read_);glFramebufferTexture2D(GL_READ_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_RECTANGLE,rectangle_,0);
++            glBindFramebuffer(GL_DRAW_FRAMEBUFFER,draw_);glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,destination,0);
++            ok=glCheckFramebufferStatus(GL_READ_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE && glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE;
++            if (ok) {
++                glDisable(GL_SCISSOR_TEST);
++                glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_COLOR_BUFFER_BIT,GL_NEAREST);
++                glColorMask(GL_FALSE,GL_FALSE,GL_FALSE,GL_TRUE);glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);
++            }
++            glFramebufferTexture2D(GL_READ_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_RECTANGLE,0,0);
++            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,0,0);
++        }
++        if (scissor) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
++        glColorMask(mask[0],mask[1],mask[2],mask[3]);glClearColor(clear[0],clear[1],clear[2],clear[3]);
++        glBindFramebuffer(GL_READ_FRAMEBUFFER,oldRead);glBindFramebuffer(GL_DRAW_FRAMEBUFFER,oldDraw);glBindTexture(GL_TEXTURE_RECTANGLE,oldRect);
++        fence_=glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE,0);glFlush();
++        if (!fence_ || !ok) retire(true);
++        return ok;
++    }
++    bool shutdown() {
++        if (context_ && CGLGetCurrentContext()!=context_) return false;
++        if (!retire(true)) return false;
++        if (rectangle_) glDeleteTextures(1,&rectangle_);
++        if (read_) glDeleteFramebuffers(1,&read_);
++        if (draw_) glDeleteFramebuffers(1,&draw_);
++        rectangle_=read_=draw_=0;context_=nullptr;
++        if (module_) dlclose(module_);
++        module_=nullptr;wait_=nullptr;release_=nullptr;
++        return true;
++    }
++};
++}
++#endif
+--- /dev/null
++++ b/ps2xRuntime/include/ps2port_surface/surface_consumer.hpp
+@@ -0,0 +1,36 @@
++#pragma once
++#include <cstdint>
++#include <stdexcept>
++
++namespace ps2port {
++// Platform adapters translate their fence result into these three outcomes.
++// Timeout and wait failure are never evidence of GPU completion.
++enum class SurfaceCompletion { pending, complete, failed };
++
++class SurfaceConsumer {
++    std::uint64_t serial_ = 0;
++public:
++    SurfaceConsumer() = default;
++    SurfaceConsumer(const SurfaceConsumer&) = delete;
++    SurfaceConsumer& operator=(const SurfaceConsumer&) = delete;
++    std::uint64_t serial() const { return serial_; }
++    bool busy() const { return serial_ != 0; }
++    void acquired(std::uint64_t serial) {
++        if (!serial || busy()) throw std::logic_error("Invalid surface acquisition");
++        serial_ = serial;
++    }
++    // release must be the originating producer's callback. Its module and the
++    // consumer context must remain alive until this returns true.
++    template<class Release>
++    bool retire(SurfaceCompletion completion, Release release) {
++        if (!busy()) return true;
++        if (completion != SurfaceCompletion::complete) return false;
++        const auto serial = serial_;
++        release(serial);
++        serial_ = 0;
++        return true;
++    }
++    // No destructor release: CPU object destruction does not complete GPU work.
++    // Window shutdown must drain its context, retire, then unload the producer.
++};
++}
+--- /dev/null
++++ b/ps2xRuntime/include/ps2port_surface/surface_token.hpp
+@@ -0,0 +1,41 @@
++#pragma once
++#include <cstdint>
++#include <cstring>
++#include <stdexcept>
++#include <vector>
++
++namespace ps2port {
++struct SurfaceToken {
++    std::uint64_t serial;
++    std::uint32_t width, height;
++};
++// Fixed little-endian wire format, compatible with recovered macOS tokens.
++// Never reinterpret a pixel buffer as a native structure (alignment/padding).
++inline bool validSurfaceToken(const SurfaceToken& token) {
++    return token.serial && token.width && token.height &&
++           token.width <= 16384 && token.height <= 16384;
++}
++inline std::vector<std::uint8_t> encodeSurfaceToken(const SurfaceToken& token) {
++    if (!validSurfaceToken(token)) throw std::invalid_argument("Invalid surface token");
++    std::vector<std::uint8_t> bytes(24);
++    std::memcpy(bytes.data(), "PS2ZCPY1", 8);
++    for (unsigned i=0; i<8; ++i) bytes[8+i] = std::uint8_t(token.serial >> (8*i));
++    for (unsigned i=0; i<4; ++i) {
++        bytes[16+i] = std::uint8_t(token.width >> (8*i));
++        bytes[20+i] = std::uint8_t(token.height >> (8*i));
++    }
++    return bytes;
++}
++inline bool decodeSurfaceToken(const std::vector<std::uint8_t>& bytes, SurfaceToken* output) {
++    if (!output || bytes.size()!=24 || std::memcmp(bytes.data(), "PS2ZCPY1", 8)) return false;
++    SurfaceToken token{};
++    for (unsigned i=0; i<8; ++i) token.serial |= std::uint64_t(bytes[8+i]) << (8*i);
++    for (unsigned i=0; i<4; ++i) {
++        token.width |= std::uint32_t(bytes[16+i]) << (8*i);
++        token.height |= std::uint32_t(bytes[20+i]) << (8*i);
++    }
++    if (!validSurfaceToken(token)) return false;
++    *output = token;
++    return true;
++}
++}

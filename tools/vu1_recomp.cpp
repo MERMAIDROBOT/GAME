@@ -1288,6 +1288,28 @@ namespace
             return out;
         }
 
+        uint32_t vu0PollRegister(uint32_t start) const
+        {
+            // IBEQ vi, vi0, exit; NOP; B poll; NOP. Match the complete
+            // four-pair loop, including control bits and both delay slots.
+            if (!g_vu0 || start + 3 >= last || !segs.count(start + 2))
+                return 0;
+            constexpr uint32_t upperNop = 0x000002ffu;
+            constexpr uint32_t lowerNop = 0x8000033cu;
+            for (uint32_t index = start; index < start + 4; ++index)
+                if (pairs[index].d.upper != upperNop || pairs[index].fallback)
+                    return 0;
+            const uint32_t lower = pairs[start].d.lower;
+            if ((lower & ~0x000f7fffu) != 0x50000000u ||
+                (pairs[start].target >= start * 8u && pairs[start].target <= (start + 3u) * 8u) ||
+                pairs[start + 1].d.lower != lowerNop ||
+                pairs[start + 2].d.lower != 0x400007fdu ||
+                pairs[start + 3].d.lower != lowerNop)
+                return 0;
+            const uint32_t lhs = fVis(lower), rhs = fVit(lower);
+            return lhs == 0u || rhs == 0u ? lhs | rhs : 0u;
+        }
+
         std::string emitSegment(uint32_t start)
         {
             gView = RegView{};
@@ -1317,6 +1339,20 @@ namespace
             const RegView view = gView;
             gView = RegView{};
             std::string out = segLabel(start * 8u) + ":\n";
+            if (const uint32_t poll = vu0PollRegister(start); poll && k.pos == 2u && k.bound == 2u)
+            {
+                // The EE cannot update VI during one VU0 slice. Skip only whole
+                // iterations with ready operands. Leave the last partial loop to
+                // the original code so the budget exit PC and delay state match.
+                constexpr uint32_t period = 4u;
+                constexpr uint32_t loopBudget = period + kMaxVfLatency - 1u;
+                const std::string reg = num(poll);
+                out += "        if (!vu.m_viBranchBackupValid && cyc >= vu.m_viReady[" + reg +
+                       "] && vu.m_state.vi[" + reg + "] != 0 && budget >= cyc && budget - cyc >= " +
+                       num(loopBudget) + "u)\n";
+                out += "            cyc += ((budget - cyc - " + num(loopBudget - period) + "u) / " +
+                       num(period) + "u) * " + num(period) + "u;\n";
+            }
             const std::string fallback = " goto " + label(start * 8u) + ";\n";
             out += "        if (cyc + " + num(k.bound + kMaxVfLatency - 1u) + "u > budget)" + fallback;
             for (const auto &[position, exprs] : k.checks)

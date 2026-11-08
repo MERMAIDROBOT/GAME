@@ -34,6 +34,8 @@
 
 #include "gpu_internal.h"
 #include "surface_leases.h"
+#include "alpha_proof.h"
+#include "ordered_coverage.h"
 #if defined(__APPLE__)
 #include <IOSurface/IOSurface.h>
 #include <vulkan/vulkan_metal.h>
@@ -647,6 +649,8 @@ private:
     Texture blank_;                 /* bound when nothing is textured */
     GsDrawState state_;
     PendingVertices pending_;
+    std::vector<CoverageTriangle> alpha_coverage_;
+    bool alpha_coverage_unknown_=false;
     /* Vertex data for what is recorded: appended to chunks of host-visible
        memory, all reusable once the submission that reads them has run. */
     struct VertexChunk {
@@ -2522,7 +2526,31 @@ void VulkanGsRenderer::UploadDepth(std::uint32_t zbp, std::uint32_t width, std::
     });
 }
 
-void VulkanGsRenderer::DrawTriangles(const GsDrawState& state, const GsVertex* v, std::size_t count) {
+void VulkanGsRenderer::DrawTriangles(const GsDrawState& input, const GsVertex* v, std::size_t count) {
+    static const bool proveAlpha=[] { const char* e=std::getenv("PS2_PORT_HW_GS_ALPHA_PROOF");return e&&std::strcmp(e,"1")==0; }();
+    GsDrawState effective;
+    const GsDrawState* selected=&input;
+    if (proveAlpha && vertexAlphaAlwaysPasses(input,v,count)) {
+        effective=input;effective.alpha_test=false;selected=&effective;
+        static bool reported=false;
+        if (!reported) { reported=true;std::fprintf(stderr,"[gpu alpha] proven passing vertex-alpha test batched without AFAIL split\n"); }
+    }
+    const GsDrawState& state=*selected;
+    static const bool diagnoseAlpha=[] {const char* e=std::getenv("PS2_PORT_HW_GS_PROFILE");return e&&std::strcmp(e,"1")==0;}();
+    if (diagnoseAlpha) {
+        static std::vector<std::uint64_t> seen;
+        static std::uint64_t previous=~std::uint64_t(0);
+        const auto key=std::uint64_t(input.atst)|(std::uint64_t(input.aref)<<4)|(std::uint64_t(input.afail)<<12)|
+            (std::uint64_t(input.tcc)<<16)|(std::uint64_t(input.tfx)<<17)|(std::uint64_t(input.alpha_test)<<20)|
+            (std::uint64_t(input.depth_write)<<21)|(std::uint64_t(input.psm)<<24);
+        if (seen.size()<32 && key!=previous) {
+            previous=key;
+            if (std::find(seen.begin(),seen.end(),key)==seen.end()) {
+                seen.push_back(key);
+                std::fprintf(stderr,"[gpu alpha state] test=%u ref=%u fail=%u tcc=%u tfx=%u enabled=%u depth_write=%u psm=%u\n",input.atst,input.aref,input.afail,unsigned(input.tcc),unsigned(input.tfx),unsigned(input.alpha_test),unsigned(input.depth_write),input.psm);
+            }
+        }
+    }
     if (!SameBatch(state, state_)) Flush();
     // A primitive sampling the target it draws into, where the batch has
     // drawn already: the batch so far first (the next takes a new copy).
@@ -2540,6 +2568,9 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& state, const GsVertex* v
     const bool depth_written = state.depth && state.depth_write;
     const bool two_pass = state.alpha_test && state.atst != 1 && count >= 3 &&
                           (((state.afail == 1 || state.afail == 2) && depth_written) || state.afail == 3);
+    static const bool refineAlpha=[] {const char* e=std::getenv("PS2_PORT_HW_GS_ALPHA_COVERAGE");return e&&std::strcmp(e,"1")==0;}();
+    const bool refine=refineAlpha && two_pass && !feedback && !shader_blend;
+    if(refine && alpha_coverage_.size()>=256)Flush();
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     if (feedback || shader_blend || two_pass) {
         float fx0 = 1e30f, fy0 = 1e30f, fx1 = -1e30f, fy1 = -1e30f;
@@ -2569,8 +2600,14 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& state, const GsVertex* v
         const auto overlaps = [&](int l, int t, int r, int bottom) {
             return drawn_any_ && r >= drawn_x0_ && l <= drawn_x1_ && bottom >= drawn_y0_ && t <= drawn_y1_;
         };
-        if ((feedback && overlaps(tu0, tv0, tu1, tv1)) || ((shader_blend || two_pass) && overlaps(x0, y0, x1, y1)))
-            Flush();
+        if ((feedback && overlaps(tu0, tv0, tu1, tv1)) || ((shader_blend || two_pass) && overlaps(x0, y0, x1, y1))) {
+            bool independent=refine && count==3 && !alpha_coverage_unknown_;
+            if(independent) {
+                const auto next=coverageTriangle(v);
+                for(const auto& prior:alpha_coverage_)if(!independentCoverage(prior,next)){independent=false;break;}
+            }
+            if(!independent)Flush();
+        }
         // What the copy must hold: the texels as CLAMP leaves them.
         if (feedback) {
             const int w = int(tw), h = int(th);
@@ -2593,6 +2630,14 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& state, const GsVertex* v
         if (shader_blend) Reads(x0, y0, x1, y1);
     }
     state_ = state;
+    if(refine) {
+        if(count==3)alpha_coverage_.push_back(coverageTriangle(v));
+        else alpha_coverage_unknown_=true;
+    } else if (feedback || shader_blend || two_pass) {
+        // Bounds-tracked draw without a recorded triangle: later refined draws
+        // cannot prove independence from it.
+        alpha_coverage_unknown_=true;
+    }
     if (feedback || shader_blend || two_pass) {
         if (!drawn_any_) {
             drawn_x0_ = x0;
@@ -2797,6 +2842,7 @@ void VulkanGsRenderer::FlatQuadRange(FlatQuad& q, const GsDrawState& state) {
 }
 
 void VulkanGsRenderer::Flush() {
+    alpha_coverage_.clear();alpha_coverage_unknown_=false;
     drawn_any_ = false;
     sprites_.clear();
     quads_.clear();

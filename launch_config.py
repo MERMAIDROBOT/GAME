@@ -12,9 +12,11 @@ BOOLS|={'PS2_PORT_ENHANCE_'+n for n in ['ASYNC_GPU','CLIP','FXAA','HIRES_SCANOUT
 NUMBERS={'PS2_PORT_ENHANCE_'+n for n in ['FOV','IOP_BATCH','MOVIE_WEAVE','PACING_MS','SHARPNESS','SSAA','SSAA_DROP_MS','SSAA_PANIC_MS','UPSCALE']}
 NUMBERS|={'PS2_PORT_HW_GS_SCALE','PS2_PORT_PRIVATE_IOP_IMPORT_CYCLES'}
 BINDINGS={'PS2_PORT_PRIVATE_GS_PLUGIN','PS2_PORT_PRIVATE_MOLTENVK'}
+BOOLS|={'PS2_PORT_ENHANCE_HIDPI','PS2_PORT_SHOW_CONTROLS'}
 BOOLS|={'PS2_PORT_SPECIAL_TIMER_RESET','PS2_PORT_SPECIAL_TIMER_PER_SPECIAL'}
 BOOLS|={'PS2_PORT_HW_GS_ADAPTIVE','PS2_PORT_HW_GS_STALE_TARGET_FIX'}
-PATHS={'PS2_PORT_TEX_PACK','PS2_PORT_HW_GS_PIPELINE_CACHE_DIR','PS2_PORT_SAVE_ROOT'}
+BOOLS|={'PS2_PORT_GS_PICTURE_TRACE'}
+PATHS={'PS2_PORT_TEX_PACK','PS2_PORT_HW_GS_PIPELINE_CACHE_DIR','PS2_PORT_SAVE_ROOT','PS2_PORT_HW_GS_RECORD'}
 
 
 def directory_pin(directory):
@@ -40,11 +42,19 @@ def prepare(profile,private,frameworks):
  for key,value in env.items():
   if not isinstance(value,str) or not value or len(value)>100 or '\0' in value or '\n' in value:raise ValueError('Native launch values must be bounded strings')
   valid=(key in BOOLS and value in {'0','1'}) or (key in NUMBERS and bool(re.fullmatch(r'[0-9]+(?:\.[0-9]+)?',value)))
-  valid|=key=='PS2_PORT_ENHANCE_MOVIE_FILL' and value in {'off','on','0','1'}
-  valid|=key=='PS2_PORT_ENHANCE_WINSIZE' and bool(re.fullmatch(r'[1-9][0-9]{1,4}x[1-9][0-9]{1,4}',value))
+  valid|=key=='PS2_PORT_HW_GS_RECORD_MB' and bool(re.fullmatch(r'[1-9][0-9]{0,2}',value)) and int(value)<=512
   valid|=key=='PS2_PORT_HW_GS_ADAPTIVE_STALLS' and bool(re.fullmatch(r'[1-9][0-9]{0,5}',value)) and int(value)<=100000
+  valid|=key=='PS2_PORT_ENHANCE_MOVIE_FILL' and value in {'off','crop','stretch'}
+  if key=='PS2_PORT_ENHANCE_WINSIZE' and re.fullmatch(r'[0-9]{3,4}x[0-9]{3,4}',value):
+   w,h=map(int,value.split('x'));valid|=320<=w<=8192 and 240<=h<=8192
+  # Opt-in diagnostic; this legacy runtime flag tests presence, so reject a misleading '0'.
+  valid|=key in {'PS2_PORT_MPEG_TRACE','PS2_PORT_OVERLAY_MISS_TRACE'} and value=='1'
   if not valid:raise ValueError('Unknown or invalid native launch setting: '+str(key))
   result[key]=value
+ if 'PS2_PORT_HW_GS_RECORD' in paths and 'PS2_PORT_HW_GS_RECORD_MB' not in result:
+  raise ValueError('Local GS recording requires an explicit bounded record limit')
+ if 'PS2_PORT_HW_GS_RECORD_MB' in result and 'PS2_PORT_HW_GS_RECORD' not in paths:
+  raise ValueError('Local GS record limit requires a private recording path')
  assets={}
  for key,record in paths.items():
   if key not in PATHS or not isinstance(record,dict) or set(record)-{'path','sha256','source'}:raise ValueError('Unknown native launch path')

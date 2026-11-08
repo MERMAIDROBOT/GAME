@@ -87,10 +87,11 @@ enum class Src { Vt, Bc, Q, I };
 // Zero, sign, underflow and overflow bits of the written lanes (x is the high bit of each group);
 // the status register summarises them in bits 0-3 with sticky copies in 6-9.
 inline void setMac(R5900Context *c, const Lane (&r)[4], uint32_t dest) {
-    uint32_t mac = 0;
+    uint32_t mac = 0, extraSticky = 0;
     for (int k = 0; k < 4; ++k) {
         if (!(dest & (8u >> k)))
             continue;
+        if (r[k].productUnderflow) extraSticky |= 0x100u;
         const uint32_t bit = 3 - k;
         if ((r[k].bits & 0x7F800000u) == 0) mac |= 1u << bit;
         if (r[k].bits >> 31) mac |= 1u << (4 + bit);
@@ -102,7 +103,7 @@ inline void setMac(R5900Context *c, const Lane (&r)[4], uint32_t dest) {
     for (uint32_t n = 0; n < 4; ++n)
         if (mac & (0xFu << (4 * n)))
             summary |= 1u << n;
-    c->vu0_status = static_cast<uint16_t>((c->vu0_status & ~0xFu) | summary | (summary << 6));
+    c->vu0_status = static_cast<uint16_t>((c->vu0_status & ~0xFu) | summary | (summary << 6) | extraSticky);
 }
 
 // VDIV/VSQRT/VRSQRT: invalid (bit 4) and divide (bit 5) replace the old ones; sticky copies in 10, 11.

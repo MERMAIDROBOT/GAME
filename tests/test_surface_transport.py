@@ -42,3 +42,9 @@ class SurfaceTransport(unittest.TestCase):
    with self.assertRaises(ValueError):transport.window_source(source)
   for source in ['', FRONTEND+FRONTEND]:
    with self.assertRaises(ValueError):transport.frontend_source(source)
+
+ def test_current_window_size_and_formatted_accounting_shape(self):
+  source=WINDOW.replace('InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);','InitWindow(windowWidth, windowHeight, title);').replace('completedStamp.tick,completedStamp.generation,completedStamp.ingressSequence','completedStamp.tick, completedStamp.generation, completedStamp.ingressSequence')
+  changed=transport.window_source(source)
+  self.assertIn('InitWindow(windowWidth, windowHeight, title); ++presentationWindowEpoch;',changed)
+  self.assertLess(changed.index('surfacePresenter.acquire(token)'),changed.index('s_lastCompletedStamp=completedStamp;',changed.index('surfacePresenter.acquire(token)')))
