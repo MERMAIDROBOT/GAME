@@ -230,3 +230,15 @@ class BootLaunchParityTests(unittest.TestCase):
             self.assertEqual(report['probe_overrides']['PS2_PORT_HEADLESS'],'1')
             self.assertEqual(report['effective_environment']['PS2_PORT_HW_GS_ZERO_COPY'],'1')
             self.assertFalse(report['gameplay_verified'])
+
+class ProvenPatchRecordRefresh(unittest.TestCase):
+    def test_new_proven_stack_refreshes_stale_receipt_without_reapplying_sources(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'patches').mkdir();current=root/'patches/new.patch';current.write_text('new proven patch\n')
+            record=root/'record';record.mkdir();(record/'00-old.patch').write_text('old patch\n')
+            with patch.object(native.lab,'ROOT',root),patch.object(native,'RUNTIME_PATCHES',('patches/new.patch',)),patch.object(native,'_applied_stack_dir',return_value=record),patch.object(native,'_stack_already_applied',return_value=True),patch.object(native,'_git_apply',side_effect=AssertionError('Proven sources must not be peeled/reapplied')):
+                native.apply_runtime_patch()
+                self.assertEqual([p.name for p in record.iterdir()],['00-new.patch'])
+                self.assertEqual((record/'00-new.patch').read_bytes(),current.read_bytes())
+                native.apply_runtime_patch()

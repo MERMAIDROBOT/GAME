@@ -674,3 +674,45 @@ is only needed by titles that require sector reads unavailable from extraction.
 Interrupted correction staging is recoverable: an incomplete cache with the exact source, staging and executable identity manifest is preserved under an `interrupted` sibling name before a fresh staging attempt. Completed receipts are verified and reused; unknown or symlinked partial outputs block recovery. No partial source is accepted as a completed build.
 
 Pinned incremental caches are followed to their directly compiled ancestor (at most 16 records). Every receipt and recipe pin is checked inside private storage; intermediate cached objects are never accepted. Source, dependency, object and compiler checks still determine reuse, and the resulting build remains incremental evidence.
+
+### Carry pinned title corrections across a compiler update
+
+Generate a fresh, accepted translation of the same original executable with the old
+corrections disabled in the isolated new profile. Then run:
+
+```sh
+python3 pipeline.py --profile NEW_PROFILE.json rebase-generated-corrections \
+  --previous-profile PREVIOUS_PROFILE.json \
+  --bases analysis/rebase-bases.json \
+  --destination title-corrections/new-candidate
+```
+
+The bases file maps each corrected `.cpp` filename to its original baseline path,
+relative to the previous profile's private directory. Verified `.cpp.gz` baselines
+are supported. The tool checks the original executable, previous manifest and
+baseline pins, and the fresh accepted translation's source hashes. It produces a
+three-way source candidate without changing the active generated files or profile.
+Conflicts retain their inputs and produce no replay manifest. A clean candidate
+still needs source review, explicit correction-profile selection, native syntax,
+build and gameplay checks. `check-generated` checks every declared correction as
+well as its representative sample; compilation alone never certifies gameplay.
+
+Correction replay now retains pristine pre-edit bytes automatically in the private
+`analysis/generated-correction-baselines` cache, indexed by their SHA-256. Omit
+`--bases` when those retained bytes are available. The optional mapping supports
+older correction sets whose verified baselines were retained elsewhere. Neither
+path guesses a missing baseline or changes the original executable.
+
+Local debug apps can be packaged on an external drive without moving the source
+checkout: `python3 pipeline.py --profile /absolute/profile.json package-local
+--output-directory "/Volumes/Your Drive/Local Previews"`. The output directory
+must be absolute; existing apps are refused and the normal signing-space and
+source/build identity checks still apply. Keep the drive connected while playing.
+
+For a local transition diagnosis, the launch profile may explicitly set
+`PS2_PORT_HW_GS_RECORD_MB` to 1–512 and declare `PS2_PORT_HW_GS_RECORD` under
+`native_launch.paths` as a private relative file. The renderer remains armed
+until that file's `.start` marker exists, and stops at `.stop` or the size limit.
+These are local, retail-derived graphics commands, excluded from source packages.
+`PS2_PORT_OVERLAY_MISS_TRACE=1` prints bounded residency evidence after a cached
+program stops matching; it does not relax matching or manufacture callable code.

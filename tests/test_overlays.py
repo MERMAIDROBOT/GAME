@@ -36,6 +36,14 @@ def noise(size, seed=b'overlay'):
 
 
 class CodeSpans(unittest.TestCase):
+    def test_direct_branch_retains_alternate_return_pair_without_executing_padding(self):
+        words=[0x27bdfff0,0x10800004,0,0,JR_RA,0x27bd0010,JR_RA,0x2402ffff]
+        raw=struct.pack('<8I',*words)+noise(128)
+        self.assertEqual(overlays.extend_branch_tails(raw,0x200000,[(0,24)]),[(0,32)])
+        # An address in unrelated data, with no accepted incoming branch, stays data.
+        words[1]=0
+        self.assertEqual(overlays.extend_branch_tails(struct.pack('<8I',*words)+noise(128),0x200000,[(0,24)]),[(0,24)])
+
     def test_code_between_data_is_found_and_edges_are_exact(self):
         code = functions(0x200000, 512)  # 32 KiB
         data = noise(8192 + 12) + code + noise(8192, b'tail')
@@ -148,7 +156,7 @@ class Qualify(unittest.TestCase):
 
 
 class BuildOptIn(unittest.TestCase):
-    def test_overlays_join_the_native_build_only_when_the_profile_asks(self):
+    def test_accepted_overlays_join_automatically_with_explicit_boot_only_opt_out(self):
         import native
         with tempfile.TemporaryDirectory() as tmp:
             private = Path(tmp)
@@ -162,7 +170,170 @@ class BuildOptIn(unittest.TestCase):
                 native.overlay_build_directory({'overlay_build': True}, private)
             record.write_text(json.dumps(dict(accepted_overlays=2, syntax_sample=dict(success=True))))
             self.assertEqual(native.overlay_build_directory({'overlay_build': True}, private), str(private / 'overlays'))
+            self.assertEqual(native.overlay_build_directory({}, private), str(private / 'overlays'))
+            self.assertEqual(native.overlay_build_directory({'overlay_build': False}, private), '')
+            with self.assertRaisesRegex(ValueError, 'boolean'):
+                native.overlay_build_directory({'overlay_build': 'yes'}, private)
+            (private/'overlays').mkdir();(private/'overlays/overlay_manifest.cpp').write_text('// accepted tables')
+            with self.assertRaisesRegex(ValueError, 'instruction knowledge'):
+                native.overlay_build_receipt({},private)
+            from knowledge import load,sha
+            info=json.loads(record.read_text());info.update(knowledge_bank_sha256=sha(json.dumps(load(),sort_keys=True).encode()),qualified_metadata_version=2);record.write_text(json.dumps(info))
+            before=native.overlay_build_receipt({},private)
+            (private/'overlays/overlay_manifest.cpp').write_text('// changed tables')
+            self.assertNotEqual(before,native.overlay_build_receipt({},private))
 
+
+class UnityMetadata(unittest.TestCase):
+    def test_distinct_overlay_guards_and_initializers_compile_together(self):
+        import shutil,subprocess
+        if not shutil.which('clang++'):self.skipTest('clang++ required')
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            (root/'ps2_runtime.h').write_text('#pragma once\n#include <cstdint>\nstruct R5900Context;class PS2Runtime {public:using RecompiledFunction=void(*)(uint8_t*,R5900Context*,PS2Runtime*);};\n')
+            (root/'ps2_stubs.h').write_text('');(root/'ps2_syscalls.h').write_text('')
+            for oid in ('o00','o01'):
+                g=root/oid;g.mkdir()
+                (g/'ps2_recompiled_functions.h').write_text('#ifndef PS2_RECOMPILED_FUNCTIONS_H\n#define PS2_RECOMPILED_FUNCTIONS_H\n#include <cstdint>\nstruct R5900Context;class PS2Runtime;\nvoid sub_00200000_0x200000(uint8_t* rdram,R5900Context* ctx,PS2Runtime* runtime);\n#endif\n')
+                (g/'ps2_recompiled_stubs.h').write_text('#ifndef PS2_RECOMPILED_STUBS_H\n#define PS2_RECOMPILED_STUBS_H\n#endif\n')
+                (g/'register_functions.cpp').write_text('#include "ps2_runtime.h"\n#include <ps2_recompiled_functions.h>\nextern const uint32_t g_ps2RecompiledFunctionTableBase=0x200000,g_ps2RecompiledFunctionTableEnd=0x200004,g_ps2RecompiledFunctionTableSlotCount=1;\nPS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[1]={};\nnamespace {struct GeneratedFunctionTableInitializer {GeneratedFunctionTableInitializer(){g_ps2RecompiledFunctionTable[0]=sub_00200000_0x200000;}};static const GeneratedFunctionTableInitializer g_generatedFunctionTableInitializer;}\n')
+                overlays.qualify(g,oid)
+            unit=root/'unity.cpp';unit.write_text('#include "o00/o00_register_functions.cpp"\n#include "o01/o01_register_functions.cpp"\n')
+            command=['clang++','-std=c++17','-fsyntax-only','-I'+str(root),'-I'+str(root/'o00'),'-I'+str(root/'o01'),str(unit)]
+            good=subprocess.run(command,capture_output=True,text=True);self.assertEqual(good.returncode,0,good.stderr)
+            # Reintroduce the shared guards and initializer names: the fixture must detect the old bug.
+            for oid in ('o00','o01'):
+                for path in (root/oid).iterdir():
+                    path.write_text(path.read_text().replace(oid+'_PS2_RECOMPILED','PS2_RECOMPILED').replace(oid+'_GeneratedFunctionTableInitializer','GeneratedFunctionTableInitializer').replace(oid+'_g_generatedFunctionTableInitializer','g_generatedFunctionTableInitializer'))
+            bad=subprocess.run(command,capture_output=True,text=True);self.assertNotEqual(bad.returncode,0)
+
+class ConcurrentVuCompatibility(unittest.TestCase):
+    def test_native_guard_rejects_old_resident_code_and_records_exact_gap(self):
+        import native
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);(root/'generated').mkdir();(root/'analysis').mkdir()
+            source=root/'generated/body.cpp'
+            source.write_text('// 0x1000: 0x48210800 qmfc2.ni\nSET_GPR_VEC(ctx, 1, old);\n')
+            with self.assertRaisesRegex(ValueError, 'Resident translation predates'):
+                native.require_vu0_translation_compatibility(root)
+            report=json.loads((root/'analysis/vu0-translation-compatibility.json').read_text())
+            self.assertEqual(report['missing'][0]['address'],'1000')
+            source.write_text('// 0x1000: 0x48210800 qmfc2.ni\nPS2_VU0_SYNC_READ(ctx, runtime); SET_GPR_VEC(ctx, 1, old);\n')
+            self.assertEqual(native.require_vu0_translation_compatibility(root),dict(checked=1,passed=True))
+
+    def test_opcode_audit_distinguishes_reads_writes_interlocks_and_macros(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / 'body.cpp'
+            instructions = [
+                (0x48210800, 'PS2_VU0_SYNC_READ(ctx, runtime);'),
+                (0x48210801, 'PS2_VU0_INTERLOCK(ctx, runtime);'),
+                (0x48a19800, 'PS2_VU0_SYNC_WRITE(ctx, runtime);'),
+                (0x48a19801, 'PS2_VU0_INTERLOCK(ctx, runtime); PS2_VU0_SYNC_WRITE(ctx, runtime);'),
+                (0x4a9e0784, 'PS2_VU0_INTERLOCK(ctx, runtime);'),
+                (0x46157bc2, 'unrelated();'),  # COP1 is not a VU transfer
+            ]
+            text = ''.join(f'// 0x{0x1000+i*4:x}: 0x{word:08x} instruction\n{body}\n' for i, (word, body) in enumerate(instructions))
+            path.write_text(text)
+            result = overlays.vu0_sync_audit(root)
+            self.assertTrue(result['passed']); self.assertEqual(result['checked'], 5)
+            path.write_text(text.replace('PS2_VU0_SYNC_WRITE(ctx, runtime);', ''))
+            missing = overlays.vu0_sync_audit(root)
+            self.assertFalse(missing['passed']); self.assertEqual(len(missing['missing']), 2)
+
+    def test_failed_refresh_restores_sources_and_preserves_failed_output(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root/'overlays').mkdir(); (root/'analysis').mkdir()
+            (root/'overlays/original.cpp').write_text('retained')
+            report = dict(accepted_overlays=1)
+            def fail(*args):
+                (root/'overlays').mkdir(); (root/'overlays/failed.cpp').write_text('diagnostic')
+                raise RuntimeError('compiler failed')
+            with patch.object(overlays, 'translate_overlays', side_effect=fail):
+                with self.assertRaisesRegex(RuntimeError, 'compiler failed'):
+                    overlays.refresh_legacy_overlays({}, root, report)
+            self.assertEqual((root/'overlays/original.cpp').read_text(), 'retained')
+            self.assertEqual(json.loads((root/'analysis/overlay-translation.json').read_text()), report)
+            self.assertEqual(len(list((root/'previous-overlays').glob('*/failed-refresh/failed.cpp'))), 1)
+
+    def test_equal_counts_cannot_hide_different_registered_programs(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);(root/'overlays').mkdir();(root/'analysis').mkdir()
+            (root/'overlays/original.cpp').write_text('retained')
+            old=dict(accepted_overlays=1,overlays=[dict(id='o01',registered=True,file='sectors',offset=0,bytes=4096,load_address='0x200000')])
+            changed=json.loads(json.dumps(old));changed['overlays'][0]['offset']=4096
+            def replace(*args):
+                (root/'overlays').mkdir()
+                return changed
+            with patch.object(overlays,'translate_overlays',side_effect=replace):
+                with self.assertRaisesRegex(ValueError,'changed accepted coverage'):
+                    overlays.refresh_legacy_overlays({},root,old)
+            self.assertEqual((root/'overlays/original.cpp').read_text(),'retained')
+
+    def test_only_header_proven_rebasing_can_change_the_accepted_code_base(self):
+        from unittest.mock import patch
+        for actual in (0x200000,0x300000):
+            with self.subTest(actual=actual), tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);(root/'overlays').mkdir();(root/'analysis').mkdir()
+                (root/'overlays/original.cpp').write_text('retained')
+                (root/'analysis/code-census.json').write_text('{}')
+                row=dict(id='o01',registered=True,file='level.bin',offset=32,bytes=4096,load_address='0x200010')
+                old=dict(accepted_overlays=1,overlays=[row]);new=json.loads(json.dumps(old))
+                new['overlays'][0].update(load_address=hex(actual),source_layout={'proof':True})
+                def translate(*args):
+                    (root/'overlays').mkdir()
+                    return new
+                with patch.object(overlays,'translate_overlays',side_effect=translate), \
+                     patch.object(overlays,'candidates',return_value=([('o01',{})],[])), \
+                     patch.object(overlays,'program_image',return_value=dict(base=0x200000,layout={'proof':True})), \
+                     patch.object(overlays,'vu0_sync_audit',return_value={'passed':True}):
+                    if actual==0x200000:
+                        self.assertEqual(overlays.refresh_legacy_overlays({},root,old)['overlays'][0]['load_address'],'0x200000')
+                    else:
+                        with self.assertRaisesRegex(ValueError,'proven section layout'):
+                            overlays.refresh_legacy_overlays({},root,old)
+                        self.assertEqual((root/'overlays/original.cpp').read_text(),'retained')
+
+
+class BranchHandoffClosure(unittest.TestCase):
+    def test_incremental_reuse_preserves_only_byte_identical_source_timestamps(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);old=root/'old/generated';new=root/'new/generated'
+            old.mkdir(parents=True);new.mkdir(parents=True)
+            for name,before,after in [('same.cpp','same','same'),('changed.h','old','new')]:
+                (old/name).write_text(before);(new/name).write_text(after)
+                os.utime(old/name,ns=(1000000000,1000000000));os.utime(new/name,ns=(2000000000,2000000000))
+            self.assertEqual(overlays.reuse_source_timestamps(root/'old',root/'new'),1)
+            self.assertEqual((new/'same.cpp').stat().st_mtime_ns,1000000000)
+            self.assertEqual((new/'changed.h').stat().st_mtime_ns,2000000000)
+            self.assertEqual((new/'changed.h').read_text(),'new')
+
+    def test_branch_decoder_excludes_trap_immediates_reserved_forms_and_unrequested_calls(self):
+        self.assertIsNone(overlays.direct_branch_target(0x04080004,0x1000))  # TGEI, not REGIMM branch
+        self.assertIsNone(overlays.direct_branch_target(0x18010004,0x1000))  # reserved BLEZ rt
+        self.assertIsNone(overlays.direct_branch_target(0x49040004,0x1000))  # unsupported BC2 condition
+        self.assertEqual(overlays.direct_branch_target(0x04000004,0x1000),0x1014)
+        self.assertIsNone(overlays.direct_branch_target(0x0c000400,0x1000))
+        self.assertEqual(overlays.direct_branch_target(0x0c000400,0x1000,include_calls=True),0x1000)
+
+    def test_alternate_return_is_recovered_but_registered_or_external_targets_are_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            table=root/'register_functions.cpp'
+            table.write_text('const uint32_t g_ps2RecompiledFunctionTableBase = 0x1000u;\n'
+                             'const uint32_t g_ps2RecompiledFunctionTableEnd = 0x1040u;\n'
+                             'g_ps2RecompiledFunctionTable[0] = entry; // 0x1000\n')
+            (root/'body.cpp').write_text(
+                '// 0x1000: 0x10000003 beq zero, zero, 0x1010\nctx->pc = 0x1010u; return;\n'
+                '// 0x1004: 0x10000020 beq zero, zero, external\nctx->pc = 0x1088u; return;\n'
+                '// 0x1008: 0x1000fffd beq zero, zero, 0x1000\nctx->pc = 0x1000u; return;\n'
+                'ctx->pc = 0x1020u; return; // no decoded direct branch to this address\n')
+            self.assertEqual(overlays.branch_handoff_hints(root),[0x1010])
+            with table.open('a') as f:f.write('g_ps2RecompiledFunctionTable[4] = alternate; // 0x1010\n')
+            self.assertEqual(overlays.branch_handoff_hints(root),[])
 
 if __name__ == '__main__':
     unittest.main()

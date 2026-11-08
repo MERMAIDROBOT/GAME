@@ -53,7 +53,7 @@ def rewrite(text):
         count += 1
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         start = match.end()
-        prefix = re.match(r'\s*(?:ctx->pc\s*=\s*0x[0-9a-fA-F]+u?;\s*)?', text[start:end])
+        prefix = re.match(r'\s*(?:ctx->pc\s*=\s*0x[0-9a-fA-F]+u?;\s*)?(?:PS2_VU0_INTERLOCK\(ctx, runtime\);\s*)?', text[start:end])
         start += prefix.end()
         body = text[start:end]
         if shape(emit(word)).match(body):
@@ -163,7 +163,7 @@ def mem_rewrite(text):
         count += 1
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         start = match.end()
-        prefix = re.match(r'\s*(?:ctx->pc\s*=\s*0x[0-9a-fA-F]+u?;\s*)?', text[start:end])
+        prefix = re.match(r'\s*(?:ctx->pc\s*=\s*0x[0-9a-fA-F]+u?;\s*)?(?:PS2_VU0_INTERLOCK\(ctx, runtime\);\s*)?', text[start:end])
         start += prefix.end()
         body = text[start:end]
         if shape(mem_emit(word)).match(body):

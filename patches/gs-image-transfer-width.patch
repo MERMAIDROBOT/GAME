@@ -1,0 +1,29 @@
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -1720,20 +1720,22 @@
+         switch (psm)
+         {
+         case 0:  // PSMCT32
+-        case 1:  // PSMCT24 (treat as 32)
+-        case 27: // PSMT8H (packed in 32-bit lanes)
+-        case 36: // PSMT4HL (packed in 32-bit lanes)
+-        case 44: // PSMT4HH (packed in 32-bit lanes)
+             bytes = pixels * 4ull;
++            break;
++        case 1:  // PSMCT24: transfers omit the preserved high byte.
++            bytes = pixels * 3ull;
+             break;
+         case 2:  // PSMCT16
+         case 10: // PSMCT16S
+             bytes = pixels * 2ull;
+             break;
+         case 19: // PSMT8
++        case 27: // PSMT8H: one index per byte, despite 32-bit VRAM lanes.
+             bytes = pixels;
+             break;
+         case 20: // PSMT4
++        case 36: // PSMT4HL
++        case 44: // PSMT4HH
+             bytes = (pixels + 1ull) / 2ull;
+             break;
+         default:

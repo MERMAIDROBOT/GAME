@@ -502,3 +502,51 @@ live code identity, overlay generations or gameplay.
 a qualified integer-subset interpreter, actual compiled readable C++ comparisons
 and content-addressed private recipes. Every target is compared anew. This is a
 bounded leaf-function workflow and does not activate replacements in a game.
+
+## Retained title fixes in the default build
+
+A private profile can declare `generated_source_corrections: {path, sha256}`. The pinned
+manifest identifies an exact executable revision, original and corrected C++ hashes,
+replacement source files and required helper headers. `generated_corrections.py`
+validates every input before writing, replays corrections after fresh translation
+and before a native build, and recognizes an already corrected source. Drift fails
+explicitly. Packaging rejects a pre-correction runner or changed source/revision.
+These private records and replacement game source are never in the source package.
+
+The default runtime also builds the frame-only FXAA/FSR1/sharpening presenter and
+the Mac shared-surface consumer. Stock raylib remains unchanged. Presentation,
+window size, movie fill, optional controls and shared-surface transfer are explicit
+profile settings; disabled effects preserve the regular draw path. FSR1-derived
+shader attribution is in `runtime/presentation/FSR1-LICENSE.txt`. Immutable texture
+packs are hash-verified and staged into versioned Application Support directories,
+separately from saves and mutable caches. Compilation and synthetic layout/lease
+checks do not certify live gameplay, audio, temporal smoothness or full title parity.
+
+Accepted overlay translations are now included by the default native build automatically; `overlay_build: false`
+is an explicit boot-only diagnostic opt-out. Before compilation, the builder applies the same executable
+instruction knowledge used for resident code to every registered overlay and makes generated include guards and
+table initializers unique across unity units. It rechecks the tables and syntax samples, records the knowledge
+revision, and binds the packaged app to the overlay translation and registration-manifest receipts. An accepted
+translation on disk is not evidence that an older app contains its code.
+
+The concurrent VU0 runtime requires matching COP2 synchronization emissions. An opcode-based check detects
+older resident sources and stops the build with a compatibility report; retain and revalidate any revision-specific
+corrections before retranslating them. Registered overlays with this older emission shape are regenerated through
+the current compiler automatically. Previous sources and failed attempts are retained, and a changed accepted-overlay
+count or remaining synchronization gap blocks the build. This checks the specified transfer/macro contract;
+it does not certify every VU instruction or the resulting gameplay.
+
+Overlay code scanning also follows direct branches into bounded alternate-return blocks beyond density boundaries.
+Those blocks must be executable in the wrapped input; adding an entry hint cannot override the compiler's
+executable-section check. Translation compares decoded branches and emitted scheduler handoffs with the callable
+table, then refines missing entries through the real compiler with a bounded retry count. Remaining gaps block
+that refresh and retain its failed output for diagnosis. This avoids declaring a level complete merely because
+its main entry compiled while a reachable return path was omitted.
+
+Movie continuity checks include an asset-free MPEG stream fragmented down to single bytes and a parser-bypass
+negative control. IPU input pieces pass through the video parser rather than treating arbitrary DMA pieces as
+complete codec packets. Scanout qualification uses the enabled output circuit and supported geometry; unrelated
+PMODE bits must not freeze a valid single-circuit display. These tests qualify their specific contracts, not a
+whole game's playability, audio, frame pacing or all PS2 display modes.
+
+Matching decompilation metadata can drive hash-verified function boundaries and an automated reference-entry audit. See [reference qualification](REFERENCE-QUALIFICATION.md) for the supported section container and optional metadata contract.

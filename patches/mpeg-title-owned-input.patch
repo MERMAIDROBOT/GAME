@@ -1,0 +1,663 @@
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+@@ -507,6 +507,9 @@
+             std::vector<uint8_t> videoSequenceSyncBuffer;
+             std::vector<uint8_t> pssBuffer;
+             std::vector<uint32_t> pssGuestAddrs;
++            // Accepted sinks of a ring packet are not called twice if another sink is full.
++            uint32_t pendingCallbackAddr = 0u, pendingCallbackLength = 0u;
++            std::vector<uint32_t> acceptedCallbackHandles;
+             std::deque<MpegDecodedFrame> decodedFrames;
+             std::unique_ptr<MpegFfmpegDecoder> decoder;
+             uint8_t frameRateCode = 0u;
+@@ -1182,12 +1185,35 @@
+             }
+         }
+ 
++        // libmpeg lets a title own the video elementary stream. With its own video stream callback
++        // (sceMpegAddStrCallback, M2V) and a Nodata callback, demux hands video only to the title,
++        // which feeds it back to the decoder when asked: through the IPU input FIFO (DMA channel
++        // 4) or sceMpegAddBs. Feeding demuxed video to the decoder as well would leave the
++        // title's own stream buffer full, so a player that waits for it to drain never finishes.
++        constexpr uint32_t kMpegCallbackNodata = 1u;
++        uint32_t g_mpegIpuOwner = 0u;
++
++        bool titleOwnsVideoUnlocked(uint32_t mpegAddr)
++        {
++            auto it = g_mpeg_stub_state.callbacksByMpeg.find(mpegAddr);
++            if (it == g_mpeg_stub_state.callbacksByMpeg.end())
++                return false;
++            bool video = false, nodata = false;
++            for (const MpegRegisteredCallback &callback : it->second)
++            {
++                video |= callback.stream && callback.type == kMpegStrM2V && callback.func != 0u;
++                nodata |= !callback.stream && callback.type == kMpegCallbackNodata && callback.func != 0u;
++            }
++            return video && nodata;
++        }
++
+         void processPssBuffer(uint32_t mpegAddr,
+                               MpegPlaybackState &playback,
+                               std::vector<MpegStreamCallbackEvent> &callbackEvents,
+-                              bool finalChunk = false)
++                              bool finalChunk = false, size_t *callbackPacketStart = nullptr)
+         {
+             std::vector<uint8_t> &buffer = playback.pssBuffer;
++            const size_t initialSize = buffer.size();
+ 
+             while (true)
+             {
+@@ -1324,8 +1350,13 @@
+                     }
+                 }
+ 
++                const size_t eventsBefore = callbackEvents.size();
++                const size_t packetStart = initialSize - buffer.size();
+                 if (isVideoStreamId(streamId))
+                 {
++                    const bool titleOwned = titleOwnsVideoUnlocked(mpegAddr);
++                    if (titleOwned)
++                        g_mpegIpuOwner = mpegAddr;
+                     const MpegPesHeader pes = parsePesHeader(buffer.data(), packetEnd);
+                     const size_t payloadStart = pes.payloadOffset;
+                     if (payloadStart < packetEnd)
+@@ -1341,12 +1372,13 @@
+                                 pes.pts90k,
+                                 pes.dts90k);
+                         }
+-                        feedElementaryStream(
+-                            playback,
+-                            buffer.data() + payloadStart,
+-                            packetEnd - payloadStart,
+-                            pes.pts90k,
+-                            pes.dts90k);
++                        if (!titleOwned)
++                            feedElementaryStream(
++                                playback,
++                                buffer.data() + payloadStart,
++                                packetEnd - payloadStart,
++                                pes.pts90k,
++                                pes.dts90k);
+                     }
+                 }
+                 else if (isAudioStreamId(streamId))
+@@ -1375,6 +1407,11 @@
+                 }
+ 
+                 erasePssPrefix(playback, packetEnd);
++                if (callbackPacketStart && callbackEvents.size() != eventsBefore)
++                {
++                    *callbackPacketStart = packetStart;
++                    return;
++                }
+             }
+         }
+ 
+@@ -1399,6 +1436,8 @@
+                     continue;
+                 }
+ 
++                // Disc EOF is not decoder EOF when compressed bytes still belong to the title.
++                if (titleOwnsVideoUnlocked(mpegAddr)) continue;
+                 finishPlaybackStream(mpegAddr, playback);
+                 changed = true;
+             }
+@@ -1831,6 +1870,10 @@
+ 
+         void resetMpegStubStateUnlocked()
+         {
++            g_mpegIpuOwner = 0u;
++            g_mpegFedStreamEnded.clear();
++            g_mpegEndOnlyFeeds.clear();
++            g_mpegLastFeedEndOnly.clear();
+             g_mpeg_stub_state.initialized = false;
+             g_mpeg_stub_state.nextCallbackHandle = 1u;
+             g_mpeg_stub_state.cdStreamGeneration = 0u;
+@@ -1961,6 +2004,215 @@
+         setReturnS32(ctx, 0);
+     }
+ 
++    static void mpegGuestWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
++    {
++        if (uint8_t *p = getMemPtr(rdram, addr))
++            *reinterpret_cast<uint32_t *>(p) = value;
++    }
++    static void mpegGuestWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
++    {
++        if (uint8_t *p = getMemPtr(rdram, addr))
++        {
++            *reinterpret_cast<uint32_t *>(p) = static_cast<uint32_t>(value);
++            *reinterpret_cast<uint32_t *>(p + 4) = static_cast<uint32_t>(value >> 32);
++        }
++    }
++
++    static uint8_t *g_mpegRdram = nullptr;
++    static PS2Runtime *g_mpegRuntime = nullptr;
++
++    // sceMpegIsEnd: the producer has ended and every decoded picture has been presented.
++    static bool mpegIsEndUnlocked(uint32_t mpegAddr, MpegPlaybackState &playback, PS2Runtime *runtime)
++    {
++        // Only the producer end is authoritative: the CD stream EOF, or for title-fed video (AddBs or
++        // the IPU FIFO) an accepted end. A sequence_end_code can be observed while more data is
++        // still buffered, and a decoder failure before producer EOF may still recover.
++        const bool producerEnded =
++            titleOwnsVideoUnlocked(mpegAddr)
++                ? g_mpegFedStreamEnded[mpegAddr]
++                : ((g_mpeg_stub_state.currentCdStreamEofSeen &&
++                    playback.cdStreamGeneration == g_mpeg_stub_state.cdStreamGeneration) ||
++                   g_mpegFedStreamEnded[mpegAddr]);
++        const bool ended = producerEnded &&
++                           (playback.streamEnded || (playback.decoderFailed && playback.sawInput));
++        const uint64_t presentationEnd = playback.presentationEndTickQ32;
++        const uint64_t currentTickQ32 = runtime != nullptr
++                                            ? (runtime->eeScheduler().currentVSyncTick() << 32u)
++                                            : std::numeric_limits<uint64_t>::max();
++        const bool presentationComplete =
++            presentationEnd == std::numeric_limits<uint64_t>::max() || currentTickQ32 >= presentationEnd;
++        return ended && playback.decodedFrames.empty() && presentationComplete;
++    }
++
++    // libmpeg keeps its decoder state in the work area at sceMpeg.sys (+0x40): word 0 is the end
++    // flag sceMpegIsEnd returns, word 1 the pictures still held (sceMpegIsRefBuffEmpty is "word 1
++    // == 0"). Titles link their own copies of these one-line accessors; keep the words current so
++    // those copies agree with the host decoder.
++    static void publishGuestStatusUnlocked(uint8_t *rdram, uint32_t mpegAddr, MpegPlaybackState &playback,
++                                           PS2Runtime *runtime)
++    {
++        const uint8_t *header = rdram ? getConstMemPtr(rdram, mpegAddr + 0x40u) : nullptr;
++        if (!header || ((mpegAddr + 0x40u) & PS2_RAM_MASK) > PS2_RAM_SIZE - 4u)
++            return;
++        const uint32_t sys = *reinterpret_cast<const uint32_t *>(header);
++        if (sys == 0u || (sys & PS2_RAM_MASK) > PS2_RAM_SIZE - 8u)
++            return;
++        mpegGuestWrite32(rdram, sys + 0x0u, mpegIsEndUnlocked(mpegAddr, playback, runtime) ? 1u : 0u);
++        mpegGuestWrite32(rdram, sys + 0x4u, static_cast<uint32_t>(playback.decodedFrames.size()));
++    }
++
++    // IPU input FIFO sink: bytes a title DMAs to the IPU are its video elementary stream.
++    static void mpegIpuInput(const uint8_t *data, uint32_t size)
++    {
++        uint32_t owner = 0u;
++        bool wake = false;
++        {
++            std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
++            owner = g_mpegIpuOwner;
++            if (owner == 0u || !data || size == 0u)
++                return;
++            MpegPlaybackState &playback = getPlaybackState(owner);
++            const size_t framesBefore = playback.decodedFrames.size();
++            feedElementaryStream(playback, data, size);
++            if (playback.sawSequenceEnd && !playback.streamEnded)
++            {
++                // The title sent the end of the sequence: the producer has ended.
++                g_mpegFedStreamEnded[owner] = true;
++                playback.streamEnded = true;
++                flushDecoderIfEnded(playback);
++            }
++            publishGuestStatusUnlocked(g_mpegRdram, owner, playback, g_mpegRuntime);
++            wake = playback.decodedFrames.size() != framesBefore || playback.streamEnded || playback.decoderFailed;
++        }
++        if (wake && g_mpegRuntime)
++            g_mpegRuntime->eeScheduler().completeExternalWait(kMpegPictureWaitType, owner, KE_OK);
++    }
++
++    static void publishGuestStatus(uint8_t *rdram, uint32_t mpegAddr, PS2Runtime *runtime)
++    {
++        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
++        publishGuestStatusUnlocked(rdram, mpegAddr, getPlaybackState(mpegAddr), runtime);
++    }
++
++    // [V-rt] A stream callback returning zero has not taken ownership. Never advance past
++    // that PES or retain a pointer into a ring the caller is now allowed to overwrite.
++    // Title-fed streams parse one callback packet per call; incomplete packets stay
++    // in caller-owned input. The legacy direct-decoder path retains its fragment buffer.
++    struct OwnedRingPacket
++    {
++        uint32_t mpegAddr = 0u;
++        size_t acceptedBytes = 0u, rejectedBytes = 0u, next = 0u;
++        std::vector<std::pair<MpegStreamCallbackEvent, MpegRegisteredCallback>> callbacks;
++    };
++
++    static void finishOwnedRingPacket(const std::shared_ptr<OwnedRingPacket> &packet,
++                                     R5900Context *ctx, PS2Runtime *runtime, bool accepted)
++    {
++        std::vector<uint32_t> completed;
++        bool eofChanged = false;
++        const size_t consumed = accepted ? packet->acceptedBytes : packet->rejectedBytes;
++        {
++            std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
++            auto &playback = getPlaybackState(packet->mpegAddr);
++            playback.sawInput = true;
++            playback.cdStreamGeneration = g_mpeg_stub_state.cdStreamGeneration;
++            if (accepted) playback.acceptedCallbackHandles.clear();
++            // Program end terminates the PSS input only. Nodata/IPU still drains the title's ES.
++            recordCdStreamBytesDemuxedUnlocked(consumed, completed, eofChanged);
++        }
++        setReturnS32(ctx, static_cast<int32_t>(consumed));
++        for (auto id : completed) runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, id, KE_OK);
++    }
++
++    static void dispatchOwnedRingPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
++                                        const std::shared_ptr<OwnedRingPacket> &packet)
++    {
++        while (packet->next < packet->callbacks.size())
++        {
++            const auto &[event, callback] = packet->callbacks[packet->next++];
++            {
++                std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
++                const auto &done = getPlaybackState(packet->mpegAddr).acceptedCallbackHandles;
++                if (std::find(done.begin(), done.end(), callback.handle) != done.end()) continue;
++            }
++            auto invocation = dispatchGuestStreamCallback(rdram, ctx, runtime, event, callback);
++            if (!invocation) { finishOwnedRingPacket(packet, ctx, runtime, false); return; }
++            auto release = std::move(invocation->onComplete);
++            const uint32_t handle = callback.handle;
++            invocation->onComplete = [rdram, runtime, packet, release, handle](const R5900Context &result, R5900Context &parent)
++            {
++                release(result, parent);
++                if (getRegU32(&result, 2) == 0u)
++                {
++                    finishOwnedRingPacket(packet, &parent, runtime, false);
++                    return;
++                }
++                {
++                    std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
++                    getPlaybackState(packet->mpegAddr).acceptedCallbackHandles.push_back(handle);
++                }
++                dispatchOwnedRingPacket(rdram, &parent, runtime, packet);
++            };
++            runtime->eeScheduler().invokeCurrent(std::move(*invocation));
++            return;
++        }
++        finishOwnedRingPacket(packet, ctx, runtime, true);
++    }
++
++    static bool demuxTitleOwnedInput(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
++                                    uint32_t mpegAddr, uint32_t dataAddr, uint32_t available,
++                                    uint32_t ringBase, uint32_t ringSize)
++    {
++        auto packet = std::make_shared<OwnedRingPacket>();
++        packet->mpegAddr = mpegAddr;
++        {
++            std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
++            if (!titleOwnsVideoUnlocked(mpegAddr)) return false;
++            const uint32_t base = ringBase & PS2_RAM_MASK, data = dataAddr & PS2_RAM_MASK;
++            if (!rdram || !ringSize || ringSize > PS2_RAM_SIZE - base || data < base ||
++                data - base >= ringSize || available > ringSize)
++            {
++                setReturnS32(ctx, 0);
++                return true;
++            }
++            auto &playback = getPlaybackState(mpegAddr);
++            if (playback.sawInput && playback.cdStreamGeneration != g_mpeg_stub_state.cdStreamGeneration)
++                playback = makeFreshPlaybackState();
++            // Probe host-owned bytes, but callback addresses always refer to the original ring.
++            MpegPlaybackState probe;
++            const uint32_t probeBytes = std::min<uint32_t>(available, 128u * 1024u);
++            probe.pssBuffer.reserve(probeBytes);
++            probe.pssGuestAddrs.reserve(probeBytes);
++            uint32_t offset = data - base;
++            for (uint32_t i = 0; i < probeBytes; ++i)
++            {
++                probe.pssBuffer.push_back(rdram[base + offset]);
++                probe.pssGuestAddrs.push_back(ringBase + offset);
++                if (++offset == ringSize) offset = 0u;
++            }
++            std::vector<MpegStreamCallbackEvent> events;
++            size_t callbackStart = 0u;
++            processPssBuffer(mpegAddr, probe, events, false, &callbackStart);
++            packet->acceptedBytes = probeBytes - probe.pssBuffer.size();
++            packet->rejectedBytes = callbackStart;
++            if (!events.empty())
++            {
++                const auto &first = events.front();
++                if (playback.pendingCallbackAddr != first.dataAddr || playback.pendingCallbackLength != first.len)
++                {
++                    playback.pendingCallbackAddr = first.dataAddr;
++                    playback.pendingCallbackLength = first.len;
++                    playback.acceptedCallbackHandles.clear();
++                }
++                for (const auto &event : events)
++                    for (const auto &callback : event.callbacks)
++                        packet->callbacks.emplace_back(event, callback);
++            }
++        }
++        dispatchOwnedRingPacket(rdram, ctx, runtime, packet);
++        return true;
++    }
++
+     void sceMpegAddBs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         const uint32_t mpegAddr = getRegU32(ctx, 4);
+@@ -2001,6 +2253,7 @@
+             if (g_mpegFedStreamEnded[mpegAddr])
+                 playback.streamEnded = true;
+             wakePictureWaiter = playback.decodedFrames.size() != framesBefore || playback.streamEnded || playback.decoderFailed;
++            publishGuestStatusUnlocked(rdram, mpegAddr, playback, runtime);
+         }
+ 
+         if (wakePictureWaiter)
+@@ -2071,19 +2324,6 @@
+         setReturnU32(ctx, 1u);
+     }
+ 
+-    static void mpegGuestWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
+-    {
+-        if (uint8_t *p = getMemPtr(rdram, addr))
+-            *reinterpret_cast<uint32_t *>(p) = value;
+-    }
+-    static void mpegGuestWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
+-    {
+-        if (uint8_t *p = getMemPtr(rdram, addr))
+-        {
+-            *reinterpret_cast<uint32_t *>(p) = static_cast<uint32_t>(value);
+-            *reinterpret_cast<uint32_t *>(p + 4) = static_cast<uint32_t>(value >> 32);
+-        }
+-    }
+ 
+     void sceMpegCreate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+@@ -2103,6 +2343,9 @@
+         {
+             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+             getPlaybackState(param_1) = makeFreshPlaybackState();
++            g_mpegFedStreamEnded.erase(param_1);
++            g_mpegEndOnlyFeeds.erase(param_1);
++            g_mpegLastFeedEndOnly.erase(param_1);
+         }
+ 
+         const uint32_t puVar4 = uVar3 + 0x108u;
+@@ -2156,6 +2399,13 @@
+         for (unsigned i = 0; i < 9u; ++i)
+             mpegGuestWrite32(rdram, 0x171800u + i * 4u, s_refValues[i]);
+ 
++        g_mpegRdram = rdram;
++        g_mpegRuntime = runtime;
++        if (runtime)
++            runtime->memory().setIpuInputSink(mpegIpuInput);
++        mpegGuestWrite32(rdram, uVar3 + 0x0u, 0u);
++        mpegGuestWrite32(rdram, uVar3 + 0x4u, 0u);
++
+         uint32_t setDynamicRet = a1_init;
+         if (uint8_t *p = getMemPtr(rdram, puVar4 + 8))
+             setDynamicRet = *reinterpret_cast<uint32_t *>(p);
+@@ -2171,6 +2421,10 @@
+         const uint32_t mpegAddr = getRegU32(ctx, 4);
+         {
+             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
++            if (g_mpegIpuOwner == mpegAddr) g_mpegIpuOwner = 0u;
++            g_mpegFedStreamEnded.erase(mpegAddr);
++            g_mpegEndOnlyFeeds.erase(mpegAddr);
++            g_mpegLastFeedEndOnly.erase(mpegAddr);
+             g_mpeg_stub_state.callbacksByMpeg.erase(mpegAddr);
+             g_mpeg_stub_state.playbackByMpeg.erase(mpegAddr);
+         }
+@@ -2183,6 +2437,8 @@
+         const uint32_t mpegAddr = getRegU32(ctx, 4);
+         const uint32_t dataAddr = getRegU32(ctx, 5);
+         const uint32_t byteCount = getRegU32(ctx, 6);
++        if (demuxTitleOwnedInput(rdram, ctx, runtime, mpegAddr, dataAddr, byteCount, dataAddr, byteCount))
++            return;
+ 
+         std::vector<MpegStreamCallbackEvent> callbackEvents;
+         std::vector<uint32_t> completedMpegIds;
+@@ -2203,6 +2459,7 @@
+                 recordCdStreamBytesDemuxedUnlocked(consumed, completedMpegIds, eofChanged);
+             }
+             decodedCount = playback.decodedFrames.size();
++            publishGuestStatusUnlocked(rdram, mpegAddr, playback, runtime);
+             traceIdx = g_mpeg_stub_state.demuxPssTraceCount++;
+         }
+ 
+@@ -2267,6 +2524,8 @@
+         const uint32_t availableBytes = getRegU32(ctx, 6);
+         const uint32_t ringBaseAddr = getRegU32(ctx, 7);
+         const uint32_t ringSize = readAbiArg4(rdram, ctx);
++        if (demuxTitleOwnedInput(rdram, ctx, runtime, mpegAddr, dataAddr, availableBytes, ringBaseAddr, ringSize))
++            return;
+ 
+         std::vector<MpegStreamCallbackEvent> callbackEvents;
+         std::vector<uint32_t> completedMpegIds;
+@@ -2295,6 +2554,7 @@
+                 recordCdStreamBytesDemuxedUnlocked(consumed, completedMpegIds, eofChanged);
+             }
+             decodedCount = playback.decodedFrames.size();
++            publishGuestStatusUnlocked(rdram, mpegAddr, playback, runtime);
+             traceIdx = g_mpeg_stub_state.demuxRingTraceCount++;
+         }
+ 
+@@ -2396,8 +2656,12 @@
+         {
+             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
+             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
++            const bool titleOwned = titleOwnsVideoUnlocked(mpegAddr);
++            if (titleOwned)
++                g_mpegIpuOwner = mpegAddr;
++            // A title that owns the video still holds stream data after the disc stream ends.
+             if (playback.decodedFrames.empty() &&
+-                !g_mpeg_stub_state.currentCdStreamEofSeen &&
++                (titleOwned || !g_mpeg_stub_state.currentCdStreamEofSeen) &&
+                 !playback.streamEnded &&
+                 !playback.decoderFailed)
+             {
+@@ -2539,6 +2803,7 @@
+         mpegGuestWrite32(rdram, mpegAddr + 0x00u, width);
+         mpegGuestWrite32(rdram, mpegAddr + 0x04u, height);
+         mpegGuestWrite32(rdram, mpegAddr + 0x08u, frameCount);
++        publishGuestStatus(rdram, mpegAddr, runtime);
+ 
+         if (uint8_t *base = getMemPtr(rdram, mpegAddr))
+         {
+@@ -2596,28 +2861,24 @@
+ 
+     void sceMpegIsEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        (void)rdram;
+         const uint32_t mpegAddr = getRegU32(ctx, 4);
+ 
+         std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+         g_mpeg_stub_state.initialized = true;
+         MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+-        // Only the producer/demux EOF is authoritative. A sequence_end_code can
+-        // be observed while more PSS data is still buffered, and a decoder
+-        // failure before producer EOF may still recover on a later sequence.
+-        const bool producerEnded =
+-            (g_mpeg_stub_state.currentCdStreamEofSeen &&
+-             playback.cdStreamGeneration == g_mpeg_stub_state.cdStreamGeneration) ||
+-            g_mpegFedStreamEnded[mpegAddr];
++        const bool producerEnded = titleOwnsVideoUnlocked(mpegAddr)
++                                       ? g_mpegFedStreamEnded[mpegAddr]
++                                       : (g_mpeg_stub_state.currentCdStreamEofSeen &&
++                                          playback.cdStreamGeneration == g_mpeg_stub_state.cdStreamGeneration) ||
++                                             g_mpegFedStreamEnded[mpegAddr];
+         const bool ended = producerEnded &&
+                            (playback.streamEnded || (playback.decoderFailed && playback.sawInput));
+-        const uint64_t presentationEnd = playback.presentationEndTickQ32;
+-        const uint64_t currentTickQ32 = runtime != nullptr
+-                                            ? (runtime->eeScheduler().currentVSyncTick() << 32u)
+-                                            : std::numeric_limits<uint64_t>::max();
+         const bool presentationComplete =
+-            presentationEnd == std::numeric_limits<uint64_t>::max() ||
+-            currentTickQ32 >= presentationEnd;
++            playback.presentationEndTickQ32 == std::numeric_limits<uint64_t>::max() ||
++            (runtime == nullptr) ||
++            (runtime->eeScheduler().currentVSyncTick() << 32u) >= playback.presentationEndTickQ32;
++        const bool isEnd = mpegIsEndUnlocked(mpegAddr, playback, runtime);
++        publishGuestStatusUnlocked(rdram, mpegAddr, playback, runtime);
+ 
+         if (g_mpeg_stub_state.isEndTraceCount < 16u)
+         {
+@@ -2634,7 +2895,7 @@
+             ++g_mpeg_stub_state.isEndTraceCount;
+         }
+ 
+-        setReturnS32(ctx, (ended && playback.decodedFrames.empty() && presentationComplete) ? 1 : 0);
++        setReturnS32(ctx, isEnd ? 1 : 0);
+     }
+ 
+     void sceMpegIsRefBuffEmpty(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1383,6 +1383,10 @@
+             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+ 
+             if (tryProcessScratchpadDma(channelBase, value))
++            {
++                return true;
++            }
++            if (tryProcessIpuInputDma(channelBase, value))
+             {
+                 return true;
+             }
+@@ -1728,6 +1732,121 @@
+     return true;
+ }
+ 
++bool PS2Memory::tryProcessIpuInputDma(uint32_t channelBase, uint32_t chcr)
++{
++    static constexpr uint32_t kToIpuChannel = 0x1000B400u;
++    if (channelBase != kToIpuChannel || !m_ipuInputSink)
++        return false;
++
++    m_ioRegisters[channelBase] = chcr;
++    // Copy one block into the sink. Returns false when the source is outside main RAM/scratchpad.
++    auto deliver = [&](uint32_t addr, uint32_t qwc) -> bool
++    {
++        if (qwc == 0u)
++            return true;
++        const bool scratch = isScratchpad(addr) || (addr & 0x80000000u) != 0u;
++        const uint8_t *base = scratch ? m_scratchpad : m_rdram;
++        const uint32_t limit = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
++        uint32_t phys = 0u;
++        try
++        {
++            phys = scratch ? (addr & (PS2_SCRATCHPAD_SIZE - 1u)) : translateAddress(addr & 0x7FFFFFFFu);
++        }
++        catch (...)
++        {
++            return false;
++        }
++        const uint32_t bytes = qwc * 16u;
++        if (phys >= limit || bytes > limit - phys)
++            return false;
++        m_ipuInputSink(base + phys, bytes);
++        return true;
++    };
++
++    const uint32_t mode = (chcr >> 2u) & 0x3u;
++    uint32_t madr = m_ioRegisters[channelBase + 0x10u] & 0xFFFFFFF0u;
++    const uint32_t qwc = m_ioRegisters[channelBase + 0x20u] & 0xFFFFu;
++    if (mode == 0u)
++    {
++        if (!deliver(madr, qwc))
++            throw std::runtime_error("IPU input DMA source outside memory");
++        m_ioRegisters[channelBase + 0x10u] = madr + qwc * 16u;
++        m_ioRegisters[channelBase + 0x20u] = 0u;
++        completeDmacChannel(channelBase, 4u);
++        return true;
++    }
++    if (mode != 1u)
++        throw std::runtime_error("Unsupported IPU input DMA transfer mode");
++
++    // Source chain: a pending QWC from a previous tag transfers first, then tags follow.
++    uint32_t tadr = m_ioRegisters[channelBase + 0x30u] & 0xFFFFFFF0u;
++    if (qwc != 0u)
++    {
++        if (!deliver(madr, qwc))
++            throw std::runtime_error("IPU input DMA continuation outside memory");
++        madr += qwc * 16u;
++    }
++    uint32_t asp = (chcr >> 4u) & 3u;
++    uint32_t asr[2] = {m_ioRegisters[channelBase + 0x40u], m_ioRegisters[channelBase + 0x50u]};
++    bool finished = false;
++    const bool tie = (chcr & (1u << 7)) != 0u;
++    for (int tags = 0; tags < 65536; ++tags)
++    {
++        const bool scratch = isScratchpad(tadr) || (tadr & 0x80000000u) != 0u;
++        uint32_t phys = 0u;
++        try
++        {
++            phys = scratch ? (tadr & (PS2_SCRATCHPAD_SIZE - 1u)) : translateAddress(tadr & 0x7FFFFFFFu);
++        }
++        catch (...)
++        {
++            throw std::runtime_error("IPU input DMA tag outside memory");
++        }
++        const uint8_t *base = scratch ? m_scratchpad : m_rdram;
++        if (phys + 16u > (scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE))
++            throw std::runtime_error("IPU input DMA truncated tag");
++        uint64_t tag = 0u;
++        std::memcpy(&tag, base + phys, sizeof(tag));
++        const uint32_t tagQwc = static_cast<uint32_t>(tag & 0xFFFFu);
++        const uint32_t id = static_cast<uint32_t>((tag >> 28u) & 0x7u);
++        const bool irq = ((tag >> 31u) & 1u) != 0u;
++        const uint32_t addr = static_cast<uint32_t>((tag >> 32u) & 0xFFFFFFF0u);
++        uint32_t data = 0u;
++        bool end = false;
++        switch (id)
++        {
++        case 0: data = addr; tadr += 16u; end = true; break;                 // refe
++        case 1: data = tadr + 16u; tadr = data + tagQwc * 16u; break;        // cnt
++        case 2: data = tadr + 16u; tadr = addr; break;                       // next
++        case 3: case 4: data = addr; tadr += 16u; break;                     // ref, refs
++        case 7: data = tadr + 16u; tadr = data + tagQwc * 16u; end = true; break; // end
++        case 5:
++            if (asp >= 2u) throw std::runtime_error("IPU DMA CALL stack overflow");
++            data = tadr + 16u; asr[asp++] = data + tagQwc * 16u; tadr = addr; break;
++        case 6:
++            data = tadr + 16u;
++            if (asp == 0u) { tadr = data + tagQwc * 16u; end = true; }
++            else tadr = asr[--asp];
++            break;
++        default: throw std::runtime_error("Invalid IPU DMA tag");
++        }
++        m_ioRegisters[channelBase] = (m_ioRegisters[channelBase] & 0xFFFFu) | static_cast<uint32_t>(tag & 0xFFFF0000u);
++        if (!deliver(data, tagQwc))
++            throw std::runtime_error("IPU input DMA chain payload outside memory");
++        madr = data + tagQwc * 16u;
++        if (end || (irq && tie)) { finished = true; break; }
++    }
++    if (!finished) throw std::runtime_error("IPU input DMA chain tag limit exceeded");
++    m_ioRegisters[channelBase] = (m_ioRegisters[channelBase] & ~0x30u) | (asp << 4u);
++    m_ioRegisters[channelBase + 0x40u] = asr[0];
++    m_ioRegisters[channelBase + 0x50u] = asr[1];
++    m_ioRegisters[channelBase + 0x10u] = madr;
++    m_ioRegisters[channelBase + 0x20u] = 0u;
++    m_ioRegisters[channelBase + 0x30u] = tadr;
++    completeDmacChannel(channelBase, 4u);
++    return true;
++}
++
+ void PS2Memory::completeDmacChannel(uint32_t channelBase, uint32_t cause)
+ {
+     static constexpr uint32_t kDStat = 0x1000E010u;
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -315,6 +315,11 @@
+ 
+     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
+     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
++    // IPU input FIFO (DMA channel 4, toIPU). The movie decoder installs the sink; the channel
++    // then transfers like hardware: every byte of a normal or chain transfer reaches the sink,
++    // MADR/TADR advance past the data and the channel completes (D_STAT bit 4).
++    using IpuInputSink = std::function<void(const uint8_t *, uint32_t)>;
++    void setIpuInputSink(IpuInputSink sink) { m_ipuInputSink = std::move(sink); }
+     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
+ 
+     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
+@@ -399,6 +404,7 @@
+     std::vector<TLBEntry> m_tlbEntries;
+ 
+     GifPacketCallback m_gifPacketCallback;
++    IpuInputSink m_ipuInputSink;
+     GifArbiter *m_gifArbiter = nullptr;
+     Vu1MscalCallback m_vu1MscalCallback;
+     Vu1MscntCallback m_vu1MscntCallback;
+@@ -457,6 +463,7 @@
+     LazyEeTimers m_lazyEeTimers{};
+     void flushLazyEeTimers() noexcept;
+     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
++    bool tryProcessIpuInputDma(uint32_t channelBase, uint32_t chcr);
+     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
+     void queueCompletedDmacCause(uint32_t cause);
+ };

@@ -111,6 +111,23 @@ class ReferenceHelpers(unittest.TestCase):
             if diffs:
                 self.assertTrue(bc.rounding_difference(name, fields, before, want, got), f'{name} {fields} {diffs}')
 
+    def test_product_underflow_is_sticky_without_zero_or_sign_from_product(self):
+        # Sony VU v6 p42, normalized ACC / UDF row. Exact public constants.
+        records = []
+        for name, opcode in [('vmadd', 0x29), ('vmsub', 0x2D)]:
+            for dest in (8, 4):
+                state = bc.State([[0, 0] for _ in range(32)], 0, 0, 0, 0, bytes(64))
+                state.vf[1][0] = 0x80800000  # negative minimum normal
+                state.vf[2][0] = 0x3F000000  # 0.5
+                state.vacc = [0x3F800000] * 4
+                word = 0x4A000000 | (dest << 21) | (2 << 16) | (1 << 11) | (3 << 6) | opcode
+                records.append((HELPERS.index(helper_for(word)), word, state))
+        for record, words in zip(records, self._run(records)):
+            dest = (record[1] >> 21) & 15
+            self.assertEqual(words[135], 0)
+            self.assertEqual(words[136], 0x100 if dest == 8 else 0)
+            self.assertEqual(words[12 if dest == 8 else 13], 0x3F800000)
+
     def test_fpu_max_min_order_exponent_255_as_numbers(self):
         rng = random.Random(5)
         records, pairs = [], []
@@ -143,8 +160,18 @@ class ReferenceFormsPatch(unittest.TestCase):
     def test_patch_carries_the_reviewed_headers_and_routes_the_translators(self):
         patch = (ROOT / 'patches/vu0-reference-forms.patch').read_text()
         self.assertEqual(self._added(patch, 'ps2xRecomp/include/ps2recomp/vu0_corrections.h'), TABLE)
-        self.assertEqual(self._added(patch, 'ps2xRuntime/include/ps2_vu0_ops.h'),
-                         (ROOT / 'runtime/mmi/ps2_vu0_ops.h').read_text())
+        # Verify the complete ordered header, not a string-presence substitute for
+        # the historical byte-for-byte check. Only this header's follow-up hunks apply.
+        with tempfile.TemporaryDirectory() as tmp:
+            relative = Path('ps2xRuntime/include/ps2_vu0_ops.h')
+            header = Path(tmp) / relative
+            header.parent.mkdir(parents=True)
+            header.write_text(self._added(patch, str(relative)))
+            result = subprocess.run(['git', 'apply', '--include=' + str(relative),
+                                     str(ROOT / 'patches/vu-product-underflow.patch')],
+                                    cwd=tmp, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(header.read_text(), (ROOT / 'runtime/mmi/ps2_vu0_ops.h').read_text())
         vu = patch.split('+++ b/ps2xRecomp/src/lib/vu_translator.cpp', 1)[1].split('diff --git', 1)[0]
         self.assertIn('+            if (const char *helper = vu0_corrections::helperFor(inst.raw))', vu)
         fpu = patch.split('+++ b/ps2xRecomp/src/lib/fpu_translator.cpp', 1)[1].split('diff --git', 1)[0]

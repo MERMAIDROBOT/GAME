@@ -5,7 +5,9 @@
 // Private raw-owner backend, initially qualified for CT32 guest access/NTSC CRT2.
 #pragma once
 #include "field_publisher.hpp"
+#include "completion_gate.hpp"
 #include "image_stamp.hpp"
+#include "scanout_qualification.hpp"
 #include <cstdio>
 #include "runtime/gs/gs_backend.h"
 namespace LocalGS {
@@ -13,9 +15,12 @@ class RawBackend final:public GSRasterBackend {
     std::shared_ptr<void> resources; // must outlive publisher and GPU reference
     QueuedOwner &gpu;
     FieldPublisher publisher;
+    CompletionGate<CompletedField> completedResources;
     GSTransferSnapshot transfer{};
     std::vector<uint8_t> fifo;size_t fifoOffset=0;
     ImageStamp<GSPresentationStamp> presentedImage;
+    uint64_t lastPictureSampleTick = 0;
+    unsigned pictureSamples = 0;
     std::vector<uint8_t> weaveRows; // Claude 2026-10-13: movie field weave buffer
     mutable std::recursive_mutex mutex;
     const bool batchGIF=[] {const char *v=std::getenv("PS2_PORT_PRIVATE_GIF_BATCH");return v && *v=='1';}();
@@ -26,17 +31,47 @@ class RawBackend final:public GSRasterBackend {
         auto packets=std::move(pendingGIF);pendingGIF.clear();pendingBytes=0;
         gpu.gifBatch(std::move(packets));
     }
+    void tracePackedPicture(const CompletedField &field) {
+        static const bool enabled = [] {
+            const char *setting = std::getenv("PS2_PORT_GS_PICTURE_TRACE");
+            return setting && std::strcmp(setting, "1") == 0;
+        }();
+        if (!enabled || pictureSamples >= 18000 || field.boundary.tick == lastPictureSampleTick) return;
+        const auto &image = field.image();
+        const auto &pixels = image.bytes();
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+        // Sample RGB on a fixed grid. Compare successive observations of the same
+        // field parity and size. Equal hashes are evidence about the sampled pixels.
+        uint64_t fingerprint = 14695981039346656037ull;
+        for (unsigned y = 0; y < 48; ++y) {
+            const size_t row = size_t((2 * y + 1) * image.height / 96) * image.width;
+            for (unsigned x = 0; x < 64; ++x) {
+                const size_t pixel = (row + (2 * x + 1) * image.width / 128) * 4;
+                for (unsigned channel = 0; channel < 3; ++channel) {
+                    fingerprint ^= pixels[pixel + channel];
+                    fingerprint *= 1099511628211ull;
+                }
+            }
+        }
+        lastPictureSampleTick = field.boundary.tick;
+        ++pictureSamples;
+        std::fprintf(stderr, "[gs picture] ns=%lld tick=%llu phase=%u size=%ux%u rgb_sample=%016llx\n",
+                     static_cast<long long>(ns), static_cast<unsigned long long>(field.boundary.tick),
+                     field.boundary.phase, image.width, image.height,
+                     static_cast<unsigned long long>(fingerprint));
+    }
 public:
     explicit RawBackend(QueuedOwner &owner,std::shared_ptr<void> lifetime={}):resources(std::move(lifetime)),gpu(owner),publisher(owner){}
     bool OwnsRawGS()const override{return true;}
     void Initialize(uint8_t*p,uint32_t n)override {
         std::lock_guard<std::recursive_mutex> lock(mutex);
         if(!p || n!=4*1024*1024)throw std::invalid_argument("Raw backend requires exact4MiB initialized VRAM");
-        pendingGIF.clear();pendingBytes=0;publisher.clear();gpu.reset(p,n);transfer={};fifo.clear();fifoOffset=0;
+        pendingGIF.clear();pendingBytes=0;publisher.clear();completedResources.clear();gpu.reset(p,n);transfer={};fifo.clear();fifoOffset=0;
     }
     void Reset()override {
         std::lock_guard<std::recursive_mutex> lock(mutex);
-        flushGIF();publisher.clear();auto memory=gpu.snapshot();gpu.reset(memory.data(),memory.size());
+        flushGIF();publisher.clear();completedResources.clear();auto memory=gpu.snapshot();gpu.reset(memory.data(),memory.size());
         transfer={};fifo.clear();fifoOffset=0;
     }
     void RawGIF(const uint8_t*p,uint32_t n)override {
@@ -74,27 +109,18 @@ public:
     PresentationFrame Present(const GSPresentationRequest&)override{throw std::logic_error("Mutable MMIO request reached raw owner");}
     void CaptureField(const std::array<uint64_t,15>&p,uint64_t t,uint32_t phase)override {
         std::lock_guard<std::recursive_mutex> lock(mutex);
-        flushGIF();if(!(p[0]&3)){publisher.clear();return;}
+        flushGIF();if(!(p[0]&3)){publisher.clear();completedResources.clear();return;}
         ParallelGS::PrivRegisterState priv={};
         for(unsigned i=0;i<15;i++)std::memcpy(&priv.qwords_lo[i*2],&p[i],8);
+        // Select the enabled circuit by PMODE.EN1/EN2, not the entire PMODE word.
+        // ALP/MMOD/SLBG do not change its framebuffer geometry. The existing
+        // format/timing/width checks below apply equally to 512- and 640-wide CRT1.
+        // Comparing PMODE to 1 and requiring CRT1 width 640 froze 512-wide movies
+        // after they enabled CRT1 with PMODE 0xffa1, although their draws reached FRAME 0.
         const bool interlaced=priv.smode2.INT;
         const bool crt1=(p[0]&3)==1;const auto &fb=crt1?priv.dispfb1:priv.dispfb2;const auto &display=crt1?priv.display1:priv.display2;
         const unsigned width=fb.FBW*64;
-        const bool dual=(p[0]==32871 && p[1]==16640 && (p[2]==1 || p[2]==3) &&
-            (p[7]==4096 || p[7]==4208 || p[7]==4320) && p[9]==(p[7]|(1ull<<43)) &&
-            p[8]==7874698016924284ull && p[10]==7857105830879870ull && p[13]==0 && p[14]==0);
-
-        const bool identicalMovie=(p[0]==32775 && p[1]==16640 && p[2]==3 &&
-            (p[7]==5120 || p[7]==5190 || p[7]==5260) && p[7]==p[9] &&
-            p[8]==0x1bf9ff0183227cull && p[8]==p[10] && p[13]==0 && p[14]==0);
-        // Claude 2026-10-21: the 640x480 movie mode is also set with SMODE2 FFMD=0 (smode2=1) - seen at boot after the
-        // Treyarch logo, three times today, each one fatal.
-        const bool movie480=(p[0]==0x66 && p[1]==16640 && (p[2]==1 || p[2]==3) &&
-            (p[9]==5120 || p[9]==5200) && p[10]==0x1df9ff0183227cull && p[13]==0 && p[14]==0);
-        if(!dual && !identicalMovie && !movie480 && (((p[0]&3)!=2 && !crt1) || (crt1 && (p[0]!=1 || p[14]!=0 || width!=640 || !interlaced || priv.smode2.FFMD)) || priv.smode1.CMOD!=2 || priv.smode1.LC!=32 || (!interlaced && !priv.smode2.FFMD) ||
-           fb.PSM!=0 || (width!=512 && width!=640) || fb.DBX || fb.DBY ||
-           display.DX!=636 || display.DY!=(interlaced?50:25) || display.DW!=2559 ||
-           display.DH!=(interlaced?447:223) || display.MAGH!=2560/width-1 || display.MAGV))
+        if(!qualifiedScanout(p))
         {
             // Only the exceptional diagnostic needs the worker's ingress stamp.
             // Querying it for every valid field drains the async GPU queue on
@@ -113,7 +139,17 @@ public:
         publisher.capture({p,t,phase});
     }
     PresentationFrame PresentCompletedField()override {
-        auto f=publisher.latest();if(!f)return {};
+        auto f=completedResources.select(publisher.latest(), [](const CompletedField& field) {
+            ps2port::SurfaceToken token{};
+            if (!ps2port::decodeSurfaceToken(field.image().bytes(),&token)) return true;
+            auto serial=token.serial; std::uint32_t width=0,height=0;
+            if (!hwgs_surface_wait(&serial,&width,&height,0)) return false;
+            hwgs_surface_release(serial);
+            if (serial!=token.serial || width!=token.width || height!=token.height)
+                throw std::runtime_error("Completed surface differs from submitted field");
+            return true;
+        });
+        if(!f)return {};
         // First bounded integration uses only qualified NTSC CRT2 interlaced rows.
         const auto &p=f->boundary.privileged;
         const unsigned width=f->image().width;const bool interlaced=p[2]&1;
@@ -129,11 +165,13 @@ public:
                 throw std::runtime_error("Surface token dimensions differ from completed field");
             if(!surface && f->image().bytes().size()!=size_t(width)*hdHeight*4)
                 throw std::runtime_error("Invalid packed HD scanout size");
+            if (!surface) tracePackedPicture(*f);
             PresentationFrame result;
             result.stamp=presentedImage.select(f->image().retained,width,hdHeight,GSPresentationStamp{f->boundary.tick,f->generation,f->ingressSequence,f->boundary.phase});
             result.width=width;result.height=hdHeight;
             result.displayFbp=result.sourceFbp=p[(p[0]&3)==1?7:9]&511;
             result.pixels=f->image().bytes();
+            result.retainedResource=f->image().surfaceLease;
             if(!surface) for(size_t i=3;i<result.pixels.size();i+=4)result.pixels[i]=255;
             // Native renderer readback on explicit local request; not desktop capture.
             if(const char *request=std::getenv("PS2_PORT_PRIVATE_EDGE_CAPTURE"); request && !surface) {

@@ -1,0 +1,260 @@
+diff --git a/ps2xIOP/include/ps2x/iop/iop_host.h b/ps2xIOP/include/ps2x/iop/iop_host.h
+index 6ee0308..b1bd30d 100644
+--- a/ps2xIOP/include/ps2x/iop/iop_host.h
++++ b/ps2xIOP/include/ps2x/iop/iop_host.h
+@@ -95,6 +95,13 @@ namespace ps2x::iop
+         virtual uint32_t allocateGuest(uint32_t size, uint32_t alignment) = 0;
+         virtual void freeGuest(uint32_t address) = 0;
+ 
++        // The current controller record in libpad layout (32 bytes: status, mode, 2 button bytes active-low,
++        // RX, RY, LX, LY, 12 pressures). IOP-side controller services (DBCMAN) read it; false = no controller.
++        virtual bool readControllerState(int port, int slot, uint8_t *data, size_t size)
++        {
++            (void)port; (void)slot; (void)data; (void)size;
++            return false;
++        }
+         virtual void audioCommand(uint32_t sid, uint32_t function, GuestBuffer send, GuestBuffer receive) = 0;
+         virtual void submitAudio(std::span<const int16_t> samples) { (void)samples; }
+         virtual void resetAudio() {}
+diff --git a/ps2xIOP/src/iop_service.h b/ps2xIOP/src/iop_service.h
+index 79fed4f..9c521a4 100644
+--- a/ps2xIOP/src/iop_service.h
++++ b/ps2xIOP/src/iop_service.h
+@@ -32,6 +32,10 @@ namespace ps2x::iop::detail
+         }
+ 
+         [[nodiscard]] virtual RpcResult handleRpc(const RpcRequest &request) = 0;
++        // True when this service implements its SIDs' protocol completely and must answer even if a title loaded
++        // its own module that registered the same server in the emulated IOP (e.g. a controller manager whose
++        // hardware side, SIO2, is not emulated).
++        [[nodiscard]] virtual bool overridesEmulatedServer() const { return false; }
+ 
+         virtual void onSifTransfer(const SifTransfer &transfer)
+         {
+diff --git a/ps2xIOP/src/iop_subsystem.cpp b/ps2xIOP/src/iop_subsystem.cpp
+index 838b498..11c9e8d 100644
+--- a/ps2xIOP/src/iop_subsystem.cpp
++++ b/ps2xIOP/src/iop_subsystem.cpp
+@@ -36,6 +36,7 @@ namespace ps2x::iop
+         {
+             coreServices.emplace_back(detail::createMcservService(host));
+             coreServices.emplace_back(detail::createDbcmanService(host));
++            coreServices.emplace_back(detail::createDbcmanV2Service(host));
+             coreServices.emplace_back(detail::createLibSdService(host));
+             coreServices.emplace_back(detail::createCdvdfsvService(host));
+             refreshServiceModuleKeys();
+@@ -229,6 +230,12 @@ namespace ps2x::iop
+                 (unsigned long long)m_impl->emulator.cycles(),buffer.address,buffer.size,int(read),hex.c_str());
+         };
+         if(trace)dump("send",request.send);
++        if (hle && hle->overridesEmulatedServer())
++        {
++            RpcResult replaced = hle->handleRpc(request);
++            if(trace)dump("receive",request.receive);
++            return replaced;
++        }
+         RpcResult emulated = m_impl->emulator.handleRpc(request);
+         if(trace)dump("receive",request.receive);
+         if (!emulated.handled && !hle && request.sid == kLoadfileSid)
+diff --git a/ps2xIOP/src/module_factories.h b/ps2xIOP/src/module_factories.h
+index c213a35..fe2b004 100644
+--- a/ps2xIOP/src/module_factories.h
++++ b/ps2xIOP/src/module_factories.h
+@@ -5,6 +5,7 @@
+ namespace ps2x::iop::detail
+ {
+     std::unique_ptr<IopService> createDbcmanService(IopHost &host);
++    std::unique_ptr<IopService> createDbcmanV2Service(IopHost &host);
+     std::unique_ptr<IopService> createLibSdService(IopHost &host);
+     std::unique_ptr<IopService> createMcservService(IopHost &host);
+     std::unique_ptr<IopService> createCdvdfsvService(IopHost &host);
+diff --git a/ps2xIOP/src/modules/dbcman.cpp b/ps2xIOP/src/modules/dbcman.cpp
+index c698a34..c9229ce 100644
+--- a/ps2xIOP/src/modules/dbcman.cpp
++++ b/ps2xIOP/src/modules/dbcman.cpp
+@@ -6,6 +6,8 @@
+ #include <mutex>
+ #include <sstream>
+ #include <string>
++#include <vector>
++#include <cstring>
+ 
+ namespace ps2x::iop::detail
+ {
+@@ -135,4 +137,148 @@ namespace ps2x::iop::detail
+     {
+         return std::make_unique<DbcmanService>(host);
+     }
++
++    namespace
++    {
++        // DBCMAN 2.x (libdbc/libpad2): the EE binds 0x80000900 (control) and 0x8000091B
++        // (transfer). The real module drives DualShock 2 controllers through SIO2, which the IOP emulation does
++        // not provide, so this service implements the protocol at the RPC boundary from the host controller:
++        //   0x80000963 version          -> word 0 = 0x0202
++        //   0x80000904 set work address -> work area: per-dependency "linked" words (1 = driver present)
++        //   0x80000901 create socket    -> word 9 = socket; words 10/11 = EE side buffers A/B (0x80 bytes each)
++        //   0x80000903 dependency number-> word 1 = 0
++        //   0x8000091A receive data     -> +0x08 count, +0x0C payload, +0x8C result (cmd 1 state, 2 button profile,
++        //                                  3 vibration profile)
++        // Each side buffer (DMAed by the real module) holds: +0 device state (1 = ready), +2 payload byte count,
++        // +4 linked, +0x1C DualShock 2 payload (2 button bytes active-low, RX RY LX LY, 12 pressures) followed by
++        // the button profile, +0x7C sequence number; libpad2 reads the side with the larger sequence. Sides are
++        // refreshed on every DBC request, which libpad2 issues each frame the sequence has not moved.
++        constexpr uint32_t kDbc2ControlSid = 0x80000900u;
++        constexpr uint32_t kDbc2TransferSid = 0x8000091Bu;
++        constexpr uint32_t kDbc2Version = 0x0202u;
++        constexpr std::array<uint8_t, 5> kDualShock2Profile{0xFFu, 0xFFu, 0xFFu, 0xFFu, 0x00u};
++
++        class DbcmanV2Service final : public IopService
++        {
++        public:
++            explicit DbcmanV2Service(IopHost &host) : m_host(host) {}
++
++            [[nodiscard]] std::string_view name() const override { return "dbcman2"; }
++            [[nodiscard]] std::span<const uint32_t> sids() const override { return kSids; }
++            [[nodiscard]] bool overridesEmulatedServer() const override { return true; }
++
++            void reset() override
++            {
++                std::lock_guard<std::mutex> lock(m_mutex);
++                m_sockets.clear();
++                m_sequence = 0;
++                m_workArea = 0u;
++            }
++
++            [[nodiscard]] RpcResult handleRpc(const RpcRequest &request) override
++            {
++                RpcResult result;
++                if (request.sid != kDbc2ControlSid && request.sid != kDbc2TransferSid)
++                    return result;
++                result.handled = true;
++                result.resultAddress = request.receive.address;
++                std::array<uint32_t, 0x100> words{};
++                if (request.send.address && request.send.size)
++                    (void)m_host.readGuest(request.send.address, words.data(),
++                                           std::min<size_t>(request.send.size, sizeof(words)));
++                std::lock_guard<std::mutex> lock(m_mutex);
++                if (request.sid == kDbc2ControlSid)
++                {
++                    switch (request.function)
++                    {
++                    case 0x80000963u:
++                        words[0] = kDbc2Version;
++                        break;
++                    case 0x80000904u:
++                    {
++                        m_workArea = words[1];
++                        std::array<uint32_t, 32> linked{};
++                        for (size_t i = 0; i < 16; ++i)
++                            linked[i] = 1u;
++                        if (m_workArea)
++                            (void)m_host.writeGuest(m_workArea, linked.data(), sizeof(linked));
++                        words[0] = 1u;
++                        break;
++                    }
++                    case 0x80000901u:
++                    {
++                        const uint32_t socket = static_cast<uint32_t>(m_sockets.size());
++                        m_sockets.push_back({words[10], words[11]});
++                        words[9] = socket;
++                        refreshUnlocked(socket);
++                        break;
++                    }
++                    case 0x80000903u:
++                        words[1] = 0u;
++                        break;
++                    case 0x8000091Au:
++                    {
++                        const uint32_t socket = words[0];
++                        const uint32_t command = (words[1] >> 16) & 0xFFu;
++                        std::array<uint8_t, 0x80> payload{};
++                        int32_t count = 0;
++                        if (command == 1u) { payload[0] = 1u; count = 4; }                    // device ready
++                        else if (command == 2u) { std::copy(kDualShock2Profile.begin(), kDualShock2Profile.begin() + 4, payload.begin()); count = 4; }
++                        else if (command == 3u) { payload[0] = 0x03u; count = 2; }            // two motors
++                        words[2] = static_cast<uint32_t>(count);
++                        std::memcpy(reinterpret_cast<uint8_t *>(words.data()) + 0x0C, payload.data(), payload.size());
++                        words[0x8C / 4] = socket < m_sockets.size() ? 0u : 0xFFFFFFF4u;
++                        if (socket < m_sockets.size())
++                            refreshUnlocked(socket);
++                        break;
++                    }
++                    default:
++                        for (uint32_t s = 0; s < m_sockets.size(); ++s)
++                            refreshUnlocked(s);
++                        break;
++                    }
++                }
++                if (request.receive.address && request.receive.size)
++                    (void)m_host.writeGuest(request.receive.address, words.data(),
++                                            std::min<size_t>(request.receive.size, sizeof(words)));
++                return result;
++            }
++
++        private:
++            struct Socket { uint32_t sideA = 0u, sideB = 0u; };
++
++            void refreshUnlocked(uint32_t socket)
++            {
++                if (socket >= m_sockets.size() || !m_sockets[socket].sideA)
++                    return;
++                std::array<uint8_t, 32> pad{};
++                if (!m_host.readControllerState(0, 0, pad.data(), pad.size()))
++                    return;
++                std::array<uint8_t, 0x80> side{};
++                side[0] = 1u;                                   // ready
++                side[2] = 18u;                                  // DualShock 2 payload bytes
++                const int32_t linked = 1;
++                std::memcpy(side.data() + 4, &linked, 4);
++                std::memcpy(side.data() + 0x1C, pad.data() + 2, 18);
++                std::copy(kDualShock2Profile.begin(), kDualShock2Profile.end(), side.begin() + 0x1C + 18);
++                const int32_t sequence = ++m_sequence;
++                std::memcpy(side.data() + 0x7C, &sequence, 4);
++                // Alternate sides so the newer one always carries the larger sequence.
++                const uint32_t target = (sequence & 1) ? m_sockets[socket].sideA : m_sockets[socket].sideA + 0x80u;
++                (void)m_host.writeGuest(target, side.data(), side.size());
++            }
++
++            inline static constexpr std::array<uint32_t, 2> kSids{kDbc2ControlSid, kDbc2TransferSid};
++            IopHost &m_host;
++            std::mutex m_mutex;
++            std::vector<Socket> m_sockets;
++            int32_t m_sequence = 0;
++            uint32_t m_workArea = 0u;
++        };
++    }
++
++    std::unique_ptr<IopService> createDbcmanV2Service(IopHost &host)
++    {
++        return std::make_unique<DbcmanV2Service>(host);
++    }
+ }
+diff --git a/ps2xRuntime/src/lib/ps2_iop_host.cpp b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+index e955a10..fbadfd4 100644
+--- a/ps2xRuntime/src/lib/ps2_iop_host.cpp
++++ b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+@@ -532,6 +532,11 @@ void PS2IopHostAdapter::log(ps2x::iop::LogLevel level, std::string_view message)
+ }
+ 
+ // PCM produced by the IOP/SPU service reaches the native host stream directly.
++bool PS2IopHostAdapter::readControllerState(int port, int slot, uint8_t *data, size_t size)
++{
++    return m_runtime.padBackend().readState(port, slot, data, size);
++}
++
+ void PS2IopHostAdapter::submitAudio(std::span<const int16_t> samples)
+ {
+     m_runtime.audioBackend().submitPcm(samples);
+diff --git a/ps2xRuntime/src/lib/ps2_iop_host.h b/ps2xRuntime/src/lib/ps2_iop_host.h
+index b7a537d..b36b2b8 100644
+--- a/ps2xRuntime/src/lib/ps2_iop_host.h
++++ b/ps2xRuntime/src/lib/ps2_iop_host.h
+@@ -56,6 +56,7 @@ public:
+     uint32_t allocateGuest(uint32_t size, uint32_t alignment) override;
+     void freeGuest(uint32_t address) override;
+ 
++    bool readControllerState(int port, int slot, uint8_t *data, size_t size) override;
+     void submitAudio(std::span<const int16_t> samples) override;
+     void resetAudio() override;
+ 

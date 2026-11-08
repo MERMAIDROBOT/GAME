@@ -1,0 +1,284 @@
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1668,89 +1668,25 @@
+     return false;
+ }
+ 
+-bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
+-{
+-    static constexpr uint32_t kSprFromChannel = 0x1000D000u;
+-    static constexpr uint32_t kSprToChannel = 0x1000D400u;
+-    if (channelBase != kSprFromChannel && channelBase != kSprToChannel)
+-        return false;
+-
+-    const uint32_t mode = (chcr >> 2u) & 0x3u;
+-    if (mode != 0u)
+-        return false;
+-
+-    const uint32_t qwc = m_ioRegisters[channelBase + 0x20u] & 0xFFFFu;
+-    const uint32_t byteCount = qwc * 16u;
+-    const uint32_t originalMadr = m_ioRegisters[channelBase + 0x10u] & 0x7FFFFFF0u;
+-    const uint32_t originalSadr = m_ioRegisters[channelBase + 0x80u] & 0x3FF0u;
+-
+-    uint32_t mainOffset = 0u;
+-    try
+-    {
+-        mainOffset = translateAddress(originalMadr);
+-    }
+-    catch (const std::exception &)
+-    {
+-        return false;
+-    }
+-
+-    if (mainOffset > PS2_RAM_SIZE || byteCount > PS2_RAM_SIZE - mainOffset)
+-        return false;
+-
+-    const bool fromScratchpad = channelBase == kSprFromChannel;
+-    if (ps2_port_env::vuTrace()) {
+-        static unsigned traceSpr=0;
+-        uint64_t first=0; std::memcpy(&first,m_scratchpad+originalSadr,8);
+-        if (traceSpr++<16u) std::fprintf(stderr,"[port-lab spr] from=%d main=0x%x bytes=%u first=0x%llx\n",fromScratchpad,mainOffset,byteCount,static_cast<unsigned long long>(first));
+-    }
+-    uint32_t scratchOffset = originalSadr;
+-    uint32_t bytesLeft = byteCount;
+-    uint32_t copied = 0u;
+-    while (bytesLeft != 0u)
+-    {
+-        const uint32_t scratchChunk = PS2_SCRATCHPAD_SIZE - scratchOffset;
+-        const uint32_t chunk = std::min(bytesLeft, scratchChunk);
+-        if (fromScratchpad)
+-        {
+-            std::memcpy(m_rdram + mainOffset + copied, m_scratchpad + scratchOffset, chunk);
+-            markModified(mainOffset + copied, chunk);
+-        }
+-        else
+-        {
+-            std::memcpy(m_scratchpad + scratchOffset, m_rdram + mainOffset + copied, chunk);
+-        }
+-
+-        copied += chunk;
+-        bytesLeft -= chunk;
+-        scratchOffset = (scratchOffset + chunk) & (PS2_SCRATCHPAD_SIZE - 1u);
+-    }
+-
+-    m_ioRegisters[channelBase + 0x10u] = (originalMadr + byteCount) & 0x7FFFFFF0u;
+-    m_ioRegisters[channelBase + 0x20u] = 0u;
+-    m_ioRegisters[channelBase + 0x80u] = (originalSadr + byteCount) & 0x3FF0u;
+-    completeDmacChannel(channelBase, fromScratchpad ? 8u : 9u);
+-    return true;
+-}
+-
+-bool PS2Memory::tryProcessIpuInputDma(uint32_t channelBase, uint32_t chcr)
+-{
+-    static constexpr uint32_t kToIpuChannel = 0x1000B400u;
+-    if (channelBase != kToIpuChannel || !m_ipuInputSink)
+-        return false;
+-
++static bool processSourceInputDma(PS2Memory &memory, uint32_t channelBase, uint32_t chcr,
++                                  const PS2Memory::IpuInputSink &sink, uint32_t cause)
++{
++    auto &m_ioRegisters = memory.m_ioRegisters;
++    auto *m_rdram = memory.getRDRAM();
++    auto *m_scratchpad = memory.getScratchpad();
+     m_ioRegisters[channelBase] = chcr;
+     // Copy one block into the sink. Returns false when the source is outside main RAM/scratchpad.
+     auto deliver = [&](uint32_t addr, uint32_t qwc) -> bool
+     {
+         if (qwc == 0u)
+             return true;
+-        const bool scratch = isScratchpad(addr) || (addr & 0x80000000u) != 0u;
++        const bool scratch = memory.isScratchpad(addr) || (addr & 0x80000000u) != 0u;
+         const uint8_t *base = scratch ? m_scratchpad : m_rdram;
+         const uint32_t limit = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+         uint32_t phys = 0u;
+         try
+         {
+-            phys = scratch ? (addr & (PS2_SCRATCHPAD_SIZE - 1u)) : translateAddress(addr & 0x7FFFFFFFu);
++            phys = scratch ? (addr & (PS2_SCRATCHPAD_SIZE - 1u)) : memory.translateAddress(addr & 0x7FFFFFFFu);
+         }
+         catch (...)
+         {
+@@ -1759,7 +1695,7 @@
+         const uint32_t bytes = qwc * 16u;
+         if (phys >= limit || bytes > limit - phys)
+             return false;
+-        m_ipuInputSink(base + phys, bytes);
++        sink(base + phys, bytes);
+         return true;
+     };
+ 
+@@ -1769,21 +1705,21 @@
+     if (mode == 0u)
+     {
+         if (!deliver(madr, qwc))
+-            throw std::runtime_error("IPU input DMA source outside memory");
++            throw std::runtime_error("Source input DMA source outside memory");
+         m_ioRegisters[channelBase + 0x10u] = madr + qwc * 16u;
+         m_ioRegisters[channelBase + 0x20u] = 0u;
+-        completeDmacChannel(channelBase, 4u);
++        memory.completeDmacChannel(channelBase, cause);
+         return true;
+     }
+     if (mode != 1u)
+-        throw std::runtime_error("Unsupported IPU input DMA transfer mode");
++        throw std::runtime_error("Unsupported Source input DMA transfer mode");
+ 
+     // Source chain: a pending QWC from a previous tag transfers first, then tags follow.
+     uint32_t tadr = m_ioRegisters[channelBase + 0x30u] & 0xFFFFFFF0u;
+     if (qwc != 0u)
+     {
+         if (!deliver(madr, qwc))
+-            throw std::runtime_error("IPU input DMA continuation outside memory");
++            throw std::runtime_error("Source input DMA continuation outside memory");
+         madr += qwc * 16u;
+     }
+     uint32_t asp = (chcr >> 4u) & 3u;
+@@ -1792,19 +1728,19 @@
+     const bool tie = (chcr & (1u << 7)) != 0u;
+     for (int tags = 0; tags < 65536; ++tags)
+     {
+-        const bool scratch = isScratchpad(tadr) || (tadr & 0x80000000u) != 0u;
++        const bool scratch = memory.isScratchpad(tadr) || (tadr & 0x80000000u) != 0u;
+         uint32_t phys = 0u;
+         try
+         {
+-            phys = scratch ? (tadr & (PS2_SCRATCHPAD_SIZE - 1u)) : translateAddress(tadr & 0x7FFFFFFFu);
++            phys = scratch ? (tadr & (PS2_SCRATCHPAD_SIZE - 1u)) : memory.translateAddress(tadr & 0x7FFFFFFFu);
+         }
+         catch (...)
+         {
+-            throw std::runtime_error("IPU input DMA tag outside memory");
++            throw std::runtime_error("Source input DMA tag outside memory");
+         }
+         const uint8_t *base = scratch ? m_scratchpad : m_rdram;
+         if (phys + 16u > (scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE))
+-            throw std::runtime_error("IPU input DMA truncated tag");
++            throw std::runtime_error("Source input DMA truncated tag");
+         uint64_t tag = 0u;
+         std::memcpy(&tag, base + phys, sizeof(tag));
+         const uint32_t tagQwc = static_cast<uint32_t>(tag & 0xFFFFu);
+@@ -1821,30 +1757,119 @@
+         case 3: case 4: data = addr; tadr += 16u; break;                     // ref, refs
+         case 7: data = tadr + 16u; tadr = data + tagQwc * 16u; end = true; break; // end
+         case 5:
+-            if (asp >= 2u) throw std::runtime_error("IPU DMA CALL stack overflow");
++            if (asp >= 2u) throw std::runtime_error("Source DMA CALL stack overflow");
+             data = tadr + 16u; asr[asp++] = data + tagQwc * 16u; tadr = addr; break;
+         case 6:
+             data = tadr + 16u;
+             if (asp == 0u) { tadr = data + tagQwc * 16u; end = true; }
+             else tadr = asr[--asp];
+             break;
+-        default: throw std::runtime_error("Invalid IPU DMA tag");
++        default: throw std::runtime_error("Invalid Source DMA tag");
+         }
+         m_ioRegisters[channelBase] = (m_ioRegisters[channelBase] & 0xFFFFu) | static_cast<uint32_t>(tag & 0xFFFF0000u);
+         if (!deliver(data, tagQwc))
+-            throw std::runtime_error("IPU input DMA chain payload outside memory");
++            throw std::runtime_error("Source input DMA chain payload outside memory");
+         madr = data + tagQwc * 16u;
+         if (end || (irq && tie)) { finished = true; break; }
+     }
+-    if (!finished) throw std::runtime_error("IPU input DMA chain tag limit exceeded");
++    if (!finished) throw std::runtime_error("Source input DMA chain tag limit exceeded");
+     m_ioRegisters[channelBase] = (m_ioRegisters[channelBase] & ~0x30u) | (asp << 4u);
+     m_ioRegisters[channelBase + 0x40u] = asr[0];
+     m_ioRegisters[channelBase + 0x50u] = asr[1];
+     m_ioRegisters[channelBase + 0x10u] = madr;
+     m_ioRegisters[channelBase + 0x20u] = 0u;
+     m_ioRegisters[channelBase + 0x30u] = tadr;
+-    completeDmacChannel(channelBase, 4u);
++    memory.completeDmacChannel(channelBase, cause);
+     return true;
++}
++
++bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
++{
++    static constexpr uint32_t kSprFromChannel = 0x1000D000u;
++    static constexpr uint32_t kSprToChannel = 0x1000D400u;
++    if (channelBase != kSprFromChannel && channelBase != kSprToChannel)
++        return false;
++
++    const uint32_t mode = (chcr >> 2u) & 0x3u;
++    if (mode == 1u && channelBase == kSprToChannel)
++    {
++        // [V-rt] Source-chain scratchpad transfers are used for streamed geometry/animation data.
++        // A normal-only handler used to acknowledge them without copying any bytes.
++        uint32_t offset = m_ioRegisters[channelBase + 0x80u] & 0x3FF0u;
++        const IpuInputSink toScratch = [&](const uint8_t *data, uint32_t size)
++        {
++            while (size)
++            {
++                const uint32_t count = std::min(size, uint32_t(PS2_SCRATCHPAD_SIZE) - offset);
++                std::memmove(m_scratchpad + offset, data, count);
++                data += count; size -= count;
++                offset = (offset + count) & (PS2_SCRATCHPAD_SIZE - 1u);
++            }
++        };
++        processSourceInputDma(*this, channelBase, chcr, toScratch, 9u);
++        m_ioRegisters[channelBase + 0x80u] = offset;
++        return true;
++    }
++    if (mode != 0u)
++        return false;
++
++    const uint32_t qwc = m_ioRegisters[channelBase + 0x20u] & 0xFFFFu;
++    const uint32_t byteCount = qwc * 16u;
++    const uint32_t originalMadr = m_ioRegisters[channelBase + 0x10u] & 0x7FFFFFF0u;
++    const uint32_t originalSadr = m_ioRegisters[channelBase + 0x80u] & 0x3FF0u;
++
++    uint32_t mainOffset = 0u;
++    try
++    {
++        mainOffset = translateAddress(originalMadr);
++    }
++    catch (const std::exception &)
++    {
++        return false;
++    }
++
++    if (mainOffset > PS2_RAM_SIZE || byteCount > PS2_RAM_SIZE - mainOffset)
++        return false;
++
++    const bool fromScratchpad = channelBase == kSprFromChannel;
++    if (ps2_port_env::vuTrace()) {
++        static unsigned traceSpr=0;
++        uint64_t first=0; std::memcpy(&first,m_scratchpad+originalSadr,8);
++        if (traceSpr++<16u) std::fprintf(stderr,"[port-lab spr] from=%d main=0x%x bytes=%u first=0x%llx\n",fromScratchpad,mainOffset,byteCount,static_cast<unsigned long long>(first));
++    }
++    uint32_t scratchOffset = originalSadr;
++    uint32_t bytesLeft = byteCount;
++    uint32_t copied = 0u;
++    while (bytesLeft != 0u)
++    {
++        const uint32_t scratchChunk = PS2_SCRATCHPAD_SIZE - scratchOffset;
++        const uint32_t chunk = std::min(bytesLeft, scratchChunk);
++        if (fromScratchpad)
++        {
++            std::memcpy(m_rdram + mainOffset + copied, m_scratchpad + scratchOffset, chunk);
++            markModified(mainOffset + copied, chunk);
++        }
++        else
++        {
++            std::memcpy(m_scratchpad + scratchOffset, m_rdram + mainOffset + copied, chunk);
++        }
++
++        copied += chunk;
++        bytesLeft -= chunk;
++        scratchOffset = (scratchOffset + chunk) & (PS2_SCRATCHPAD_SIZE - 1u);
++    }
++
++    m_ioRegisters[channelBase + 0x10u] = (originalMadr + byteCount) & 0x7FFFFFF0u;
++    m_ioRegisters[channelBase + 0x20u] = 0u;
++    m_ioRegisters[channelBase + 0x80u] = (originalSadr + byteCount) & 0x3FF0u;
++    completeDmacChannel(channelBase, fromScratchpad ? 8u : 9u);
++    return true;
++}
++
++bool PS2Memory::tryProcessIpuInputDma(uint32_t channelBase, uint32_t chcr)
++{
++    if (channelBase != 0x1000B400u || !m_ipuInputSink) return false;
++    return processSourceInputDma(*this, channelBase, chcr, m_ipuInputSink, 4u);
+ }
+ 
+ void PS2Memory::completeDmacChannel(uint32_t channelBase, uint32_t cause)

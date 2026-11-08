@@ -153,7 +153,7 @@ __attribute__((visibility("default"))) void hwgs_reset(const void *vram, size_t 
     g.WriteRegister(0x53, 3);                                  // TRXDIR: none
 }
 __attribute__((visibility("default"))) void hwgs_write(unsigned address, unsigned long long value) { if (rec::on) { const u64 v[2] = {address, value}; rec::put(3, v, 16); } gs::TheGs().WriteRegister(address, value); static const bool fifo_trace_w=std::getenv("PS2_PORT_FIFO_TRACE")!=nullptr; if(address==0x53 && fifo_trace_w) std::fprintf(stderr,"[fifo cursor] dir-write=%llu offset512=%llu\n",value,(unsigned long long)gs::TheGs().LocalReadOffset(512)); }
-__attribute__((visibility("default"))) void hwgs_gif(unsigned path, const void *data, size_t bytes) { if (rec::on) { const unsigned pth = path ? path : 3; rec::put(9, &pth, 4, data, bytes); } words(int(path ? path : 3), data, bytes); }
+__attribute__((visibility("default"))) void hwgs_gif(unsigned path, const void *data, size_t bytes) { /* Arm/cap capture even when draws never change scanout. Opt-in only. */ if (rec::armed && !rec::done) rec::poll(); if (rec::on) { const unsigned pth = path ? path : 3; rec::put(9, &pth, 4, data, bytes); } words(int(path ? path : 3), data, bytes); }
 __attribute__((visibility("default"))) void hwgs_upload(unsigned long long bitblt, unsigned long long pos, unsigned long long reg, unsigned long long dir, const void *data, size_t bytes)
 {
     gs::Gs &g = gs::TheGs();

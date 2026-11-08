@@ -77,7 +77,7 @@ SOURCE_FILES = SOURCE_FILES + tuple(sorted(
     for p in (ROOT / folder).rglob('*') if p.is_file() and not p.name.startswith('.'))) + (
     'tools/gen_vk_loader.py', 'tools/gen_shaders.py', 'patches/presentation-fidelity.patch',
     'patches/gpu-renderer-host.patch', 'patches/window-thread-failure.patch', 'patches/hd-frame-stride.patch',
-    'patches/vsync-setting.patch', 'tests/test_gpu_offline.py', 'tests/test_display_path.py', 'tests/display_path.cpp', 'tests/test_app_storage.py', 'patches/guest-heap-exact.patch', 'tests/guest_heap_layout.cpp', 'tests/test_guest_heap_layout.py', 'tests/scanout_transition.cpp', 'tests/test_scanout_transition.py', 'isa_r5900.py', 'binary_rebuild.py', 'tests/test_isa_r5900.py', 'tests/test_binary_rebuild.py', 'MATCHING.md', 'match_function.py', 'tests/test_match_function.py', 'tests/test_vu_learning.py', 'patches/cdvdfsv-resident.patch', 'tests/test_cdvdfsv_resident.py', 'patches/sif-module-load-report.patch', 'tests/test_sif_module_report.py', 'patches/iop-module-buffer.patch', 'tests/test_iop_module_buffer.py', 'patches/dma-watch.patch', 'tests/test_dma_watch.py', 'patches/mpeg-stream-types.patch', 'tests/test_mpeg_stream_types.py')
+    'patches/vsync-setting.patch', 'tests/test_gpu_offline.py', 'tests/test_display_path.py', 'tests/display_path.cpp', 'tests/test_app_storage.py', 'patches/guest-heap-exact.patch', 'tests/guest_heap_layout.cpp', 'tests/test_guest_heap_layout.py', 'tests/scanout_transition.cpp', 'tests/test_scanout_transition.py', 'isa_r5900.py', 'binary_rebuild.py', 'tests/test_isa_r5900.py', 'tests/test_binary_rebuild.py', 'MATCHING.md', 'match_function.py', 'tests/test_match_function.py', 'tests/test_vu_learning.py', 'patches/cdvdfsv-resident.patch', 'tests/test_cdvdfsv_resident.py', 'patches/sif-module-load-report.patch', 'tests/test_sif_module_report.py', 'patches/iop-module-buffer.patch', 'tests/test_iop_module_buffer.py', 'patches/dma-watch.patch', 'tests/test_dma_watch.py', 'patches/mpeg-stream-types.patch', 'tests/test_mpeg_stream_types.py','patches/gs-image-block-units.patch','tests/test_gs_image_block_units.py','patches/vif1-direct-image-span.patch','tests/test_vif1_direct_image_span.py','patches/mpeg-title-owned-input.patch','patches/native-frame-effects.patch','runtime/presentation/frame_effects.hpp','runtime/presentation/FSR1-LICENSE.txt','patches/source-chain-scratchpad.patch','patches/native-mac-surface.patch','generated_corrections.py','tests/test_generated_corrections.py','tests/frame_effects.cpp','tests/test_frame_effects.py')
 
 
 SOURCE_FILES = ('translation_graph.py','tests/test_translation_graph.py') + SOURCE_FILES
@@ -546,6 +546,8 @@ def translate(profile, private, feedback=None):
     if feedback is not None:
         from feedback import consume
         config, feedback_receipt = consume(profile, private, feedback)
+    from resident_closure import configuration as resident_configuration
+    config, resident_entries = resident_configuration(profile, private, config)
     (private / 'analysis/translation-stage.json').unlink(missing_ok=True)
     (private / 'analysis/native-syntax-stage.json').unlink(missing_ok=True)
     (private / 'analysis/native-build-stage.json').unlink(missing_ok=True)
@@ -561,6 +563,8 @@ def translate(profile, private, feedback=None):
     learned = apply_translation(private/'generated', identity=digest(boot_executable(private/'disc-root',profile)))
     corrections = learned['totals']
     save(private/'analysis/knowledge-translation.json', learned)
+    from generated_corrections import apply as apply_generated_corrections
+    apply_generated_corrections(profile, private)
     save(private / 'analysis/sqrt-translation-corrections.json', corrections)
     files = generated_sources(private / 'generated')
     if not files:
@@ -578,7 +582,7 @@ def translate(profile, private, feedback=None):
          'translation_rule_implementation': __import__('knowledge').translation_implementation(),
          'tool_revision': LOCK['ps2recomp']['revision'],
          'native_build_verified': False, 'runtime_verified': False,
-         'runtime_target_feedback': feedback_receipt,
+         'runtime_target_feedback': feedback_receipt, 'overlay_resident_entries': resident_entries,
          'knowledge_bank_revision': learned['bank_revision'], 'knowledge_bank_sha256': learned['bank_sha256']})
     counts = acceptance['counts']
     print(f'Translation emitted {len(files)} C++ files; {counts.get("stubs", "unknown")} stub and '
@@ -613,6 +617,16 @@ def check_generated(profile, private):
     # Spread a general sample across the inventory and include largest functions.
     sample = {files[0], files[-1], *files[::max(1, len(files) // 8)]}
     sample.update(sorted(files, key=lambda p: p.stat().st_size, reverse=True)[:2])
+    if profile.get('generated_source_corrections'):
+        receipt_path = private / 'analysis/generated-correction-stage.json'
+        if not receipt_path.is_file():
+            raise ValueError('Apply pinned title corrections before checking their generated source')
+        correction_receipt = json.loads(receipt_path.read_text())
+        from generated_corrections import verify as verify_corrections
+        verify_corrections(profile, private, correction_receipt)
+        # Every retained title edit is material; a representative sample can miss
+        # exactly the camera/menu/photo correction this build is meant to carry.
+        sample.update(directory / row['file'] for row in correction_receipt['files'] if row['file'].endswith('.cpp'))
     flags = syntax_check_command(directory)
     records = []
     for p in sorted(sample):
@@ -643,8 +657,10 @@ def main(target=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile', help='Explicit per-game profile JSON (required for game processing)')
     sub = parser.add_subparsers(dest='command', required=True)
-    for cmd in ['doctor', 'bootstrap', 'bootstrap-runtime', 'build-native', 'test-runtime', 'boot-probe', 'diagnose', 'package-local', 'verify', 'inspect', 'code-census', 'translate-overlays', 'analyze', 'check-generated', 'prepare', 'status']:
-        sub.add_parser(cmd)
+    for cmd in ['doctor', 'bootstrap', 'bootstrap-runtime', 'build-native', 'test-runtime', 'boot-probe', 'diagnose', 'package-local', 'verify', 'inspect', 'code-census', 'translate-overlays', 'audit-reference-overlays', 'analyze', 'check-generated', 'prepare', 'status']:
+        command_parser = sub.add_parser(cmd)
+        if cmd == 'package-local':
+            command_parser.add_argument('--output-directory', help='Absolute local directory for a new isolated app (for example an external drive)')
     translation = sub.add_parser('translate')
     translation.add_argument('--feedback', help='Explicit private runtime-feedback run name; revalidates fingerprints')
     feedback = sub.add_parser('collect-runtime-targets', help='Turn local missing-target logs into bounded main-ELF compilation hints')
@@ -872,6 +888,10 @@ def main(target=None):
     revision.add_argument('--updates', required=True)
     revision.add_argument('--recipe-output', required=True)
     revision.add_argument('--ledger-output', required=True)
+    rebased = sub.add_parser('rebase-generated-corrections', help='Create an inactive three-way correction candidate for the same disc revision')
+    rebased.add_argument('--previous-profile', required=True)
+    rebased.add_argument('--bases', help='Optional private JSON mapping legacy baseline paths; default uses automatically retained pristine bytes')
+    rebased.add_argument('--destination', required=True, help='New private relative candidate directory')
     recovered = sub.add_parser('recover-compile-settings', help='Recover declarative settings from a recorded compile database without executing it')
     recovered.add_argument('database')
     recovered.add_argument('--report', required=True)
@@ -1131,7 +1151,19 @@ def main(target=None):
         raise RuntimeError('Unhandled profile-free command: ' + args.command)
     profile, private = load_profile(args.profile)
     private.mkdir(parents=True, exist_ok=True)
-    if args.command == 'recover-function':
+    if args.command == 'rebase-generated-corrections':
+        from generated_rebase import rebase
+        from clean_build import path_in
+        prior_profile, prior_private = load_profile(args.previous_profile)
+        specification = prior_profile.get('generated_source_corrections')
+        if not specification:
+            raise ValueError('Previous profile declares no pinned title corrections')
+        bases = json.loads(path_in(private, args.bases).read_text()) if args.bases else None
+        report = rebase(profile, private, prior_private, specification, bases, args.destination)
+        print(json.dumps(report, indent=2))
+        if report['conflicts']:
+            raise RuntimeError('Rebase has conflicts; candidate sources retained, no replay manifest activated')
+    elif args.command == 'recover-function':
         from recovery import run
         report = run(profile, private, args.spec, args.name, args.bank, args.reuse, args.bindings)
         print(json.dumps({k:report[k] for k in ('status','cases','matched','accepted_on_cases','universal_equivalence','promoted_to_runtime')}, indent=2))
@@ -1252,6 +1284,11 @@ def main(target=None):
                               args.reuse_generated, args.output, args.allow_busy, args.jobs)
         if report['comparison']['status'] != 'no_regression':
             sys.exit(2)
+    elif args.command == 'audit-reference-overlays':
+        from reference_functions import audit_port
+        report=audit_port(profile,private)
+        print(json.dumps(report,indent=2))
+        if not report['passed']:raise RuntimeError('Reference function-entry coverage is incomplete; inspect local audit')
     elif args.command == 'translate':
         translate(profile, private, args.feedback)
     elif args.command == 'prepare':
@@ -1263,7 +1300,10 @@ def main(target=None):
         check_generated(profile, private)
     elif args.command in {'build-native', 'test-runtime', 'boot-probe', 'package-local'}:
         import native
-        getattr(native, args.command.replace('-', '_'))(profile, private)
+        if args.command == 'package-local' and args.output_directory is not None:
+            native.package_local(profile, private, output_directory=args.output_directory)
+        else:
+            getattr(native, args.command.replace('-', '_'))(profile, private)
     elif args.command == 'diagnose':
         import native
         native.boot_probe(profile, private, headless=True)
@@ -1278,6 +1318,44 @@ def cli(target=None):
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as e:
         print(f'ERROR: {e}', file=sys.stderr)
         sys.exit(1)
+
+
+
+SOURCE_FILES = ('runtime/gpu/native-plugin/scanout_qualification.hpp', 'tests/scanout_qualification.cpp', 'tests/test_scanout_qualification.py', 'patches/dbcman-v2-controller.patch', 'patches/vu0-concurrent.patch') + SOURCE_FILES
+
+SOURCE_FILES = ('tests/test_mpeg_fragment_decode.py',) + SOURCE_FILES
+
+SOURCE_FILES = ('patches/mpeg-multistream-continuity.patch',) + SOURCE_FILES
+
+SOURCE_FILES = ('tests/test_correction_syntax.py', 'generated_rebase.py', 'tests/test_generated_rebase.py', 'tests/test_signing_space.py', 'resident_closure.py', 'tests/test_resident_closure.py', 'patches/vu-product-underflow.patch',) + SOURCE_FILES
+
+
+SOURCE_FILES = ('patches/link-branch-resume.patch', 'tests/test_link_branch_resume.py') + SOURCE_FILES
+SOURCE_FILES = ('patches/gs-load-image-host-packet.patch', 'tests/check_vu0_poll.py') + SOURCE_FILES
+SOURCE_FILES = ('patches/gs-image-transfer-width.patch',) + SOURCE_FILES
+SOURCE_FILES = ('patches/host-frame-resource-lifetime.patch',) + SOURCE_FILES
+SOURCE_FILES = ('patches/libgraph-image-packet-abi.patch',) + SOURCE_FILES
+SOURCE_FILES = ('patches/discovered-sdk-bindings.patch', 'tests/test_discovered_sdk_bindings.py') + SOURCE_FILES
+
+
+
+SOURCE_FILES = ('patches/mutable-jump-table-entries.patch', 'tests/test_mutable_jump_table.py') + SOURCE_FILES
+
+SOURCE_FILES = ('indirect_entries.py', 'tests/test_indirect_entries.py') + SOURCE_FILES
+
+SOURCE_FILES = ('overlay_segments.py', 'tests/test_overlay_segments.py') + SOURCE_FILES
+
+SOURCE_FILES = ('reference_functions.py', 'tests/test_reference_functions.py') + SOURCE_FILES
+
+SOURCE_FILES = ('REFERENCE-QUALIFICATION.md',) + SOURCE_FILES
+
+SOURCE_FILES = ('runtime/gpu/native-plugin/completion_gate.hpp', 'tests/completion_gate.cpp') + SOURCE_FILES
+
+SOURCE_FILES = ('runtime/gpu/src/alpha_proof.h', 'tests/alpha_proof.cpp') + SOURCE_FILES
+
+SOURCE_FILES = ('tests/test_alpha_proof.py', 'tests/alpha_gpu_compare.cpp') + SOURCE_FILES
+
+SOURCE_FILES = ('runtime/gpu/src/ordered_coverage.h', 'tests/ordered_coverage.cpp', 'tests/test_module_layout.py') + SOURCE_FILES
 
 
 if __name__ == '__main__':

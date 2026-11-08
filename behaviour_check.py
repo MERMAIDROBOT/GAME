@@ -1092,11 +1092,21 @@ def _status_divide(s, invalid, divide):
     s.status = (s.status & ~0x30) | (0x10 | 0x400 if invalid else 0) | (0x20 | 0x800 if divide else 0) | (s.status & 0xC00)
 
 
+def _product_underflow_status(s, a, b, dest):
+    # Sony VU v6 p42: US from product underflow; ZS/SS from the final sum.
+    for k, (x, y) in enumerate(zip(a, b)):
+        if dest & (8 >> k) and _pff('mul', x, y)[2]:
+            s.status |= 0x100
+
+
 def _varith(op, kind, to_acc=False):
     second = _operand(kind)
 
     def run(s, f):
-        results = _lanes(op, _vf(s, f['vs']), second(s, f), s.vacc)
+        a, b = _vf(s, f['vs']), second(s, f)
+        results = _lanes(op, a, b, s.vacc)
+        if op in ('madd', 'msub'):
+            _product_underflow_status(s, a, b, f['dest'])
         values = [r[0] for r in results]
         if to_acc:
             _acc_write(s, values, f['dest'])
@@ -1113,6 +1123,8 @@ def _outer(to_acc):
         a, b = _vf(s, f['vs']), _vf(s, f['vt'])
         a, b = [a[1], a[2], a[0], a[3]], [b[2], b[0], b[1], b[3]]
         results = _lanes('mul', a, b) if to_acc else _lanes('msub', a, b, s.vacc)
+        if not to_acc:
+            _product_underflow_status(s, a, b, f['dest'] & 0xE)
         values = [r[0] for r in results]
         if to_acc:
             _acc_write(s, values, f['dest'] & 0xE)
