@@ -546,6 +546,8 @@ def translate(profile, private, feedback=None):
     if feedback is not None:
         from feedback import consume
         config, feedback_receipt = consume(profile, private, feedback)
+    from sdk_shapes import configuration as sdk_shape_configuration
+    config, sdk_shape_entries = sdk_shape_configuration(profile, private, config)
     from resident_closure import configuration as resident_configuration
     config, resident_entries = resident_configuration(profile, private, config)
     (private / 'analysis/translation-stage.json').unlink(missing_ok=True)
@@ -582,7 +584,7 @@ def translate(profile, private, feedback=None):
          'translation_rule_implementation': __import__('knowledge').translation_implementation(),
          'tool_revision': LOCK['ps2recomp']['revision'],
          'native_build_verified': False, 'runtime_verified': False,
-         'runtime_target_feedback': feedback_receipt, 'overlay_resident_entries': resident_entries,
+         'runtime_target_feedback': feedback_receipt, 'overlay_resident_entries': resident_entries, 'sdk_shape_bindings': sdk_shape_entries,
          'knowledge_bank_revision': learned['bank_revision'], 'knowledge_bank_sha256': learned['bank_sha256']})
     counts = acceptance['counts']
     print(f'Translation emitted {len(files)} C++ files; {counts.get("stubs", "unknown")} stub and '
@@ -1355,6 +1357,7 @@ SOURCE_FILES = ('runtime/gpu/src/alpha_proof.h', 'tests/alpha_proof.cpp') + SOUR
 
 SOURCE_FILES = ('tests/test_alpha_proof.py', 'tests/alpha_gpu_compare.cpp') + SOURCE_FILES
 
+SOURCE_FILES = ('sdk_shapes.py', 'tests/test_sdk_shapes.py') + SOURCE_FILES
 SOURCE_FILES = ('runtime/gpu/src/ordered_coverage.h', 'tests/ordered_coverage.cpp', 'tests/test_module_layout.py') + SOURCE_FILES
 
 
