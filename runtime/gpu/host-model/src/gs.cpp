@@ -533,8 +533,10 @@ void Gs::Touch(u32 bp, u32 bw, u32 psm, u32 x, u32 y, u32 w, u32 h, bool write) 
     (void)x;
     // Whole rows of pages: buffers are laid out a page (8 KB, 32 blocks) at a
     // time, rows of FBW pages, 32 to 128 pixels tall by format.
-    const u32 page_rows = (psm == PSMCT32 || psm == PSMCT24 || psm == PSMZ32 || psm == PSMZ24) ? 32
-                        : (psm == PSMT4) ? 128 : 64;
+    // High-index formats occupy the high byte or nibble of a CT32 pixel.
+    const bool layout32 = psm == PSMCT32 || psm == PSMCT24 || psm == PSMZ32 || psm == PSMZ24 ||
+                          psm == PSMT8H || psm == PSMT4HL || psm == PSMT4HH;
+    const u32 page_rows = layout32 ? 32 : psm == PSMT4 ? 128 : 64;
     const u32 pages_wide = std::max(1u, (psm == PSMT8 || psm == PSMT4) ? bw / 2 : bw);
     const u32 rows = (y + h + page_rows - 1) / page_rows;
     const u32 begin = bp;
