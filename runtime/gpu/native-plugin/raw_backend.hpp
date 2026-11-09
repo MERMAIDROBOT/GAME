@@ -8,6 +8,7 @@
 #include "completion_gate.hpp"
 #include "image_stamp.hpp"
 #include "scanout_qualification.hpp"
+#include "fifo_formats.hpp"
 #include <cstdio>
 #include "runtime/gs/gs_backend.h"
 namespace LocalGS {
@@ -17,7 +18,7 @@ class RawBackend final:public GSRasterBackend {
     FieldPublisher publisher;
     CompletionGate<CompletedField> completedResources;
     GSTransferSnapshot transfer{};
-    std::vector<uint8_t> fifo;size_t fifoOffset=0;
+    std::vector<uint8_t> fifo;size_t fifoOffset=0;size_t fifoPixelBytes=4;
     ImageStamp<GSPresentationStamp> presentedImage;
     uint64_t lastPictureSampleTick = 0;
     unsigned pictureSamples = 0;
@@ -96,8 +97,9 @@ public:
         flushGIF();transfer={};transfer.direction=c.direction;transfer.x=c.trxpos.dsax;transfer.y=c.trxpos.dsay;
         transfer.totalPixels=unsigned(c.trxreg.rrw)*c.trxreg.rrh;fifo.clear();fifoOffset=0;
         if(c.direction==1) {
-            const size_t bytes=size_t(transfer.totalPixels)*4;
-            if(c.bitbltbuf.spsm!=GS_PSM_CT32 || !bytes || bytes%16 || bytes>16*1024*1024)
+            fifoPixelBytes=guestFifoBytesPerPixel(c.bitbltbuf.spsm);
+            const size_t bytes=size_t(transfer.totalPixels)*fifoPixelBytes;
+            if(!fifoPixelBytes || !bytes || bytes%16 || bytes>16*1024*1024)
                 throw std::runtime_error("Unqualified guest FIFO format/size");
             // Read the GS-owned FIFO captured at raw TRXDIR, not later mutable VRAM.
             fifo=gpu.readFIFO(bytes);transfer.localToHostPendingBytes=bytes;
@@ -246,7 +248,7 @@ public:
         std::lock_guard<std::recursive_mutex> lock(mutex);if(n&&!d)throw std::invalid_argument("Null FIFO destination");
         const size_t count=std::min<size_t>(n,fifo.size()-fifoOffset);
         if(count)std::memcpy(d,fifo.data()+fifoOffset,count);fifoOffset+=count;
-        transfer.localToHostPendingBytes=fifo.size()-fifoOffset;transfer.copiedPixels=fifoOffset/4;return count;
+        transfer.localToHostPendingBytes=fifo.size()-fifoOffset;transfer.copiedPixels=fifoOffset/fifoPixelBytes;return count;
     }
     uint32_t ReadVram(uint32_t p,uint32_t b,uint32_t w,uint32_t x,uint32_t y)const override {
         std::lock_guard<std::recursive_mutex> lock(mutex);flushGIF();

@@ -238,7 +238,7 @@ __attribute__((visibility("default"))) size_t hwgs_read_fifo(void *out, size_t b
     const gs::u32 sbp = gs::u32(bb & 0x3FFF), sbw = gs::u32((bb >> 16) & 0x3F), spsm = gs::u32((bb >> 24) & 0x3F);
     const gs::u32 sx = gs::u32(pos & 0x7FF), sy = gs::u32((pos >> 16) & 0x7FF);
     const gs::u32 w = gs::u32(reg & 0xFFF), h = gs::u32((reg >> 32) & 0xFFF);
-    const gs::u32 bpp = spsm == 0x00 ? 4 : spsm == 0x01 ? 3 : (spsm == 0x02 || spsm == 0x0A) ? 2 : spsm == 0x13 ? 1 : 0;
+    const gs::u32 bpp = (spsm == 0x00 || spsm == 0x30) ? 4 : (spsm == 0x01 || spsm == 0x31) ? 3 : (spsm == 0x02 || spsm == 0x0A) ? 2 : spsm == 0x13 ? 1 : 0; // Z32/Z24 read as CT32/CT24 (fifo_formats.hpp)
     const size_t rowBytes = size_t(w) * (bpp ? bpp : 1);
     size_t offset = size_t(g.LocalReadOffset(gs::u32(rowBytes)));
     static const bool fifo_trace=std::getenv("PS2_PORT_FIFO_TRACE")!=nullptr;
