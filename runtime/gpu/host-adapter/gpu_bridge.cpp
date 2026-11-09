@@ -1792,6 +1792,12 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     state.c = ps2gpu::BlendAlpha(std::min(2u, Bits(c.alpha, 4, 2)));
     state.d = ps2gpu::BlendColour(std::min(2u, Bits(c.alpha, 6, 2)));
     state.fix = Bits(c.alpha, 32, 8);
+    // A 24-bit target stores no alpha: the GS reads Ad as 0x80 (1.0). Reading the
+    // host target's leftover alpha tinted and dropped blended layers.
+    if (state.psm == gs::PSMCT24 && state.c == ps2gpu::BlendAlpha::Dest) {
+        state.c = ps2gpu::BlendAlpha::Fix;
+        state.fix = 0x80;
+    }
     state.pabe = call.pabe;
     // FBA: alpha's top bit forced on write (a 24-bit target has no alpha to set).
     state.fba = Bits(c.fba, 0, 1) != 0 && state.psm != gs::PSMCT24;
