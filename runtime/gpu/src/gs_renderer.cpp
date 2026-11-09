@@ -254,13 +254,25 @@ std::uint32_t WriteMask(std::uint32_t kept) {
     return mask;
 }
 
-/* Whether some channel is written only in part. */
-bool PartlyMasked(std::uint32_t kept) {
-    for (int channel = 0; channel < 4; ++channel) {
-        const std::uint32_t byte = (kept >> (8 * channel)) & 0xFF;
-        if (byte != 0 && byte != 0xFF) return true;
-    }
+// A mask needs a per-bit merge when it writes and preserves stored bits
+// within the same channel. Unused bits in 16-bit targets do not count.
+bool PartlyMasked(const GsDrawState& s) {
+    const std::uint32_t stored = ~KeptBits(0, s.psm);
+    const std::uint32_t kept = stored & s.fbmsk, written = stored & ~s.fbmsk;
+    for (int shift = 0; shift < 32; shift += 8)
+        if (((kept >> shift) & 0xFF) && ((written >> shift) & 0xFF)) return true;
     return false;
+}
+
+bool LogicMask(const GsDrawState& s, bool supported) {
+    if (!supported || !PartlyMasked(s)) return false;
+    return !s.blend || (s.a == s.b && s.d == BlendColour::Source) ||
+           (!s.pabe && s.a == BlendColour::Source && s.b == BlendColour::Zero &&
+            s.c == BlendAlpha::Fix && s.fix == 0x80 && s.d == BlendColour::Zero);
+}
+
+bool ShaderMask(const GsDrawState& s, bool logic_supported) {
+    return PartlyMasked(s) && !LogicMask(s, logic_supported);
 }
 
 /* A blend the blender cannot do: FIX over 0x80 is a factor over 1.0, which
@@ -2547,7 +2559,7 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& input, const GsVertex* v
     // drawn already: the batch so far first (the next takes a new copy).
     const bool feedback = state.textured && state.texture_target && state.tex_fbp == state.fbp &&
                           state.tex_fbw == state.fbw && count >= 3;
-    const bool shader_blend = ShaderBlend(state) && count >= 3;
+    const bool reads_dest = (ShaderBlend(state) || ShaderMask(state, g_.logic_op)) && count >= 3;
     // An alpha test whose failing pixels still write (AFAIL FB_ONLY or
     // ZB_ONLY with depth written, RGB_ONLY) is drawn in two passes over the
     // batch - the passing pixels of all its primitives, then the failing
@@ -2560,10 +2572,10 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& input, const GsVertex* v
     const bool two_pass = state.alpha_test && state.atst != 1 && count >= 3 &&
                           (((state.afail == 1 || state.afail == 2) && depth_written) || state.afail == 3);
     static const bool refineAlpha=[] {const char* e=std::getenv("PS2_PORT_HW_GS_ALPHA_COVERAGE");return e&&std::strcmp(e,"1")==0;}();
-    const bool refine=refineAlpha && two_pass && !feedback && !shader_blend;
+    const bool refine=refineAlpha && two_pass && !feedback && !reads_dest;
     if(refine && alpha_coverage_.size()>=256)Flush();
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-    if (feedback || shader_blend || two_pass) {
+    if (feedback || reads_dest || two_pass) {
         float fx0 = 1e30f, fy0 = 1e30f, fx1 = -1e30f, fy1 = -1e30f;
         float u0 = 1e30f, v0 = 1e30f, u1 = -1e30f, v1 = -1e30f;
         const float tw = float(state.tw ? state.tw : 2048), th = float(state.th ? state.th : 2048);
@@ -2591,7 +2603,7 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& input, const GsVertex* v
         const auto overlaps = [&](int l, int t, int r, int bottom) {
             return drawn_any_ && r >= drawn_x0_ && l <= drawn_x1_ && bottom >= drawn_y0_ && t <= drawn_y1_;
         };
-        if ((feedback && overlaps(tu0, tv0, tu1, tv1)) || ((shader_blend || two_pass) && overlaps(x0, y0, x1, y1))) {
+        if ((feedback && overlaps(tu0, tv0, tu1, tv1)) || ((reads_dest || two_pass) && overlaps(x0, y0, x1, y1))) {
             bool independent=refine && count==3 && !alpha_coverage_unknown_;
             if(independent) {
                 const auto next=coverageTriangle(v);
@@ -2618,18 +2630,18 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& input, const GsVertex* v
             else
                 read_all_ = true;
         }
-        if (shader_blend) Reads(x0, y0, x1, y1);
+        if (reads_dest) Reads(x0, y0, x1, y1);
     }
     state_ = state;
     if(refine) {
         if(count==3)alpha_coverage_.push_back(coverageTriangle(v));
         else alpha_coverage_unknown_=true;
-    } else if (feedback || shader_blend || two_pass) {
+    } else if (feedback || reads_dest || two_pass) {
         // Bounds-tracked draw without a recorded triangle: later refined draws
         // cannot prove independence from it.
         alpha_coverage_unknown_=true;
     }
-    if (feedback || shader_blend || two_pass) {
+    if (feedback || reads_dest || two_pass) {
         if (!drawn_any_) {
             drawn_x0_ = x0;
             drawn_y0_ = y0;
@@ -2892,7 +2904,8 @@ void VulkanGsRenderer::Flush() {
     Image* source = nullptr;
     const Image* bound = &texture->image;   // what the shader reads (its size, gs.frag's ImageSize)
     bool copy_first = false;
-    const bool shader_blend = ShaderBlend(state_);
+    const bool shader_mask = ShaderMask(state_, g_.logic_op);
+    const bool reads_dest = ShaderBlend(state_) || shader_mask;
     if (state_.textured && state_.texture_target) {
         auto found = targets_.find(Key{state_.tex_fbp, state_.tex_fbw, state_.tex_target_psm});
         if (found != targets_.end()) {
@@ -2914,7 +2927,7 @@ void VulkanGsRenderer::Flush() {
     }
     // Blending in the shader reads the target as the batch began: the copy.
     VkDescriptorSet destination_set = VK_NULL_HANDLE;
-    if (shader_blend) {
+    if (reads_dest) {
         if (!copy_first) {
             Image& copy = feedbacks_[{t->width, t->height}];
             if (!copy.image)
@@ -2939,14 +2952,7 @@ void VulkanGsRenderer::Flush() {
     const bool depth_write = state_.depth && state_.depth_write;
     const std::uint32_t kept = KeptBits(state_.fbmsk, state_.psm);
     const std::uint32_t mask = WriteMask(kept);
-    // A channel FBMSK masks only in part is drawn exactly with two logic ops -
-    // which replace blending, so only where the blend leaves the source as it
-    // is (Burnout 3's race writes two bits of each half of its frame's pixels
-    // through a 16-bit view). Otherwise the channel is written whole.
-    const bool source_only = !state_.blend || (state_.a == state_.b && state_.d == BlendColour::Source) ||
-                             (state_.a == BlendColour::Source && state_.b == BlendColour::Zero &&
-                              state_.c == BlendAlpha::Fix && state_.fix == 0x80 && state_.d == BlendColour::Zero);
-    const bool logic = g_.logic_op && PartlyMasked(kept) && source_only;
+    const bool logic = LogicMask(state_, g_.logic_op);
     std::vector<Pass> passes;
     if (!state_.alpha_test || state_.atst == 1) {
         passes = {{2, depth_write, mask}};
@@ -3118,6 +3124,7 @@ void VulkanGsRenderer::Flush() {
                 for (std::uint32_t half = split ? 1 : 0; half <= (split ? 2u : 0u); ++half) {
                     std::uint32_t key = (PipelineKey(state_) & ~(0xFu << 9)) | ((~pass.write_mask & 0xFu) << 9);
                     if (half == 2) key &= 0xFu << 9;                // blending off
+                    if (shader_mask) key |= kShaderBlend;
                     // Partly masked: AND with the kept bits, then OR the rest
                     // in (a channel this pass leaves alone keeps every bit).
                     std::uint32_t keep = kept;
@@ -3127,7 +3134,14 @@ void VulkanGsRenderer::Flush() {
                         const std::uint32_t op_key = op ? ((key & (0xFu << 9)) | op << 13) : key;
                         params.afail = pass.mode;
                         params.pabe = half;
-                        params.logic = op;
+                        params.logic = shader_mask ? 3 : op;
+                        // A = B and D = source reproduces an unblended draw.
+                        if (shader_mask && (!state_.blend || half == 2))
+                            params.blend_ops &= ~0xFFu;
+                        else
+                            params.blend_ops = (params.blend_ops & ~0xFFu) |
+                                std::uint32_t(state_.a) | std::uint32_t(state_.b) << 2 |
+                                std::uint32_t(state_.c) << 4 | std::uint32_t(state_.d) << 6;
                         // PS2HOST_GPU_UBERSHADER=1: every draw with the whole shader.
                         static const bool whole = std::getenv("PS2HOST_GPU_UBERSHADER") != nullptr;
                         const std::uint32_t full_key =
