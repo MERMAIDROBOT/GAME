@@ -1366,5 +1366,7 @@ SOURCE_FILES = ('patches/native-sound-host.patch', 'runtime/native_sound/bozo/LI
 SOURCE_FILES = ('patches/native-sound-dma.patch',) + SOURCE_FILES
 
 
+SOURCE_FILES = ('runtime/gpu/native-plugin/fifo_formats.hpp', 'tests/fifo_formats.cpp', 'tests/native_sound_mixer.cpp', 'tests/test_native_sound_mixer.py', 'tests/test_runtime_patch_sync.py') + SOURCE_FILES
+
 if __name__ == '__main__':
     cli()

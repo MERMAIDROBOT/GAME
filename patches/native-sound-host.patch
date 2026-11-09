@@ -3634,7 +3634,7 @@ diff --git a/ps2xRuntime/src/lib/native_sound/bozo/src/mixer.cpp b/ps2xRuntime/s
 new file mode 100644
 --- /dev/null
 +++ b/ps2xRuntime/src/lib/native_sound/bozo/src/mixer.cpp
-@@ -0,0 +1,837 @@
+@@ -0,0 +1,871 @@
 +// SPDX-License-Identifier: MIT
 +// Copyright (c) 2026 The Bozos (boubou666 and Arzaroth). MIT licence (see LICENSE at the repository root).
 +//
@@ -3644,6 +3644,9 @@ new file mode 100644
 +#include "bozo/audio/port_stream.h"
 +
 +#include <algorithm>
++#include <array>
++#include <cmath>
++#include <numbers>
 +#include <cstdlib>
 +#include <cstring>
 +#include <iterator>
@@ -3722,14 +3725,45 @@ new file mode 100644
 +        };
 +        constexpr uint32_t kAreaSizes[10] = {0x2, 0x4D8, 0x3E8, 0x908, 0xDFC, 0x15BC, 0x1ED8, 0x3008, 0x3008, 0x780};
 +
-+        // 4-point Catmull-Rom between y1 and y2; t a 12-bit fraction.
++        // PS2 Port Lab change: the SPU2's 4-tap Gaussian interpolation replaces upstream's Catmull-Rom curve. The
++        // Gaussian filter is a low-pass; Catmull-Rom passes the aliasing of low-rate voices, heard as fuzz. Weights
++        // are generated as in PS2Recomp's SPU2 model (ps2xIOP iop_spu2.cpp, GPL): 512-entry windowed-sinc kernel
++        // normalised so each phase sums to 32640. y0 is the oldest sample; t a 12-bit fraction (top 8 bits used).
++        const std::array<std::array<int16_t, 4>, 256> &gaussianWeights()
++        {
++            static const auto weights = []
++            {
++                std::array<double, 512> kernel{};
++                double total = 0.0;
++                for (size_t index = 0; index < kernel.size(); ++index)
++                {
++                    const double position = static_cast<double>(index) + 0.5;
++                    const double window = 1.0 + (std::cos(std::numbers::pi * position / 511.5) - 1.0) * 0.5 +
++                                          (std::cos(std::numbers::pi * position / 255.75) - 1.0) * 0.08;
++                    const double value = std::sin(std::numbers::pi * position / 500.0) * window / position;
++                    kernel[511u - index] = value;
++                    total += value;
++                }
++                const double normalization = 32640.0 * 128.0 / total;
++                std::array<std::array<int16_t, 4>, 256> result{};
++                for (size_t phase = 0; phase < result.size(); ++phase)
++                {
++                    const std::array<size_t, 4> taps{255u - phase, 511u - phase, phase + 256u, phase};
++                    double sum = 0.0;
++                    for (const size_t tap : taps) sum += kernel[tap] * normalization;
++                    const double correction = (sum - 32640.0) / 4.0;
++                    for (size_t i = 0; i < taps.size(); ++i)
++                        result[phase][i] = static_cast<int16_t>(std::lround(kernel[taps[i]] * normalization - correction));
++                }
++                return result;
++            }();
++            return weights;
++        }
++
 +        int32_t interpolate(int32_t y0, int32_t y1, int32_t y2, int32_t y3, uint32_t t)
 +        {
-+            const float f = static_cast<float>(t) * (1.0f / 4096.0f);
-+            const float a = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
-+            const float b = static_cast<float>(y0) - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
-+            const float c = -0.5f * y0 + 0.5f * y2;
-+            return clamp16(static_cast<int32_t>(((a * f + b) * f + c) * f + static_cast<float>(y1)));
++            const auto &w = gaussianWeights()[(t >> 4u) & 0xFFu];
++            return clamp16(mul15(y0, w[0]) + mul15(y1, w[1]) + mul15(y2, w[2]) + mul15(y3, w[3]));
 +        }
 +    }
 +
