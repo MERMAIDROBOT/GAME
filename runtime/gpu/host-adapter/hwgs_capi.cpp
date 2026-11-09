@@ -1,5 +1,7 @@
 // Claude 2026-10-20: libclaude-hwgs - ps2-port-engine's GS model + hardware renderer (MIT) behind a small C API for
 // our GS plugin (PS2_PORT_HW_GS=1). Everything here runs on the plugin's single GS worker thread.
+#include <algorithm>
+#include <bitset>
 #include <cstdio>
 #include <chrono>
 #include <atomic>
@@ -243,7 +245,31 @@ __attribute__((visibility("default"))) size_t hwgs_read_fifo(void *out, size_t b
     size_t offset = size_t(g.LocalReadOffset(gs::u32(rowBytes)));
     static const bool fifo_trace=std::getenv("PS2_PORT_FIFO_TRACE")!=nullptr;
     if(fifo_trace) std::fprintf(stderr,"[fifo cursor] read offset=%zu bytes=%zu row=%zu\n",offset,bytes,rowBytes);
-    if (offset == 0 && g.on_memory) g.on_memory(0, 16384, false);
+    if (offset == 0 && g.on_memory) {
+        if (dir == 1 && bpp >= 3 && w && h) {
+            // CT32/24 and Z32/24 use 8x8 blocks, including the packed 24-bit FIFO formats.
+            // Resolve physical blocks through the GS swizzle so VRAM wrapping stays correct.
+            std::bitset<16384> seen;
+            std::vector<gs::u32> blocks;
+            for (gs::u32 y = sy & ~7u; y < sy + h; y += 8)
+                for (gs::u32 x = sx & ~7u; x < sx + w; x += 8) {
+                    gs::u32 nibble = 0;
+                    const auto block = gs::Memory::Address(sbp, sbw, x, y, spsm, &nibble) / 256;
+                    if (!seen.test(block)) {
+                        seen.set(block);
+                        blocks.push_back(block);
+                    }
+                }
+            std::sort(blocks.begin(), blocks.end());
+            for (size_t first = 0, next = 0; first < blocks.size(); first = next) {
+                for (next = first + 1; next < blocks.size() && blocks[next] == blocks[next - 1] + 1; ++next) {}
+                g.on_memory(blocks[first], blocks[next - 1] + 1, false);
+            }
+            if (fifo_trace) std::fprintf(stderr, "[fifo sync] source blocks=%zu\n", blocks.size());
+        } else {
+            g.on_memory(0, 16384, false);
+        }
+    }
     auto *o = static_cast<unsigned char *>(out);
     std::memset(o, 0, bytes);
     static int warned = 0;
