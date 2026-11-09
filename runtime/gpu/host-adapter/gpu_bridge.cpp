@@ -515,13 +515,22 @@ void SyncWrite(Bridge& b, u32 begin, u32 end, const u8* cover) {
         if (o.gpu_newer && o.dirty_begin < last && first < o.dirty_end) WriteBack(b, o);
     // Blocks written in part where the GPU's are newer: the transfer's pixels
     // patched into the GPU's when it is done, the blocks still the GPU's.
+    // T8H/T4HL/T4HH write only bits 24-31 of each 32-bit word, so even a block
+    // they cover whole keeps the GPU's lower 24 bits: patched, never replaced.
     b.patch.transfer = gs::TheGs().last_transfer;
+    const u32 tpsm = b.patch.transfer.psm;
+    const bool high_bits = tpsm == gs::PSMT8H || tpsm == gs::PSMT4HL || tpsm == gs::PSMT4HH;
+    const auto partial = [&](u32 i) { return cover[i - begin] == 1 || (high_bits && cover[i - begin]); };
     for (u32 i = first; i < last; ++i)
-        if (cover[i - begin] == 1 && b.blocks[i] == Bridge::kGpuNewer) b.patch.blocks.push_back(i);
+        if (partial(i) && b.blocks[i] == Bridge::kGpuNewer) b.patch.blocks.push_back(i);
     for (u32 i = first; i < last; ++i)
-        if (cover[i - begin] && !(cover[i - begin] == 1 && b.blocks[i] == Bridge::kGpuNewer)) b.blocks[i] = Bridge::kCpuNewer;
+        if (cover[i - begin] && !(partial(i) && b.blocks[i] == Bridge::kGpuNewer)) b.blocks[i] = Bridge::kCpuNewer;
     for (auto& [key, o] : b.owned) {
         if (last <= o.begin || o.full_end <= first) continue;
+        // A 24-bit colour or depth buffer stores nothing in bits 24-31: an
+        // upper-bits texture uploaded into it (SSX 3's button-prompt atlas in
+        // its CT24 front end) leaves its picture as drawn.
+        if (high_bits && (o.psm == gs::PSMCT24 || o.psm == gs::PSMZ24)) continue;
         if (first < o.end) { MarkStale(o, 1, first, last);o.cpu_writes.written(first,last); }
         else o.stale_beyond = true;
     }
@@ -548,15 +557,20 @@ void ApplyPatch(Bridge& b) {
         case 0x02: case 0x0A: case 0x32: case 0x3A: bytes = 2; base_mask = 0xFFFFu; break;
         case 0x13: bytes = 1; base_mask = 0xFFu; break;                           // T8
         case 0x14: bytes = 0; base_mask = 0xFu; break;                            // T4
+        case 0x1B: case 0x24: case 0x2C: break;                                   // T8H, T4HL, T4HH: below
         default: return;                    // (Touch sends no others here)
     }
+    // The upper-bits formats share CT32's layout: a pixel is the top byte or
+    // nibble of the 32-bit word at the CT32 address of the same (x, y).
+    const u32 high_mask = t.psm == 0x1B ? 0xFF000000u : t.psm == 0x24 ? 0x0F000000u : t.psm == 0x2C ? 0xF0000000u : 0u;
     const u8* memory = gs::TheGs().memory.data();
     std::map<u32, u32> masks;               // word -> its mask
     for (u32 y = t.y; y < t.y + t.h; ++y)
         for (u32 x = t.x; x < t.x + t.w; ++x) {
             u32 nibble = 0;
-            const u32 address = gs::Memory::Address(t.bp, t.bw, x % 2048, y % 2048, t.psm, &nibble);
+            const u32 address = gs::Memory::Address(t.bp, t.bw, x % 2048, y % 2048, high_mask ? u32(gs::PSMCT32) : t.psm, &nibble);
             if (!std::binary_search(blocks.begin(), blocks.end(), address / 256)) continue;
+            if (high_mask) { masks[address / 4] |= high_mask; continue; }
             const u32 shift = bytes ? (address % 4) * 8 : (address % 4) * 8 + 4 * nibble;
             masks[address / 4] |= base_mask << shift;
         }

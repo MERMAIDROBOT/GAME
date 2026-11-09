@@ -544,11 +544,13 @@ void Gs::Touch(u32 bp, u32 bw, u32 psm, u32 x, u32 y, u32 w, u32 h, bool write) 
     // Written, which blocks the rectangle covers, whole or in part, a block's
     // pixels at a time (8x8 32-bit, 16x8 16-bit, 16x16 8-bit, 32x16 4-bit):
     // only those in part need what was there (with --gpu, brought back from
-    // the GPU, which waits for it). Formats that write part of a pixel
-    // (8H, 4HL, 4HH), and a rectangle past the buffer's width, as before.
+    // the GPU, which waits for it). A rectangle past the buffer's width, as before.
     u32 cw = 0, ch = 0;
     switch (psm) {
         case PSMCT32: case PSMCT24: case PSMZ32: case PSMZ24: cw = 8; ch = 8; break;
+        // The upper-bits formats share CT32's 8x8 blocks; they write only bits 24-31 of
+        // each word, which the GPU side merges (SyncWrite) instead of replacing blocks.
+        case PSMT8H: case PSMT4HL: case PSMT4HH: cw = 8; ch = 8; break;
         case PSMCT16: case PSMCT16S: case PSMZ16: case PSMZ16S: cw = 16; ch = 8; break;
         case PSMT8: cw = 16; ch = 16; break;
         case PSMT4: cw = 32; ch = 16; break;
