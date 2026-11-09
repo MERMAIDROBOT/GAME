@@ -1361,5 +1361,7 @@ SOURCE_FILES = ('sdk_shapes.py', 'tests/test_sdk_shapes.py') + SOURCE_FILES
 SOURCE_FILES = ('runtime/gpu/src/ordered_coverage.h', 'tests/ordered_coverage.cpp', 'tests/test_module_layout.py') + SOURCE_FILES
 
 
+SOURCE_FILES = ('patches/native-sound-host.patch', 'runtime/native_sound/bozo/LICENSE', 'runtime/native_sound/bozo/UPSTREAM_COMMIT', 'runtime/native_sound/bozo/include/bozo/audio/libsd.h', 'runtime/native_sound/bozo/include/bozo/audio/mixer.h', 'runtime/native_sound/bozo/include/bozo/audio/port_stream.h', 'runtime/native_sound/bozo/include/bozo/ee/dispatcher.h', 'runtime/native_sound/bozo/include/bozo/libs/libraries.h', 'runtime/native_sound/bozo/include/bozo/libs/sif.h', 'runtime/native_sound/bozo/include/bozo/native/compiled_irx.h', 'runtime/native_sound/bozo/include/bozo/native/compiled_libraries.h', 'runtime/native_sound/bozo/src/compiled_libraries.cpp', 'runtime/native_sound/bozo/src/iop_heap.cpp', 'runtime/native_sound/bozo/src/libsd.cpp', 'runtime/native_sound/bozo/src/mixer.cpp', 'runtime/native_sound/bozo/src/port_stream.cpp', 'runtime/native_sound/ps2_native_sound.cpp', 'runtime/native_sound/ps2_native_sound.h',) + SOURCE_FILES
+
 if __name__ == '__main__':
     cli()

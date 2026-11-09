@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: MIT
+#pragma once
+#include "bozo/audio/libsd.h"
+#include "bozo/libs/libraries.h"
+#include "bozo/native/compiled_irx.h"
+#include <memory>
+#include <functional>
+#include <span>
+#include <string>
+#include <vector>
+namespace bozo::native::irx
+{
+    struct Import
+    {
+        uint32_t address;
+        std::string library;
+        uint32_t ordinal;
+    };
+    struct Image
+    {
+        std::string name;
+        uint64_t hash;
+        uint32_t base, entry, gp;
+        std::vector<uint8_t> bytes;
+        std::vector<Import> imports, exports;
+        bool nativeLibsd = false;
+    };
+    // Native host services for statically compiled sound libraries. Buffers and register values are ordinary
+    // C++ state. Every executable target must have a linked function or a native SDK binding. There is no
+    // instruction fetch/decode, CPU/device backend, firmware, interpreter or run-time code generation.
+    class CompiledLibraries
+    {
+      public:
+        explicit CompiledLibraries(libs::Libraries &libraries, uint32_t heapStart);
+        ~CompiledLibraries();
+        void addImage(Image image);
+        // Replace a linked game routine with a per-host native algorithm.
+        // Only entries belonging to an admitted image may be bound, before it starts.
+        // Captured application state is owned by the caller and must outlive this host.
+        void bindNative(uint32_t address, std::function<void(Env &)> function);
+        // Deliver already completed native audio jobs at linked-call safe points.
+        // Opt in before execution; existing ports retain their callback schedule.
+        void useReadyAudioCompletions();
+        // Map linked frame listeners to actual native game-frame completions.
+        // Opt in before execution; no display interrupt or frame period is generated.
+        void useNativeFrameCallbacks();
+        // Opt-in file I/O for compiled SDK disc callers. Reads copy actual ISO
+        // bytes synchronously; sync queries owned work, and callbacks are native
+        // notifications after the copy. No drive clock, registers or interrupts.
+        void useNativeDiscFiles();
+        void notifyFrameCompleted();
+        // Submit a copied user message to a registered linked native command handler.
+        // No system command, transport packet processor or interrupt is executed.
+        uint32_t submitCommand(uint32_t command,std::span<const uint8_t> data);
+        // With arguments the module's start gets argc and argv as modload gives them: argv[0] is its name.
+        int32_t startImage(const std::string &name, std::span<const std::string> arguments = {});
+        void reset();
+        audio::Mixer *advanceTo(uint64_t eeCycle);
+        void writeBuffer(uint32_t address, const uint8_t *data, uint32_t bytes);
+        uint32_t allocateBuffer(uint32_t bytes);
+        bool freeBuffer(uint32_t address);
+        // A transient view into one live native allocation, never an image,
+        // stack, opaque module handle, device address or freed block.
+        std::span<uint8_t> allocatedBuffer(uint32_t address,uint32_t bytes);
+        uint64_t nativeCalls() const;
+
+      private:
+        struct Impl;
+        std::unique_ptr<Impl> impl_;
+    };
+} // namespace bozo::native::irx

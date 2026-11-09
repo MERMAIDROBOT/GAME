@@ -896,3 +896,4 @@ RUNTIME_PATCHES += ('patches/libgraph-image-packet-abi.patch',)
 RUNTIME_PATCHES += ('patches/discovered-sdk-bindings.patch',)
 
 RUNTIME_PATCHES += ('patches/mutable-jump-table-entries.patch',)
+RUNTIME_PATCHES += ('patches/native-sound-host.patch',)
