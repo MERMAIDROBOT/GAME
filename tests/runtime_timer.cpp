@@ -625,6 +625,31 @@ static void testTrianglePixelCenters() {
 // VIF1 DIRECT: a GIF IMAGE packet may span several DIRECTs; its remaining quadwords arrive as the next DIRECT's
 // payload, never as raw VIF stream data. A DIRECT split across VIF1 data chunks continues in the next chunk.
 // The MARK after them proves the interpreter stayed on the command stream (the old path ate the second DIRECT).
+// A VIF1 source chain longer than 4096 tags must run to its END tag. SSX 3's race chains reach 650-770 KB;
+// a tag cap cut them short and dropped the tail (rider geometry, STCYCL resets, MSCALs).
+static void testLongVif1Chain() {
+ setenv("PS2_PORT_HEADLESS","1",1);PS2Runtime runtime;if(!runtime.initialize("Synthetic long VIF1 chain"))throw std::runtime_error("Synthetic long chain initialization failed");
+ auto &memory=runtime.memory();uint8_t *ram=memory.getRDRAM();
+ constexpr uint32_t base=0x200000u,entries=5000u;
+ for(uint32_t i=0;i<entries;++i){
+  const uint64_t cnt=1ull|(1ull<<28);                                   // CNT, one quadword follows
+  uint32_t payload[4]={0u,0u,0u,0u};                                    // four VIF NOPs
+  if(i==entries-1)payload[3]=0x07004321u;                               // the last one: MARK 0x4321
+  std::memcpy(ram+base+i*32u,&cnt,8);std::memset(ram+base+i*32u+8u,0,8);
+  std::memcpy(ram+base+i*32u+16u,payload,16);
+ }
+ const uint64_t end=7ull<<28;std::memcpy(ram+base+entries*32u,&end,8);std::memset(ram+base+entries*32u+8u,0,8);
+ memory.vif1_regs.mark=0;
+ memory.writeIORegister(0x1000e000u,1u);
+ memory.writeIORegister(0x10009030u,base);                             // TADR
+ memory.writeIORegister(0x10009020u,0u);                               // QWC
+ memory.writeIORegister(0x10009000u,0x105u);                           // CHCR: from memory, chain, start
+ memory.processPendingTransfers();
+ if(memory.vif1_regs.mark!=0x4321u)
+  throw std::runtime_error("VIF1 chain of "+std::to_string(entries)+" tags stopped before its END tag (MARK "+std::to_string(memory.vif1_regs.mark)+")");
+ std::cout<<"PASS: a VIF1 chain longer than 4096 tags runs to its END tag"<<std::endl;
+}
+
 static void testVif1DirectImageSpan() {
  setenv("PS2_PORT_HEADLESS","1",1);PS2Runtime runtime;if(!runtime.initialize("Synthetic VIF1 DIRECT image span"))throw std::runtime_error("Synthetic VIF1 initialization failed");
  auto &memory=runtime.memory();
@@ -984,6 +1009,7 @@ int main(int argc, char **argv) {
     testGsImageTransferWidths();
     testGsLibgraphPacketABI();
     testVif1DirectImageSpan();
+    testLongVif1Chain();
     testGsDisplayEnvironment();
     testGsAnalogCRT();
     testGsDoubleBufferGeometry();

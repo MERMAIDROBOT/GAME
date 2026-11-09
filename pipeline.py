@@ -1364,6 +1364,7 @@ SOURCE_FILES = ('runtime/gpu/src/ordered_coverage.h', 'tests/ordered_coverage.cp
 SOURCE_FILES = ('patches/native-sound-host.patch', 'runtime/native_sound/bozo/LICENSE', 'runtime/native_sound/bozo/UPSTREAM_COMMIT', 'runtime/native_sound/bozo/include/bozo/audio/libsd.h', 'runtime/native_sound/bozo/include/bozo/audio/mixer.h', 'runtime/native_sound/bozo/include/bozo/audio/port_stream.h', 'runtime/native_sound/bozo/include/bozo/ee/dispatcher.h', 'runtime/native_sound/bozo/include/bozo/libs/libraries.h', 'runtime/native_sound/bozo/include/bozo/libs/sif.h', 'runtime/native_sound/bozo/include/bozo/native/compiled_irx.h', 'runtime/native_sound/bozo/include/bozo/native/compiled_libraries.h', 'runtime/native_sound/bozo/src/compiled_libraries.cpp', 'runtime/native_sound/bozo/src/iop_heap.cpp', 'runtime/native_sound/bozo/src/libsd.cpp', 'runtime/native_sound/bozo/src/mixer.cpp', 'runtime/native_sound/bozo/src/port_stream.cpp', 'runtime/native_sound/ps2_native_sound.cpp', 'runtime/native_sound/ps2_native_sound.h',) + SOURCE_FILES
 
 SOURCE_FILES = ('patches/native-sound-dma.patch',) + SOURCE_FILES
+SOURCE_FILES = ('patches/dma-chain-length.patch', 'tests/test_dma_chain_length.py') + SOURCE_FILES
 
 
 SOURCE_FILES = ('runtime/gpu/native-plugin/fifo_formats.hpp', 'tests/fifo_formats.cpp', 'tests/native_sound_mixer.cpp', 'tests/test_native_sound_mixer.py', 'tests/test_runtime_patch_sync.py') + SOURCE_FILES

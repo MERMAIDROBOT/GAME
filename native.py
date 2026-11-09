@@ -897,3 +897,4 @@ RUNTIME_PATCHES += ('patches/discovered-sdk-bindings.patch',)
 
 RUNTIME_PATCHES += ('patches/mutable-jump-table-entries.patch',)
 RUNTIME_PATCHES += ('patches/native-sound-host.patch', 'patches/native-sound-dma.patch')
+RUNTIME_PATCHES += ('patches/dma-chain-length.patch',)
