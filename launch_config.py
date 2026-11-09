@@ -50,6 +50,11 @@ def prepare(profile,private,frameworks):
    w,h=map(int,value.split('x'));valid|=320<=w<=8192 and 240<=h<=8192
   # Opt-in diagnostic; this legacy runtime flag tests presence, so reject a misleading '0'.
   valid|=key in {'PS2_PORT_MPEG_TRACE','PS2_PORT_OVERLAY_MISS_TRACE'} and value=='1'
+  if key=='PS2_PORT_NATIVE_SOUND_DMA' and env.get('PS2_PORT_NATIVE_SOUND')=='1':
+   window=re.fullmatch(r'[0-9a-fA-F]{16}:([0-9a-fA-F]{1,6}):([0-9a-fA-F]{1,6})',value)
+   if window:
+    offset,size=(int(field,16) for field in window.groups())
+    valid=0<size and offset+size<=0x200000
   if not valid:raise ValueError('Unknown or invalid native launch setting: '+str(key))
   result[key]=value
  if 'PS2_PORT_HW_GS_RECORD' in paths and 'PS2_PORT_HW_GS_RECORD_MB' not in result:
