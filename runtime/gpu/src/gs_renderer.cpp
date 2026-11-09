@@ -223,12 +223,9 @@ struct SwizzleParams {
 };
 
 
-/* Claude 2026-10-21: the sub-pixel mapping (gpu_bridge.cpp's Convert): a target's GS pixel taken to memory from
-   its square's first sub-pixel, not its middle (swizzle.comp's SUBK, keep_colour bit 1). PS2_PORT_HW_GS_SUBPIXEL=0
-   restores both halves. */
+/* Draw-position mapping. The swizzle shader samples the center of the scaled pixel and
+   treats keep_colour as a boolean; this switch must not change its push constants. */
 bool SubpixelMapping() { static const bool on = [] { const char* e = std::getenv("PS2_PORT_HW_GS_SUBPIXEL"); return !(e && e[0] == '0'); }(); return on; }
-SwizzleParams Flagged(SwizzleParams p) { if (SubpixelMapping()) p.keep_colour |= 2u; return p; }
-template <class T> T Flagged(T p) { return p; }   // other compute parameters (decode): as they are
 constexpr std::uint32_t kDepthRows = 512;   // a depth buffer's rows (DrawTriangles; the bridge's)
 constexpr VkDeviceSize kLocalMemory = 4u << 20;
 constexpr VkDeviceSize kLinear = VkDeviceSize(2048) * 1024 * 4;    // the largest image, a value a pixel (at scale 1)
@@ -1289,8 +1286,7 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
         params.mode = 2;
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, decode_pipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, swizzle_layout_, 0, 1, &swizzle_set_, 0, nullptr);
-        { const auto flagged_params = Flagged(params);
-        vkCmdPushConstants(cmd, swizzle_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &flagged_params); }
+        vkCmdPushConstants(cmd, swizzle_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &params);
         vkCmdDispatch(cmd, 768 / 8, 1, 1);
         MemoryBarrier(cmd);
     });
@@ -1418,8 +1414,7 @@ void VulkanGsRenderer::DepthOut(VkCommandBuffer cmd, const SwizzleParams& params
     const VkDescriptorSet sets[2] = {swizzle_set_, DepthSampledSet(d)};
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, swizzle_depth_pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, swizzle_depth_layout_, 0, 2, sets, 0, nullptr);
-    { const auto flagged_params = Flagged(params);
-    vkCmdPushConstants(cmd, swizzle_depth_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &flagged_params); }
+    vkCmdPushConstants(cmd, swizzle_depth_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &params);
     ++g_dispatches;
     vkCmdDispatch(cmd, (params.cols + 7) / 8, (params.rows + 7) / 8, 1);
     g_.Mark(cmd, kProfSwizzle);
@@ -1505,8 +1500,7 @@ void VulkanGsRenderer::SwizzleImage(VkCommandBuffer cmd, const SwizzleParams& pa
                 pipeline = swizzle_image_specialised_[f][params.to_memory][params.scale - 1];
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, swizzle_image_layout_, 0, 2, sets, 0, nullptr);
-    { const auto flagged_params = Flagged(params);
-    vkCmdPushConstants(cmd, swizzle_image_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &flagged_params); }
+    vkCmdPushConstants(cmd, swizzle_image_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &params);
     ++g_dispatches;
     vkCmdDispatch(cmd, (params.cols + 7) / 8, (params.rows + 7) / 8, 1);
     g_.Mark(cmd, kProfSwizzle);
@@ -2314,8 +2308,7 @@ void VulkanGsRenderer::TextureFromMemory(std::uint64_t key, const GsTextureDecod
                                     w, h, d.wms, d.wmt, d.minu >> n, d.maxu >> n, d.minv >> n, d.maxv >> n,
                                     d.texa_lo, d.ta1, d.csa};
                 params.row0 = y;
-                { const auto flagged_params = Flagged(params);
-                vkCmdPushConstants(cmd, swizzle_image_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &flagged_params); }
+                vkCmdPushConstants(cmd, swizzle_image_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &params);
                 ++g_dispatches;
                 vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
                 g_.Mark(cmd, kProfDecode);
@@ -2340,8 +2333,7 @@ void VulkanGsRenderer::TextureFromMemory(std::uint64_t key, const GsTextureDecod
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, decode_pipeline_);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, swizzle_layout_, 0, 1, &swizzle_set_, 0,
                                     nullptr);
-            { const auto flagged_params = Flagged(params);
-            vkCmdPushConstants(cmd, swizzle_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &flagged_params); }
+            vkCmdPushConstants(cmd, swizzle_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &params);
             ++g_dispatches;
             vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
             g_.Mark(cmd, kProfDecode);
@@ -2376,8 +2368,7 @@ void VulkanGsRenderer::ClutFromMemory(const GsClutLoad& load) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, decode_pipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, swizzle_layout_, 0, 1, &swizzle_set_, 0,
                                 nullptr);
-        { const auto flagged_params = Flagged(params);
-        vkCmdPushConstants(cmd, swizzle_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &flagged_params); }
+        vkCmdPushConstants(cmd, swizzle_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &params);
         vkCmdDispatch(cmd, (params.tw + 7) / 8, 1, 1);
         g_.Mark(cmd, kProfDecode);
         MemoryBarrier(cmd);
