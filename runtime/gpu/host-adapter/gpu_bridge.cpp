@@ -564,13 +564,34 @@ void ApplyPatch(Bridge& b) {
     // nibble of the 32-bit word at the CT32 address of the same (x, y).
     const u32 high_mask = t.psm == 0x1B ? 0xFF000000u : t.psm == 0x24 ? 0x0F000000u : t.psm == 0x2C ? 0xF0000000u : 0u;
     const u8* memory = gs::TheGs().memory.data();
+    if (high_mask) {
+        // One pixel is one word here, so the list needs no merging: straight
+        // into it (a map node a word was most of the menus' GS-thread time -
+        // SSX 3's 256x256 prompt atlas, 131,072 words a frame).
+        std::bitset<16384> wanted;
+        for (const u32 block : blocks) wanted.set(block);
+        std::vector<u32> words;
+        words.reserve(std::size_t(t.w) * t.h * 3);
+        for (u32 y = t.y; y < t.y + t.h; ++y)
+            for (u32 x = t.x; x < t.x + t.w; ++x) {
+                u32 nibble = 0;
+                const u32 address = gs::Memory::Address(t.bp, t.bw, x % 2048, y % 2048, u32(gs::PSMCT32), &nibble);
+                if (!wanted.test(address / 256)) continue;
+                u32 value;
+                std::memcpy(&value, memory + std::size_t(address / 4) * 4, 4);
+                words.insert(words.end(), {address / 4, value, high_mask});
+            }
+        b.renderer->MemoryPatch(words.data(), words.size() / 3);
+        b.patched_words += words.size() / 3;
+        ++b.patches;
+        return;
+    }
     std::map<u32, u32> masks;               // word -> its mask
     for (u32 y = t.y; y < t.y + t.h; ++y)
         for (u32 x = t.x; x < t.x + t.w; ++x) {
             u32 nibble = 0;
-            const u32 address = gs::Memory::Address(t.bp, t.bw, x % 2048, y % 2048, high_mask ? u32(gs::PSMCT32) : t.psm, &nibble);
+            const u32 address = gs::Memory::Address(t.bp, t.bw, x % 2048, y % 2048, t.psm, &nibble);
             if (!std::binary_search(blocks.begin(), blocks.end(), address / 256)) continue;
-            if (high_mask) { masks[address / 4] |= high_mask; continue; }
             const u32 shift = bytes ? (address % 4) * 8 : (address % 4) * 8 + 4 * nibble;
             masks[address / 4] |= base_mask << shift;
         }
