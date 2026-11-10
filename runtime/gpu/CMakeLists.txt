@@ -94,7 +94,7 @@ FetchContent_MakeAvailable(glslang)
 set(PS2GPU_SHADER_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 file(MAKE_DIRECTORY ${PS2GPU_SHADER_DIR})
 set(PS2GPU_SHADER_HEADERS)
-foreach(shader gs.vert gs.frag date.vert date.frag swizzle.comp decode.comp depth_load.frag patch.comp fxaa.comp downsample.comp
+foreach(shader gs.vert gs.frag date.vert date.frag swizzle.comp decode.comp depth_load.frag patch.comp patch_list.comp fxaa.comp downsample.comp
                smaa_edges.comp smaa_weights.comp smaa_blend.comp)
     string(REPLACE "." "_" name ${shader})
     set(out ${PS2GPU_SHADER_DIR}/${name}.h)

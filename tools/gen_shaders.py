@@ -15,7 +15,7 @@ GPU = ROOT / 'runtime/gpu'
 SHADERS = GPU / 'shaders'
 OUT = SHADERS / 'spirv'
 INCLUDES = [SHADERS / 'gs_address.glsl', SHADERS / 'smaa_common.glsl', GPU / 'third_party/smaa/SMAA.glsl']
-PLAIN = ['gs.vert', 'gs.frag', 'date.vert', 'date.frag', 'swizzle.comp', 'decode.comp', 'depth_load.frag', 'patch.comp',
+PLAIN = ['gs.vert', 'gs.frag', 'date.vert', 'date.frag', 'swizzle.comp', 'decode.comp', 'depth_load.frag', 'patch.comp', 'patch_list.comp',
          'fxaa.comp', 'downsample.comp', 'smaa_edges.comp', 'smaa_weights.comp', 'smaa_blend.comp']
 VARIANTS = [('gs_frag_single', 'gs.frag', 'SINGLE_OUTPUT'), ('swizzle_image_comp', 'swizzle.comp', 'IMAGE'),
             ('decode_image_comp', 'decode.comp', 'TO_IMAGE'), ('swizzle_depth_comp', 'swizzle.comp', 'DEPTH_IMAGE'),

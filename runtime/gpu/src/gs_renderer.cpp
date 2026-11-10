@@ -53,6 +53,7 @@
 #include "decode_comp.h"
 #include "decode_image_comp.h"
 #include "patch_comp.h"
+#include "patch_list_comp.h"
 
 namespace ps2gpu {
 
@@ -779,6 +780,8 @@ private:
     VkShaderModule patch_ = VK_NULL_HANDLE;
     VkPipelineLayout patch_layout_ = VK_NULL_HANDLE;
     VkPipeline patch_pipeline_ = VK_NULL_HANDLE;
+    VkShaderModule patch_list_ = VK_NULL_HANDLE;
+    VkPipeline patch_list_pipeline_ = VK_NULL_HANDLE;       /* patch_list.comp: a long patch in one dispatch */
     VkPipeline swizzle_image_pipeline_ = VK_NULL_HANDLE;
     /* The same for a colour format, direction and scale (InitMemory): by
        kSpecialisedFormats' index, to memory or not, scale - 1. */
@@ -1279,6 +1282,14 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
             if (error) *error = "the memory patch shader did not load";
             return false;
         }
+        VkShaderModuleCreateInfo li{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        li.codeSize = sizeof spirv_patch_list_comp;
+        li.pCode = spirv_patch_list_comp;
+        vkCreateShaderModule(g_.device, &li, nullptr, &patch_list_);
+        VkComputePipelineCreateInfo lp = pp;
+        lp.stage.module = patch_list_;
+        if (!patch_list_ || vkCreateComputePipelines(g_.device, cache_, 1, &lp, nullptr, &patch_list_pipeline_) != VK_SUCCESS)
+            patch_list_pipeline_ = VK_NULL_HANDLE;     // eight a dispatch, as before
     }
     ci.codeSize = sizeof spirv_decode_comp;
     ci.pCode = spirv_decode_comp;
@@ -1560,6 +1571,38 @@ void VulkanGsRenderer::MemoryWrite(std::uint32_t begin, std::uint32_t end, const
 void VulkanGsRenderer::MemoryPatch(const std::uint32_t* words, std::size_t count) {
     if (!count || !patch_pipeline_) return;
     Flush();
+    // Many words (an upper-bits upload over whole blocks): the list into the
+    // linear scratch buffer, then one dispatch over it, rather than a
+    // dispatch for every eight words.
+    if (count > 64 && patch_list_pipeline_ && count * 16 <= kLinear) {
+        const VkDeviceSize size = VkDeviceSize(count) * 16;
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceSize offset = 0;
+        auto* list = static_cast<std::uint32_t*>(Staging(size, &buffer, &offset));
+        if (list) {
+            for (std::size_t i = 0; i < count; ++i) {
+                list[4 * i + 0] = words[3 * i + 0];
+                list[4 * i + 1] = words[3 * i + 1];
+                list[4 * i + 2] = words[3 * i + 2];
+                list[4 * i + 3] = 0;
+            }
+            g_.Record([&](VkCommandBuffer cmd) {
+                MemoryBarrier(cmd);
+                const VkBufferCopy copy{offset, 0, size};
+                vkCmdCopyBuffer(cmd, buffer, linear_, 1, &copy);
+                MemoryBarrier(cmd);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, patch_list_pipeline_);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, patch_layout_, 0, 1, &swizzle_set_, 0, nullptr);
+                const std::uint32_t n = std::uint32_t(count);
+                vkCmdPushConstants(cmd, patch_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof n, &n);
+                ++g_dispatches;
+                vkCmdDispatch(cmd, (n + 63) / 64, 1, 1);
+                g_.Mark(cmd, kProfMemory);
+                MemoryBarrier(cmd);
+            });
+            return;
+        }
+    }
     g_.Record([&](VkCommandBuffer cmd) {
         MemoryBarrier(cmd);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, patch_pipeline_);

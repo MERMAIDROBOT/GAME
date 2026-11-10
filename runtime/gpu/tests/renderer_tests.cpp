@@ -437,6 +437,44 @@ void BatchedDepthTwoPass(ps2gpu::GsRenderer& renderer) {
     Check(batched_draws * 4 <= exact_draws, "depth-ordered alpha-tested primitives: a batch, not one per primitive");
 }
 
+// A long memory patch (an upper-bits upload over whole blocks, SSX 3's prompt
+// atlas) merges each word under its mask, in one dispatch rather than one an
+// eight words.
+void LongMemoryPatch(ps2gpu::GsRenderer& renderer) {
+    constexpr std::uint32_t first = 0x3000, blocks = 16, words_n = blocks * 64;
+    std::vector<std::uint8_t> bytes(std::size_t(blocks) * 256);
+    for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = std::uint8_t(i * 7 + 3);
+    renderer.MemoryWrite(first, first + blocks, bytes.data());
+    std::vector<std::uint32_t> patch;
+    for (std::uint32_t i = 0; i < words_n - 24; ++i)            // all but the last 24 words
+        patch.insert(patch.end(), {first * 64 + i, 0xA5000000u + i, i % 3 == 0 ? 0xF0000000u : 0xFF000000u});
+    (void)ps2gpu::RendererCounters();
+    renderer.MemoryPatch(patch.data(), patch.size() / 3);
+    std::vector<std::uint8_t> back(bytes.size());
+    renderer.MemoryRead(first, first + blocks, back.data());
+    std::uint64_t dispatches = 0;
+    {
+        const std::string c = ps2gpu::RendererCounters();
+        const auto at = c.find(" dispatches");
+        const auto from = c.rfind(", ", at);
+        dispatches = std::stoull(c.substr(from + 2, at - from - 2));
+    }
+    bool same = true;
+    for (std::uint32_t i = 0; i < words_n; ++i) {
+        std::uint32_t was = 0, now = 0;
+        std::memcpy(&was, bytes.data() + i * 4, 4);
+        std::memcpy(&now, back.data() + i * 4, 4);
+        std::uint32_t want = was;
+        if (i < words_n - 24) {
+            const std::uint32_t mask = i % 3 == 0 ? 0xF0000000u : 0xFF000000u;
+            want = (was & ~mask) | ((0xA5000000u + i) & mask);
+        }
+        same = same && now == want;
+    }
+    Check(same, "a long memory patch merges each word under its mask");
+    Check(dispatches <= 2, "a long memory patch is one dispatch, not one an eight words");
+}
+
 void TargetFromMemory(ps2gpu::GsRenderer& renderer) {
     std::vector<std::uint32_t> pixels(64 * 64);
     for (std::uint32_t i = 0; i < pixels.size(); ++i) pixels[i] = Rgba(std::uint8_t(i), std::uint8_t(i >> 6), 7, 0x80);
@@ -516,6 +554,7 @@ int main() {
     PartlyMaskedChannels(*renderer);
     SixteenBitPassThroughBlend(*renderer);
     BatchedDepthTwoPass(*renderer);
+    LongMemoryPatch(*renderer);
     if (g_failures) std::printf("gpu renderer tests: %d failed\n", g_failures);
     else std::printf("gpu renderer tests: all passed (%s)\n", gpu->Describe().c_str());
     return g_failures ? EXIT_FAILURE : EXIT_SUCCESS;
