@@ -283,13 +283,19 @@ bool Is16Bit(std::uint32_t psm) { return psm == 0x02 || psm == 0x0A || psm == 0x
 
 bool ShaderBlend(const GsDrawState& s) {
     if (!s.blend) return false;
+    // A = B: (A - B) * C + D is D alone - Cs, Cd or 0 - which the blender
+    // gives exactly, also into a 16-bit target (its colour is cut to five
+    // bits in the shader either way). SSX 3 draws its riders' shadow maps
+    // into 16-bit targets with ALPHA 0x2A, (0 - 0) * FIX + Cs: through the
+    // shader that was a copy of the target for every few triangles, 99.8%
+    // of a race's copies.
+    if (s.a == s.b) return false;
     // Into a 16-bit target: the blend's result cut to five bits a channel,
     // as the GS stores it (the blender would keep eight: the next blend over
     // it would read more than the GS has - Burnout 3's picture copied into
     // its 16-bit display buffer, blended over the last, came out 9 brighter
     // in the dark).
     if (Is16Bit(s.psm)) return true;
-    if (s.a == s.b) return false;
     // The destination's alpha as the factor (C = Ad): over 128 on the GS,
     // over 255 as the blender reads a byte (DST_ALPHA) - at half its strength.
     // In the shader for a small target (Burnout 3's sky: its 64x32 gradient

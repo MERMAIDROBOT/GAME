@@ -361,6 +361,38 @@ void PartlyMaskedChannels(ps2gpu::GsRenderer& renderer) {
     Check(!pixels.empty() && pixels[0] == 0x80F8E030u, "a 16-bit target's FBMSK in RGBA32 bit positions");
 }
 
+// A = B blends to D alone: into a 16-bit target as into any other, the blender's
+// (no copy of the target for the shader), the colour cut to five bits as stored.
+// SSX 3's shadow maps: ALPHA 0x2A, (0 - 0) * FIX + Cs, every few triangles.
+std::uint64_t FeedbackCopies() {
+    const std::string c = ps2gpu::RendererCounters();
+    const auto at = c.find(" feedback copies");
+    if (at == std::string::npos) return ~0ull;
+    const auto from = c.rfind(", ", at);
+    return std::stoull(c.substr(from == std::string::npos ? 0 : from + 2, at - (from == std::string::npos ? 0 : from + 2)));
+}
+
+void SixteenBitPassThroughBlend(ps2gpu::GsRenderer& renderer) {
+    ps2gpu::GsDrawState state = Target(0x96);
+    state.psm = 0x02;
+    Rect(renderer, state, 0, 0, 16, 16, 0x00102030u);
+    std::vector<std::uint32_t> pixels;
+    std::uint32_t w = 0, h = 0;
+    renderer.ReadTarget(0x96, 1, 0x02, &pixels, &w, &h);
+    (void)FeedbackCopies();
+    ps2gpu::GsDrawState pass = state;
+    pass.blend = true;
+    pass.a = ps2gpu::BlendColour::Zero;
+    pass.b = ps2gpu::BlendColour::Zero;
+    pass.c = ps2gpu::BlendAlpha::Fix;
+    pass.fix = 0x80;
+    pass.d = ps2gpu::BlendColour::Source;
+    for (int i = 0; i < 4; ++i) Rect(renderer, pass, 0, 0, 16, 16, 0x80C3854Bu);   // overlapping: each a copy before
+    renderer.ReadTarget(0x96, 1, 0x02, &pixels, &w, &h);
+    Check(!pixels.empty() && pixels[0] == 0x80C08048u, "a 16-bit target's A = B blend stores Cs cut to five bits");
+    Check(FeedbackCopies() == 0, "a 16-bit target's A = B blend needs no copy of the target");
+}
+
 void TargetFromMemory(ps2gpu::GsRenderer& renderer) {
     std::vector<std::uint32_t> pixels(64 * 64);
     for (std::uint32_t i = 0; i < pixels.size(); ++i) pixels[i] = Rgba(std::uint8_t(i), std::uint8_t(i >> 6), 7, 0x80);
@@ -438,6 +470,7 @@ int main() {
     RenderToTexture(*renderer);
     TargetFromMemory(*renderer);
     PartlyMaskedChannels(*renderer);
+    SixteenBitPassThroughBlend(*renderer);
     if (g_failures) std::printf("gpu renderer tests: %d failed\n", g_failures);
     else std::printf("gpu renderer tests: all passed (%s)\n", gpu->Describe().c_str());
     return g_failures ? EXIT_FAILURE : EXIT_SUCCESS;
