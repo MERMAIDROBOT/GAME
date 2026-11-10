@@ -431,6 +431,7 @@ public:
     void TargetRowsFromMemory(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::uint32_t width,
                               std::uint32_t height, std::uint32_t first_row, std::uint32_t rows) override;
     void ReloadKeepsColour(bool keep) override { keep_colour_ = keep; }
+    void SetDepthTwoPassBatch(bool on) override { Flush(); batch_depth_two_pass_ = on; }
     void DepthRowsFromMemory(std::uint32_t zbp, std::uint32_t width, std::uint32_t height, std::uint32_t fbw,
                              std::uint32_t zpsm, std::uint32_t first_row, std::uint32_t rows) override;
     bool DisplayTarget(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::uint64_t* image, int* layout,
@@ -626,6 +627,20 @@ private:
     VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
     bool keep_colour_ = false;      /* ReloadKeepsColour */
+    /* PS2_PORT_HW_GS_DEPTH_TWOPASS_BATCH=1 (a title's profile opts in): an
+       alpha test whose failing pixels still write colour (FB_ONLY), over a
+       depth test GEQUAL or GREATER that writes depth, is drawn as the whole
+       batch's passing pixels, then its failing ones - as PCSX2's hardware
+       renderer does - instead of a batch for every primitive that overlaps
+       the ones before. The depth test orders most of what overlaps; where
+       two overlapping primitives of one batch fail and pass at the same
+       pixel, the later one's failing (translucent) edge may land under the
+       earlier one's solid pixels. SSX 3's soft-edged scenery: 95% of its
+       race batches, ~15,000 a frame. Default off: exact order. */
+    bool batch_depth_two_pass_ = [] {
+        const char* e = std::getenv("PS2_PORT_HW_GS_DEPTH_TWOPASS_BATCH");
+        return e && e[0] == '1' && e[1] == 0;
+    }();
     VkSampler samplers_[12] = {};   /* bilinear << 2 | clamp_s << 1 | clamp_t; 8 + clamp_s << 1 | clamp_t: trilinear, all levels */
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     std::map<std::uint32_t, VkPipeline> pipelines_;
@@ -2577,6 +2592,8 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& input, const GsVertex* v
     const bool depth_written = state.depth && state.depth_write;
     const bool two_pass = state.alpha_test && state.atst != 1 && count >= 3 &&
                           (((state.afail == 1 || state.afail == 2) && depth_written) || state.afail == 3);
+    const bool split_overlaps = !(batch_depth_two_pass_ && two_pass && state.afail == 1 && depth_written &&
+                                  (state.ztst == 2 || state.ztst == 3));
     static const bool refineAlpha=[] {const char* e=std::getenv("PS2_PORT_HW_GS_ALPHA_COVERAGE");return e&&std::strcmp(e,"1")==0;}();
     const bool refine=refineAlpha && two_pass && !feedback && !reads_dest;
     if(refine && alpha_coverage_.size()>=256)Flush();
@@ -2609,7 +2626,7 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& input, const GsVertex* v
         const auto overlaps = [&](int l, int t, int r, int bottom) {
             return drawn_any_ && r >= drawn_x0_ && l <= drawn_x1_ && bottom >= drawn_y0_ && t <= drawn_y1_;
         };
-        if ((feedback && overlaps(tu0, tv0, tu1, tv1)) || ((reads_dest || two_pass) && overlaps(x0, y0, x1, y1))) {
+        if ((feedback && overlaps(tu0, tv0, tu1, tv1)) || ((reads_dest || (two_pass && split_overlaps)) && overlaps(x0, y0, x1, y1))) {
             bool independent=refine && count==3 && !alpha_coverage_unknown_;
             if(independent) {
                 const auto next=coverageTriangle(v);

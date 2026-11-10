@@ -393,6 +393,50 @@ void SixteenBitPassThroughBlend(ps2gpu::GsRenderer& renderer) {
     Check(FeedbackCopies() == 0, "a 16-bit target's A = B blend needs no copy of the target");
 }
 
+std::uint64_t VulkanDraws() {
+    const std::string c = ps2gpu::RendererCounters();
+    const auto at = c.find(" draws,");
+    if (at == std::string::npos) return ~0ull;
+    const auto from = c.rfind(", ", at);
+    return std::stoull(c.substr(from + 2, at - from - 2));
+}
+
+// PS2_PORT_HW_GS_DEPTH_TWOPASS_BATCH=1: overlapping depth-tested primitives whose
+// alpha test fails to FB_ONLY are drawn a batch at a time, not one at a time -
+// same picture where the depth test orders them (SSX 3's soft-edged scenery).
+std::uint32_t OverlappingAlphaTested(ps2gpu::GsRenderer& renderer, std::uint64_t* draws) {
+    ps2gpu::GsDrawState state = Target(0x58);
+    state.depth = true;
+    state.zbp = 0x68;
+    state.ztst = 2;
+    state.alpha_test = true;
+    state.atst = 6;                                   // GREATER
+    state.aref = 0x40;
+    state.afail = 1;                                  // FB_ONLY
+    DepthRect(renderer, state, 0, 0, 64, 64, 0, Rgba(0, 0, 0, 0x80));
+    std::vector<std::uint32_t> pixels;
+    std::uint32_t w = 0, h = 0;
+    renderer.ReadTarget(0x58, 1, 0, &pixels, &w, &h);
+    (void)VulkanDraws();
+    for (int i = 1; i <= 8; ++i)                      // each nearer, each over the last
+        DepthRect(renderer, state, float(i), float(i), 48.0f + float(i), 48.0f + float(i), 0x100000u * i,
+                  Rgba(std::uint8_t(i * 30), 0x40, std::uint8_t(255 - i * 30), 0x80));
+    renderer.ReadTarget(0x58, 1, 0, &pixels, &w, &h);
+    *draws = VulkanDraws();
+    return Pixel(renderer, 0x58, 30, 30);
+}
+
+void BatchedDepthTwoPass(ps2gpu::GsRenderer& renderer) {
+    std::uint64_t exact_draws = 0, batched_draws = 0;
+    renderer.SetDepthTwoPassBatch(false);
+    const std::uint32_t a = OverlappingAlphaTested(renderer, &exact_draws);
+    renderer.SetDepthTwoPassBatch(true);
+    const std::uint32_t b = OverlappingAlphaTested(renderer, &batched_draws);
+    renderer.SetDepthTwoPassBatch(false);
+    Check(a == Rgba(240, 0x40, 15, 0x80) && a == b, "depth-ordered alpha-tested primitives: the same picture batched");
+    Check(batched_draws * 4 <= exact_draws, "depth-ordered alpha-tested primitives: a batch, not one per primitive");
+}
+
 void TargetFromMemory(ps2gpu::GsRenderer& renderer) {
     std::vector<std::uint32_t> pixels(64 * 64);
     for (std::uint32_t i = 0; i < pixels.size(); ++i) pixels[i] = Rgba(std::uint8_t(i), std::uint8_t(i >> 6), 7, 0x80);
@@ -471,6 +515,7 @@ int main() {
     TargetFromMemory(*renderer);
     PartlyMaskedChannels(*renderer);
     SixteenBitPassThroughBlend(*renderer);
+    BatchedDepthTwoPass(*renderer);
     if (g_failures) std::printf("gpu renderer tests: %d failed\n", g_failures);
     else std::printf("gpu renderer tests: all passed (%s)\n", gpu->Describe().c_str());
     return g_failures ? EXIT_FAILURE : EXIT_SUCCESS;
