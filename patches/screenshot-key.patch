@@ -1,0 +1,115 @@
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index 37b4ef0..5937ff3 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -33,6 +33,7 @@ namespace
+     constexpr uint16_t PAD_L2 = 0x0100u;
+     // Window-thread only: retain guide events from the same queue as pad presses.
+     bool controlsToggleRequested = false;
++    bool screenshotRequested = false;   // F12 (PS2 Port Lab)
+ }
+ 
+ // Event-ordered keyboard capture (v8).
+@@ -119,6 +120,14 @@ namespace
+     }
+ }
+ 
++// F12: the window loop saves the next presented picture as a PNG.
++bool ps2PortConsumeScreenshotRequest()
++{
++    const bool requested = screenshotRequested;
++    screenshotRequested = false;
++    return requested;
++}
++
+ // Internal window-thread API; consume exactly once after polling host input.
+ bool ps2PortConsumeControlsToggle()
+ {
+@@ -236,6 +245,7 @@ static bool sampleHostPad(uint8_t *data, size_t size, uint16_t& freshPresses)
+     const bool orderedKeys = !useGamepad && installHostKeyEvents();
+     for (int key = GetKeyPressed(); key != 0; key = GetKeyPressed()) {
+         if (key == KEY_F1) controlsToggleRequested = !controlsToggleRequested;
++        if (key == KEY_F12) screenshotRequested = true;
+         if (useGamepad || orderedKeys) continue;
+         switch (key) {
+         case KEY_UP: queuedPress(PAD_UP); break;
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 0b6fc08..95a8e59 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -4,6 +4,8 @@
+ #include "host_frame_effects.hpp"
+ #include "overlay_dispatch.hpp"
+ #include <cstdlib>
++#include <ctime>
++#include <chrono>
+ #include <filesystem>
+ #include <stdexcept>
+ namespace ps2_port {
+@@ -442,6 +444,33 @@ namespace
+ 
+ // Implemented by the window-thread keyboard event collector in ps2_pad.cpp.
+ bool ps2PortConsumeControlsToggle();
++#include "rlgl.h"
++bool ps2PortConsumeScreenshotRequest();
++
++// PS2 Port Lab: F12 saves the picture about to be presented. Raylib's own F12 writes into the working directory,
++// which is "/" for an app started from Finder (it only logs a failure); this goes to the user's Pictures folder.
++// PS2_PORT_SCREENSHOT_AT=<seconds> requests one that long after start, for tests without a keyboard.
++static void ps2PortSaveScreenshot()
++{
++    static unsigned serial = 0;
++    const char *home = std::getenv("HOME");
++    std::error_code error;
++    const std::filesystem::path folder = std::filesystem::path(home && *home ? home : "/tmp") / "Pictures" / "PS2 Port Lab Screenshots";
++    std::filesystem::create_directories(folder, error);
++    const std::time_t now = std::time(nullptr);
++    char stamp[32] = "";
++    std::tm local{};
++    localtime_r(&now, &local);
++    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &local);
++    char name[64];
++    std::snprintf(name, sizeof name, "screenshot-%s-%02u.png", stamp, serial++ % 100u);
++    const std::string path = (folder / name).string();
++    rlDrawRenderBatchActive();          // the frame's queued draws reach the back buffer only at EndDrawing otherwise
++    Image picture = LoadImageFromScreen();
++    const bool saved = picture.data && ExportImage(picture, path.c_str());
++    if (picture.data) UnloadImage(picture);
++    std::cerr << (saved ? "[port-lab screenshot] saved " : "[port-lab screenshot] could not save ") << path << std::endl;
++}
+ 
+ #if defined(__APPLE__)
+ static ps2port::MacSurfacePresenter surfacePresenter;
+@@ -2741,6 +2770,9 @@ void PS2Runtime::run()
+     bool previousTestPress = false;
+     // An exception on the window thread must stop and join the game thread before it propagates: unwinding
+     // past a joinable std::thread calls std::terminate and loses the message.
++    bool screenshotPending = false;
++    double screenshotAt = [] { const char *value = std::getenv("PS2_PORT_SCREENSHOT_AT"); return value && *value ? std::atof(value) : -1.0; }();
++    const auto screenshotClock = std::chrono::steady_clock::now();
+     std::exception_ptr windowFailure;
+     try {
+     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
+@@ -2748,6 +2780,11 @@ void PS2Runtime::run()
+         if (!headless) {
+             ps2PortPollHostInput();
+             if (ps2PortConsumeControlsToggle()) showControls = !showControls;
++            if (ps2PortConsumeScreenshotRequest()) screenshotPending = true;
++            if (screenshotAt >= 0.0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - screenshotClock).count() >= screenshotAt) {
++                screenshotAt = -1.0;
++                screenshotPending = true;
++            }
+         }
+         if (testStart || (headless && std::getenv("PS2_PORT_PAD_COMMAND"))) {
+             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+@@ -2938,6 +2975,10 @@ void PS2Runtime::run()
+         {
+             m_debugUiDrawCallback(*this, m_debugUiUserData);
+         }
++        if (screenshotPending) {
++            screenshotPending = false;
++            ps2PortSaveScreenshot();
++        }
+         EndDrawing();
+         PresentationPacing::swapped();
+ 
