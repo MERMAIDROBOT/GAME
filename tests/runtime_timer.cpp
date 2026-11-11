@@ -650,6 +650,55 @@ static void testLongVif1Chain() {
  std::cout<<"PASS: a VIF1 chain longer than 4096 tags runs to its END tag"<<std::endl;
 }
 
+static void testMaskedPath3Pulses() {
+ setenv("PS2_PORT_HEADLESS","1",1);PS2Runtime runtime;if(!runtime.initialize("Synthetic masked PATH3 pulses"))throw std::runtime_error("Masked PATH3 initialization failed");
+ auto &memory=runtime.memory();
+ std::vector<std::vector<uint8_t>> seen;
+ memory.setGifArbiter(nullptr);
+ memory.setGifPacketCallback([&](const uint8_t *d,uint32_t n){seen.emplace_back(d,d+n);});
+ auto qw=[](std::vector<uint8_t> &v,uint64_t lo,uint64_t hi){const size_t o=v.size();v.resize(o+16);std::memcpy(&v[o],&lo,8);std::memcpy(&v[o+8],&hi,8);};
+ auto image=[](uint64_t nloop,bool eop){return nloop|(eop?0x8000ull:0ull)|(2ull<<58);};
+ std::vector<uint8_t> p1,p2,p3,p4;
+ qw(p1,image(1,true),0);qw(p1,0x11,0x11);
+ qw(p2,image(2,false),0);qw(p2,0x21,0x21);qw(p2,0x22,0x22);qw(p2,image(1,true),0);qw(p2,0x23,0x23);
+ qw(p3,image(1,true),0);qw(p3,0x31,0x31);
+ qw(p4,image(1,true),0);qw(p4,0x41,0x41);
+ std::vector<uint8_t> a=p1;a.insert(a.end(),p2.begin(),p2.begin()+48);   // P2 spans both DMA chunks
+ std::vector<uint8_t> b(p2.begin()+48,p2.end());b.insert(b.end(),p3.begin(),p3.end());b.insert(b.end(),p4.begin(),p4.end());
+ auto vif=[&](uint32_t code){const uint32_t w[4]={0u,0u,0u,code};memory.processVIF1Data(reinterpret_cast<const uint8_t*>(w),16);};
+ vif(0x06008000u);                                                   // MSKPATH3 on
+ memory.submitGifPacket(GifPathId::Path3,a.data(),uint32_t(a.size()));
+ memory.submitGifPacket(GifPathId::Path3,b.data(),uint32_t(b.size()));
+ if(!seen.empty())throw std::runtime_error("Masked PATH3 packets reached the GS");
+ const std::vector<uint8_t> *expect[4]={&p1,&p2,&p3,&p4};
+ for(unsigned i=0;i<4;++i){
+  vif(0x06000000u);vif(0x06008000u);                                 // one MSKPATH3 pulse
+  if(seen.size()!=i+1u||seen.back()!=*expect[i])
+   throw std::runtime_error("MSKPATH3 pulse "+std::to_string(i+1)+" did not release exactly the next queued packet");
+ }
+ // A large masked upload: every pulse used to copy the whole remaining queue (quadratic in packets).
+ seen.clear();
+ std::vector<uint8_t> big;constexpr unsigned packets=60000u;
+ for(unsigned i=0;i<packets;++i){qw(big,image(1,true),0);qw(big,i,i);}
+ memory.submitGifPacket(GifPathId::Path3,big.data(),uint32_t(big.size()));
+ std::vector<uint32_t> pulses;for(unsigned i=0;i<packets;++i){pulses.insert(pulses.end(),{0u,0u,0x06000000u,0x06008000u});}
+ const auto started=std::chrono::steady_clock::now();
+ memory.processVIF1Data(reinterpret_cast<const uint8_t*>(pulses.data()),uint32_t(pulses.size()*4));
+ const auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-started).count();
+ if(seen.size()!=packets)throw std::runtime_error("Large masked upload released "+std::to_string(seen.size())+" packets");
+ for(unsigned i=0;i<packets;i+=997u){uint64_t v=0;std::memcpy(&v,seen[i].data()+16,8);if(v!=i)throw std::runtime_error("Large masked upload released packets out of order");}
+ if(ms>300)throw std::runtime_error("Releasing "+std::to_string(packets)+" masked PATH3 packets took "+std::to_string(ms)+" ms (queue copied per pulse)");
+ vif(0x06000000u);memory.setGifPacketCallback({});
+ // The GIF arbiter reuses drained buffers: contents must never leak between packets of different sizes.
+ std::vector<std::vector<uint8_t>> drained;
+ GifArbiter arbiter([&](const uint8_t *d,uint32_t n){drained.emplace_back(d,d+n);});
+ arbiter.submit(GifPathId::Path3,big.data(),640u);arbiter.drain();
+ arbiter.submit(GifPathId::Path3,p3.data(),uint32_t(p3.size()));arbiter.submit(GifPathId::Path2,p1.data(),uint32_t(p1.size()));arbiter.drain();
+ if(drained.size()!=3u||drained[0]!=std::vector<uint8_t>(big.begin(),big.begin()+640)||drained[1]!=p1||drained[2]!=p3)
+  throw std::runtime_error("GIF arbiter buffer reuse changed packet contents or order");
+ std::cout<<"PASS: MSKPATH3 pulses release one packet each, across DMA chunks, in linear time ("<<ms<<" ms for "<<packets<<")\n";
+}
+
 static void testVif1DirectImageSpan() {
  setenv("PS2_PORT_HEADLESS","1",1);PS2Runtime runtime;if(!runtime.initialize("Synthetic VIF1 DIRECT image span"))throw std::runtime_error("Synthetic VIF1 initialization failed");
  auto &memory=runtime.memory();
@@ -1010,6 +1059,7 @@ int main(int argc, char **argv) {
     testGsLibgraphPacketABI();
     testVif1DirectImageSpan();
     testLongVif1Chain();
+    testMaskedPath3Pulses();
     testGsDisplayEnvironment();
     testGsAnalogCRT();
     testGsDoubleBufferGeometry();
