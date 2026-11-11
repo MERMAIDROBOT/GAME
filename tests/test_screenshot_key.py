@@ -21,6 +21,7 @@ class Content(unittest.TestCase):
         self.assertLess(flush, text.index('+    Image picture = LoadImageFromScreen();'))
         self.assertIn('PS2 Port Lab Screenshots', text)
         self.assertIn('PS2_PORT_SCREENSHOT_AT', text)
+        self.assertIn('PS2_PORT_SCREENSHOT_EVERY', text)
         self.assertIn('F12', (ROOT / 'CONTROLS.md').read_text())
 
     def test_registered_and_packaged(self):
