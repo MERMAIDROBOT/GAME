@@ -475,6 +475,40 @@ void LongMemoryPatch(ps2gpu::GsRenderer& renderer) {
     Check(dispatches <= 2, "a long memory patch is one dispatch, not one an eight words");
 }
 
+// Drawn larger (2x), a GS pixel is a 2x2 square whose first sub-pixel is its sample point (the sub-pixel
+// mapping): that one goes to memory, so a write-back at 2x gives the bytes 1x gives. An edge a quarter into
+// a GS pixel covers its first sub-pixel only - the middle one, taken before, missed it (SSX 3: dark dashes a
+// block's row apart after a write-back and reload; everything read back at 2x or 3x was half a pixel off).
+std::vector<std::uint8_t> EdgeToMemory(ps2gpu::GsRenderer& renderer, std::uint32_t scale) {
+    renderer.SetScale(scale);
+    ps2gpu::GsDrawState state = Target(0x98);
+    state.fbw = 8;                                   // a full-size target: small ones stay at 1x
+    state.width = 512;
+    state.height = 448;
+    state.scissor_x1 = 511;
+    state.scissor_y1 = 447;
+    const float delta = 0.5f / float(scale) - 0.5f;  // the bridge's Convert at this scale
+    Rect(renderer, state, 0.0f + delta, 0.0f + delta, 512.0f + delta, 448.0f + delta, Rgba(0, 0, 0, 0x80));
+    Rect(renderer, state, 0.0f + delta, 0.0f + delta, 4.25f + delta, 6.25f + delta, Rgba(0xFF, 0x80, 0x40, 0x80));
+    std::vector<std::uint8_t> bytes(4 * 256);
+    const bool wrote = renderer.TargetToMemory(0x98, 8, 0, 512, 448, 0);
+    renderer.MemoryRead(0x98 * 32, 0x98 * 32 + 4, bytes.data());
+    if (!wrote) bytes.clear();
+    return bytes;
+}
+
+void FirstSubPixelToMemory(ps2gpu::GsRenderer& renderer) {
+    const auto one = EdgeToMemory(renderer, 1);
+    const auto two = EdgeToMemory(renderer, 2);
+    const auto three = EdgeToMemory(renderer, 3);
+    renderer.SetScale(1);
+    std::uint32_t lit = 0;
+    for (std::size_t i = 0; i + 4 <= one.size(); i += 4) lit += one[i] == 0xFF;
+    Check(!one.empty() && lit == 5 * 7, "1x: an edge a quarter into a GS pixel covers it");
+    Check(!two.empty() && two == one, "2x: a target goes to memory as at 1x (from each square's first sub-pixel)");
+    Check(!three.empty() && three == one, "3x: a target goes to memory as at 1x");
+}
+
 void TargetFromMemory(ps2gpu::GsRenderer& renderer) {
     std::vector<std::uint32_t> pixels(64 * 64);
     for (std::uint32_t i = 0; i < pixels.size(); ++i) pixels[i] = Rgba(std::uint8_t(i), std::uint8_t(i >> 6), 7, 0x80);
@@ -555,6 +589,7 @@ int main() {
     SixteenBitPassThroughBlend(*renderer);
     BatchedDepthTwoPass(*renderer);
     LongMemoryPatch(*renderer);
+    FirstSubPixelToMemory(*renderer);
     if (g_failures) std::printf("gpu renderer tests: %d failed\n", g_failures);
     else std::printf("gpu renderer tests: all passed (%s)\n", gpu->Describe().c_str());
     return g_failures ? EXIT_FAILURE : EXIT_SUCCESS;

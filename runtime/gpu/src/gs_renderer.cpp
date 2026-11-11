@@ -224,9 +224,11 @@ struct SwizzleParams {
 };
 
 
-/* Draw-position mapping. The swizzle shader samples the center of the scaled pixel and
-   treats keep_colour as a boolean; this switch must not change its push constants. */
+/* The sub-pixel mapping (gpu_bridge.cpp's Convert): a GS pixel's sample point is its square's first sub-pixel,
+   so a target goes to memory from that one, not from its middle (swizzle.comp's SUBK, keep_colour bit 1;
+   bit 0 stays the colour-keeping flag). PS2_PORT_HW_GS_SUBPIXEL=0 restores both halves. */
 bool SubpixelMapping() { static const bool on = [] { const char* e = std::getenv("PS2_PORT_HW_GS_SUBPIXEL"); return !(e && e[0] == '0'); }(); return on; }
+SwizzleParams WithSubpixel(SwizzleParams p) { if (SubpixelMapping()) p.keep_colour |= 2u; return p; }
 constexpr std::uint32_t kDepthRows = 512;   // a depth buffer's rows (DrawTriangles; the bridge's)
 constexpr VkDeviceSize kLocalMemory = 4u << 20;
 constexpr VkDeviceSize kLinear = VkDeviceSize(2048) * 1024 * 4;    // the largest image, a value a pixel (at scale 1)
@@ -1458,7 +1460,8 @@ void VulkanGsRenderer::DepthOut(VkCommandBuffer cmd, const SwizzleParams& params
     const VkDescriptorSet sets[2] = {swizzle_set_, DepthSampledSet(d)};
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, swizzle_depth_pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, swizzle_depth_layout_, 0, 2, sets, 0, nullptr);
-    vkCmdPushConstants(cmd, swizzle_depth_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &params);
+    { const SwizzleParams pushed = WithSubpixel(params);
+      vkCmdPushConstants(cmd, swizzle_depth_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pushed, &pushed); }
     ++g_dispatches;
     vkCmdDispatch(cmd, (params.cols + 7) / 8, (params.rows + 7) / 8, 1);
     g_.Mark(cmd, kProfSwizzle);
@@ -1544,7 +1547,8 @@ void VulkanGsRenderer::SwizzleImage(VkCommandBuffer cmd, const SwizzleParams& pa
                 pipeline = swizzle_image_specialised_[f][params.to_memory][params.scale - 1];
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, swizzle_image_layout_, 0, 2, sets, 0, nullptr);
-    vkCmdPushConstants(cmd, swizzle_image_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &params);
+    { const SwizzleParams pushed = WithSubpixel(params);
+      vkCmdPushConstants(cmd, swizzle_image_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pushed, &pushed); }
     ++g_dispatches;
     vkCmdDispatch(cmd, (params.cols + 7) / 8, (params.rows + 7) / 8, 1);
     g_.Mark(cmd, kProfSwizzle);
