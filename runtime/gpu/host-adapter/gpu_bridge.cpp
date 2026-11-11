@@ -1027,8 +1027,14 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
             if (t.overlaps(o.begin,o.full_end)) t.over.push_back(&o);
         t.owned_seen = b.owned.size();
     }
+    // Drawing into a 24-bit colour or depth buffer writes bits 0-23 alone: a texture of the upper bits there
+    // (T8H, T4HL, T4HH) keeps its texels. SSX 3 keeps its HUD textures in the top byte of its Z24 buffer and
+    // draws the HUD with depth written, so each HUD primitive made the next one decode its texture again (a
+    // depth write-back and a decode, ~16 a frame of one 256x256 texture).
+    const bool upper_bits = psm == gs::PSMT8H || psm == gs::PSMT4HL || psm == gs::PSMT4HH;
     for (const Owned* o : t.over)
-        if (o->drawn_serial > t.decoded_serial && t.overlaps(o->begin,o->drawn_end)) t.valid = false;
+        if (o->drawn_serial > t.decoded_serial && t.overlaps(o->begin,o->drawn_end) &&
+            !(upper_bits && (o->psm == gs::PSMCT24 || o->psm == gs::PSMZ24))) t.valid = false;
     // A texture pack (texture_pack.h), for textures from memory - not ones the
     // GPU drew, as PCSX2 replaces none of those. Turned on or off (Tab):
     // every texture comes back once, replaced or as the game has it.
