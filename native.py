@@ -900,3 +900,4 @@ RUNTIME_PATCHES += ('patches/native-sound-host.patch', 'patches/native-sound-dma
 RUNTIME_PATCHES += ('patches/dma-chain-length.patch',)
 RUNTIME_PATCHES += ('patches/screenshot-key.patch',)
 RUNTIME_PATCHES += ('patches/path3-pulse-queue.patch',)
+RUNTIME_PATCHES += ('patches/display-lock.patch',)

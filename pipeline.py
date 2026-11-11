@@ -1367,6 +1367,7 @@ SOURCE_FILES = ('patches/native-sound-dma.patch',) + SOURCE_FILES
 SOURCE_FILES = ('patches/dma-chain-length.patch', 'tests/test_dma_chain_length.py') + SOURCE_FILES
 SOURCE_FILES = ('patches/screenshot-key.patch', 'tests/test_screenshot_key.py') + SOURCE_FILES
 SOURCE_FILES = ('patches/path3-pulse-queue.patch', 'tests/test_path3_pulse_queue.py') + SOURCE_FILES
+SOURCE_FILES = ('patches/display-lock.patch', 'tests/test_display_lock.py') + SOURCE_FILES
 
 
 SOURCE_FILES = ('runtime/gpu/native-plugin/fifo_formats.hpp', 'tests/fifo_formats.cpp', 'tests/native_sound_mixer.cpp', 'tests/test_native_sound_mixer.py', 'tests/test_runtime_patch_sync.py') + SOURCE_FILES
