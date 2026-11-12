@@ -297,6 +297,11 @@ public:
         Drain(12);
         return inner_->ReadTargetRect(fbp,fbw,psm,maxW,maxH,pixels,width,height);
     }
+    bool MemoryReadAsync(std::uint32_t begin, std::uint32_t end, std::uint64_t serial,
+                         std::vector<std::uint8_t>* bytes, std::uint64_t* done_serial) override {
+        Drain(12);      // the copy is recorded after every queued draw (CPU recording only - no GPU wait)
+        return inner_->MemoryReadAsync(begin, end, serial, bytes, done_serial);
+    }
     bool ReadTargetRectAsync(std::uint32_t fbp,std::uint32_t fbw,std::uint32_t psm,std::uint32_t maxW,
         std::uint32_t maxH,std::uint64_t serial,std::vector<std::uint32_t>* pixels,std::uint32_t* width,
         std::uint32_t* height,std::uint64_t* done_serial) override {

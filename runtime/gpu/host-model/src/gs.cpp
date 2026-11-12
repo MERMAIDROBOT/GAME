@@ -341,7 +341,7 @@ void Gs::WriteRegister(u32 address, u64 value) {
                 if (trxdir_ == 0 || trxdir_ == 2)       // into local memory
                     Touch(Bits(bitbltbuf_, 32, 14), Bits(bitbltbuf_, 48, 6), Bits(bitbltbuf_, 56, 6),
                           Bits(trxpos_, 32, 11), Bits(trxpos_, 48, 11), w, h, true);
-                if (trxdir_ == 1 || trxdir_ == 2)       // out of it
+                if ((trxdir_ == 1 && !exact_read_sync) || trxdir_ == 2)       // out of it
                     Touch(Bits(bitbltbuf_, 0, 14), Bits(bitbltbuf_, 16, 6), Bits(bitbltbuf_, 24, 6),
                           Bits(trxpos_, 0, 11), Bits(trxpos_, 16, 11), w, h, false);
             }
@@ -467,9 +467,14 @@ void Gs::LoadClut(u64 tex0) {
     Finish();                                   // the CLUT may have been drawn
     ++clut_loads_;
     if (on_clut_load && on_clut_load(tex0, texa_)) return;
-    if (on_memory) on_memory(cbp, cbp + 8, false);
-    auto clut = std::make_shared<std::array<u32, 256>>(*clut_);
     const bool eight = psm == PSMT8 || psm == PSMT8H;
+    // Claude 2026-11-11: the blocks the CLUT is read from - a 16x16 (eight-bit) or 8x2 (four-bit) CSM1 table is in
+    // the first four blocks or the first one at CBP; CSM2 reads a row of a CT16 buffer (the generous eight). Eight
+    // for every load brought back GPU-drawn blocks the CLUT never reads: SSX 3 loads a four-bit CLUT at CBP 0
+    // beside its frame buffer's first blocks, and each load waited for the GPU (~50 a second, 7-12 ms each).
+    const u32 clut_blocks = Bits(tex0, 55, 1) ? 8u : eight ? 4u : 1u;
+    if (on_memory) on_memory(cbp, cbp + clut_blocks, false);
+    auto clut = std::make_shared<std::array<u32, 256>>(*clut_);
     const u32 count = eight ? 256 : 16;
     // CSM2 (TEX0 bit 55): the CLUT is one row of a CT16 buffer, entry i at
     // (TEXCLUT COU * 16 + i, COV) in a buffer CBW wide - no swizzle, no CSA.

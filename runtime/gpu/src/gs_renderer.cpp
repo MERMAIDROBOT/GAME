@@ -474,6 +474,8 @@ public:
                         std::uint32_t* width, std::uint32_t* height) override;
     bool ReadTexture(std::uint64_t key, std::vector<std::uint32_t>* pixels, std::uint32_t* width,
                      std::uint32_t* height) override;
+    bool MemoryReadAsync(std::uint32_t begin, std::uint32_t end, std::uint64_t serial,
+                         std::vector<std::uint8_t>* bytes, std::uint64_t* done_serial) override;
     bool ReadTargetRectAsync(std::uint32_t fbp,std::uint32_t fbw,std::uint32_t psm,std::uint32_t maxW,
         std::uint32_t maxH,std::uint64_t serial,std::vector<std::uint32_t>* pixels,std::uint32_t* width,
         std::uint32_t* height,std::uint64_t* done_serial) override;
@@ -484,6 +486,10 @@ public:
     };
     static constexpr int kAsyncReads = 3;
     AsyncRead async_[kAsyncReads];
+    AsyncRead mem_reads_[kAsyncReads];          // MemoryReadAsync's (serial, order: as async_'s)
+    std::uint64_t mem_order_ = 0, mem_requested_ = 0, mem_done_order_ = 0, mem_delivered_ = 0;
+    const AsyncRead* mem_newest_ = nullptr;
+    std::uint32_t mem_begin_[kAsyncReads] = {};
     std::uint64_t async_order_ = 0, async_requested_ = ~0ull, async_done_order_ = 0;
     bool async_have_ = false;
     AsyncRead* async_newest_ = nullptr;
@@ -3496,6 +3502,82 @@ bool VulkanGsRenderer::ReadTargetRectAsync(std::uint32_t fbp,std::uint32_t fbw,s
     return true;
 }
 
+// Claude 2026-11-11: as ReadTargetRectAsync, for blocks of GPU memory: the copy in a command buffer of its own after
+// the frame's work so far (handed over, not waited for), the newest finished copy delivered.
+bool VulkanGsRenderer::MemoryReadAsync(std::uint32_t begin, std::uint32_t end, std::uint64_t serial,
+                                       std::vector<std::uint8_t>* bytes, std::uint64_t* done_serial) {
+    *done_serial = 0;
+    if (end <= begin || end > 16384) return false;
+    auto collect = [&](bool wait_oldest) {
+        if (wait_oldest) {
+            AsyncRead* oldest = nullptr;
+            for (AsyncRead& r : mem_reads_) if (r.pending && (!oldest || r.order < oldest->order)) oldest = &r;
+            if (oldest) vkWaitForFences(g_.device, 1, &oldest->fence, VK_TRUE, UINT64_MAX);
+        }
+        for (AsyncRead& r : mem_reads_)
+            if (r.pending && vkGetFenceStatus(g_.device, r.fence) == VK_SUCCESS) {
+                r.pending = false;
+                if (r.order > mem_done_order_) { mem_done_order_ = r.order; mem_newest_ = &r; }
+            }
+    };
+    auto deliver = [&] {
+        if (mem_newest_ && mem_done_order_ > mem_delivered_) {
+            const AsyncRead& r = *mem_newest_;
+            const std::size_t at = std::size_t(&r - mem_reads_);
+            if (mem_begin_[at] == begin && r.w == end - begin) {
+                const std::uint8_t* from = static_cast<const std::uint8_t*>(r.mapped);
+                bytes->assign(from, from + std::size_t(r.w) * 256);
+                *done_serial = r.serial;
+            }
+            mem_delivered_ = mem_done_order_;
+        }
+    };
+    collect(false);
+    deliver();
+    if (serial && serial != mem_requested_) {
+        const VkDeviceSize size = VkDeviceSize(end - begin) * 256;
+        AsyncRead* slot = nullptr;
+        for (AsyncRead& r : mem_reads_) if (!r.pending) { slot = &r; break; }
+        if (!slot) { collect(true); deliver(); for (AsyncRead& r : mem_reads_) if (!r.pending) { slot = &r; break; } }
+        if (!slot) return *done_serial != 0;
+        if (!slot->fence) {
+            VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            if (vkCreateFence(g_.device, &fi, nullptr, &slot->fence) != VK_SUCCESS) return false;
+            VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            ai.commandPool = g_.pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+            if (vkAllocateCommandBuffers(g_.device, &ai, &slot->cmd) != VK_SUCCESS) return false;
+        }
+        if (slot->bytes < size) {
+            if (slot->buffer) { vkUnmapMemory(g_.device, slot->memory); vkDestroyBuffer(g_.device, slot->buffer, nullptr); vkFreeMemory(g_.device, slot->memory, nullptr); slot->buffer = VK_NULL_HANDLE; }
+            if (!Buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &slot->buffer, &slot->memory, &slot->mapped)) { slot->bytes = 0; return false; }
+            slot->bytes = size;
+        }
+        Flush();                                    // what writes those blocks goes first (no wait)
+        g_.Flush();
+        vkResetCommandBuffer(slot->cmd, 0);
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(slot->cmd, &bi);
+        MemoryBarrier(slot->cmd);
+        const VkBufferCopy copy{VkDeviceSize(begin) * 256, 0, size};
+        vkCmdCopyBuffer(slot->cmd, gsmem_, slot->buffer, 1, &copy);
+        VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(slot->cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        vkEndCommandBuffer(slot->cmd);
+        vkResetFences(g_.device, 1, &slot->fence);
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount = 1; si.pCommandBuffers = &slot->cmd;
+        bool ok;
+        { std::lock_guard<std::mutex> hold(g_queue_lock); ok = vkQueueSubmit(g_.queue, 1, &si, slot->fence) == VK_SUCCESS; }
+        if (!ok) return *done_serial != 0;
+        slot->pending = true; slot->serial = serial; slot->order = ++mem_order_; slot->w = end - begin; slot->h = 1;
+        mem_begin_[std::size_t(slot - mem_reads_)] = begin;
+        mem_requested_ = serial;
+    }
+    return *done_serial != 0;
+}
+
 #if defined(__APPLE__)
 // Claude 2026-10-26: zero-copy presentation. The displayed picture goes to the window without leaving the GPU: a blit
 // (the scanout crop, rows copied or each shown twice in field mode, R8G8B8A8 -> B8G8R8A8) into one of four
@@ -3709,7 +3791,9 @@ VulkanGsRenderer::~VulkanGsRenderer() {
         }
     }
 #endif
-    for (AsyncRead& r : async_) {
+    for (AsyncRead* list : {async_, mem_reads_})
+    for (int i = 0; i < kAsyncReads; ++i) {
+        AsyncRead& r = list[i];
         if (r.pending) vkWaitForFences(g_.device, 1, &r.fence, VK_TRUE, UINT64_MAX);
         if (r.buffer) { vkUnmapMemory(g_.device, r.memory); vkDestroyBuffer(g_.device, r.buffer, nullptr); vkFreeMemory(g_.device, r.memory, nullptr); }
         if (r.fence) vkDestroyFence(g_.device, r.fence, nullptr);

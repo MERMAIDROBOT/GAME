@@ -2359,6 +2359,65 @@ bool ClaudeHwFrameSurface(u64 frame, u32 sx, u32 sy, u32 dw, u32 dh, u32 ow, u32
     return true;
 }
 
+/* Claude 2026-11-11: PS2_PORT_HW_GS_ZREAD_LATENCY=1 (a title's profile opts in). A small local-to-host read of a
+   depth buffer the GPU holds is answered from a copy of that depth buffer the GPU made earlier - normally the
+   previous frame's, at the same point of the frame - instead of waiting for the GPU to finish everything drawn so
+   far. SSX 3 reads 16x16 of depth at each sun and light every frame to size its glare: each read waited 10-16 ms
+   for the frame's scene, and a race held 30 frames a second wherever a light was in view. Each frame's first such
+   read writes the depth buffer back to GPU memory and starts the next copy (no wait). Null: read as before
+   (nothing copied yet, another buffer, a large read, the setting off). */
+const gs::Memory* LatentDepthRead(u32 sbp, u32 sbw, u32 spsm, u32 sx, u32 sy, u32 w, u32 h) {
+    static const bool on = [] { const char* e = std::getenv("PS2_PORT_HW_GS_ZREAD_LATENCY"); return e && e[0] == '1' && !e[1]; }();
+    if (!on || !g_bridge || !g_bridge->primary || (spsm != gs::PSMZ24 && spsm != gs::PSMZ32) || !w || !h || w * h > 64 * 64)
+        return nullptr;
+    Bridge& b = *g_bridge;
+    FlushPendingClear(0);
+    u32 first = 16384, last = 0;
+    for (u32 y = sy & ~7u; y < sy + h; y += 8)
+        for (u32 x = sx & ~7u; x < sx + w; x += 8) {
+            u32 nibble = 0;
+            const u32 block = gs::Memory::Address(sbp, sbw, x, y, spsm, &nibble) / 256;
+            first = std::min(first, block); last = std::max(last, block + 1);
+        }
+    const Owned* depth = nullptr;
+    for (const auto& [key, o] : b.owned)
+        if (o.depth && o.psm == spsm && o.begin <= first && last <= o.end) { depth = &o; break; }
+    if (!depth || !GpuHolds(b, first, last)) return nullptr;
+    static gs::Memory shadow;
+    static std::vector<u8> copy, gpu_blocks;
+    static u64 serial = 0, requested_frame = ~0ull, delivered = 0;
+    static u32 copy_begin = 0, copy_end = 0;
+    static std::vector<u8> pending_gpu_blocks[64];
+    std::uint64_t done = 0;
+    if (b.frame != requested_frame) {
+        requested_frame = b.frame;
+        for (auto& [key, o] : b.owned)
+            if (o.gpu_newer && o.dirty_begin < depth->end && depth->begin < o.dirty_end) WriteBack(b, o);
+        copy_begin = depth->begin; copy_end = depth->end;
+        // Which blocks the GPU's copy is newer for: the CPU's are taken for the rest.
+        auto& mask = pending_gpu_blocks[(serial + 1) % 64];
+        mask.assign(copy_end - copy_begin, 0);
+        for (u32 i = copy_begin; i < copy_end; ++i) mask[i - copy_begin] = b.blocks[i] == Bridge::kGpuNewer;
+        b.renderer->MemoryReadAsync(copy_begin, copy_end, ++serial, &copy, &done);
+    } else {
+        b.renderer->MemoryReadAsync(copy_begin, copy_end, 0, &copy, &done);
+    }
+    if (done) {
+        delivered = done;
+        gpu_blocks = pending_gpu_blocks[done % 64];
+        std::memcpy(shadow.data() + std::size_t(copy_begin) * 256, gs::TheGs().memory.data() + std::size_t(copy_begin) * 256,
+                    std::size_t(copy_end - copy_begin) * 256);
+        for (u32 i = 0; i < gpu_blocks.size() && copy.size() >= std::size_t(i + 1) * 256; ++i)
+            if (gpu_blocks[i]) std::memcpy(shadow.data() + std::size_t(copy_begin + i) * 256, copy.data() + std::size_t(i) * 256, 256);
+    }
+    static u64 served = 0, synced = 0;
+    if (!delivered || first < copy_begin || last > copy_end) { ++synced; return nullptr; }
+    if ((++served & 1023) == 1)
+        std::fprintf(stderr, "[zread latency] %llu reads answered from the earlier copy, %llu waited\n",
+                     (unsigned long long)served, (unsigned long long)synced);
+    return &shadow;
+}
+
 bool ClaudeHwContentStamp(unsigned* fbp, unsigned* fbw, unsigned* psm, unsigned long long* serial) {
     if (!g_bridge || !gs::TheGs().Displayed(fbp,fbw,psm)) return false;
     auto i=g_bridge->owned.find(std::make_tuple(*fbp,*fbw,*psm,false));
@@ -2430,6 +2489,7 @@ void GpuShadowFrame(u64 frame, const std::string& dump_dir) {
                          (unsigned long long)frame, double(ns - last_ns) / 1e6 / 100.0, (wait - last_wait) * 1000.0 / 100.0,
                          std::chrono::duration<double>(t - last_t).count() * 1000.0 / 100.0, std::size_t(0));
             last_ns = ns; last_wait = wait; last_t = t;
+            std::fprintf(stderr, "[gpu-waits] %s\n", ps2gpu::SubmitStats().c_str());
         }
         if (frame % 100 == 0)
             std::fprintf(stderr, "[gpu] frame %llu: %llu draws, %llu write-backs, %llu reloads, %llu decodes, %zu images, %zu textures\n",
