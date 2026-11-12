@@ -1001,6 +1001,31 @@ static void testConcurrentVu0Server(PS2Runtime &runtime) {
     std::cout<<"PASS: concurrent VU0 server survives start budget, accepts EE handshake and publishes before interlock returns\n";
 }
 
+static void testLongVu0ProgramFinishes(PS2Runtime &runtime) {
+    // A program that ends after ~90,000 instructions (past the 16-slice start budget of 2026-11-08) finishes before
+    // the EE goes on: the EE reads such results from VU0 memory without a COP2 instruction (Kelly Slater's
+    // splashes froze in the air when they were read while the program still ran).
+    auto *code=runtime.memory().getVU0Code();
+    std::memset(code,0,PS2_VU0_CODE_SIZE);
+    const auto pair=[&](unsigned at,uint32_t lower,uint32_t upper){
+        std::memcpy(code+at,&lower,4);std::memcpy(code+at+4,&upper,4);
+    };
+    constexpr uint32_t upperNop=0x000002ffu;
+    pair(0,(0x08u<<25)|(0xEu<<21)|(1u<<16)|0x530u,upperNop);   // IADDIU vi1,vi0,30000
+    pair(8,(0x09u<<25)|(1u<<16)|(1u<<11)|1u,upperNop);         // ISUBIU vi1,vi1,1
+    pair(16,(0x29u<<25)|(1u<<11)|0x7feu,upperNop);             // IBNE vi1,vi0,-2
+    pair(24,0,upperNop);                                       // branch delay
+    pair(32,(0x08u<<25)|(2u<<16)|9u,upperNop|0x40000000u);     // IADDIU vi2,vi0,9; E
+    pair(40,0,upperNop);                                       // end delay
+    R5900Context ctx{};
+    runtime.vu0StartMicroProgram(runtime.memory().getRDRAM(),&ctx,0);
+    if(ctx.vu0_concurrent || ctx.vi[1]!=0)
+        throw std::runtime_error("A VU0 program that ends was left running alongside the EE: concurrent="+std::to_string(ctx.vu0_concurrent)+
+                                 " vi1="+std::to_string(ctx.vi[1])+" vi2="+std::to_string(ctx.vi[2]));
+    std::memset(code,0,PS2_VU0_CODE_SIZE);
+    std::cout<<"PASS: a long VU0 program that ends finishes before VCALLMS returns\n";
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && std::string(argv[1]) == "--gs-image-only") {
         testGsLibgraphPacketABI();
@@ -1154,6 +1179,7 @@ int main(int argc, char **argv) {
     PS2Runtime runtime;
     if (!runtime.initialize("Synthetic timer test")) return 2;
     testConcurrentVu0Server(runtime);
+    testLongVu0ProgramFinishes(runtime);
     // An ELF starts after platform initialization; environment setup must not
     // silently turn the initially runnable DMA controller off.
     uint8_t *dmaRam = runtime.memory().getRDRAM();

@@ -20,6 +20,11 @@ int main() {
  ready.clear();assert(!gate.select(field(1,2),check));ready.insert(1);
  shown=gate.select(field(2,2),check);assert(shown->generation==2&&shown->boundary.tick==1);
  gate.select({},check);shown.reset();
+ // The newest finished image wins over an older pending one, which is dropped (2026-11-12: judder).
+ gate.clear();ready.clear();assert(!gate.select(field(5,9),check));assert(!gate.select(field(6,9),check));
+ ready.insert(6);shown=gate.select(field(6,9),check);assert(shown&&shown->boundary.tick==6);
+ ready.insert(5);shown=gate.select(field(7,9),check);assert(shown->boundary.tick==6);   // 5 is older: never shown
+ ready.insert(7);shown=gate.select(field(7,9),check);assert(shown->boundary.tick==7);
  // Resource ownership is released on explicit reset.
  auto last=field(10,3);std::weak_ptr<const Field> pending=last;
  gate.select(last,check);last.reset();assert(!pending.expired());gate.clear();assert(pending.expired());

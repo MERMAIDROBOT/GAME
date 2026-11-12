@@ -100,7 +100,7 @@ diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runti
 index d9c3fc5..91172d6 100644
 --- a/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
-@@ -1681,16 +1681,59 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
+@@ -1681,16 +1681,62 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
          return;
      }
  
@@ -117,8 +117,11 @@ index d9c3fc5..91172d6 100644
 -    finishVuProgram(m_vu0, vu0Code, PS2_VU0_CODE_SIZE, vu0Data, PS2_VU0_DATA_SIZE, m_gs, &m_memory, 4096, "VU0");
 +    // Most programs end within the start budget. One that does not (for example a server loop that waits
 +    // for the EE to hand it work through VI/VF registers) keeps running alongside the EE instead of being
-+    // run to a cap and discarded; the EE's COP2 transfers then advance it.
-+    constexpr uint32_t kStartSlices = 16u;
++    // run to a cap and discarded; the EE's COP2 transfers then advance it. The budget is the one every
++    // program had before (1024 slices): a program that ends - a particle or wave-mesh pass - finishes before
++    // the EE goes on, as the EE's plain memory reads of its results assume (2026-11-12: 16 slices left Kelly
++    // Slater's longer passes running and their results read early - splashes frozen in the air).
++    constexpr uint32_t kStartSlices = 1024u;
 +    for (uint32_t n = 0; m_vu0.running() && n < kStartSlices; ++n)
 +        m_vu0.resume(vu0Code, PS2_VU0_CODE_SIZE, vu0Data, PS2_VU0_DATA_SIZE, m_gs, &m_memory,
 +                     m_vu0.state().top, m_vu0.state().itop, 4096);

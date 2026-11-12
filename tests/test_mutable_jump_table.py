@@ -43,3 +43,9 @@ class MutableJumpTable(unittest.TestCase):
             self.assertIn('0x24020016',body)
             # Table storage is data, not a fallback instruction entry.
             self.assertNotRegex(table,r'// 0x'+f'{base+0x80:x}'+r'\b')
+            # Block starts only: an instruction inside a block (the table address add, mid-block) is no entry.
+            # Every instruction as an entry made 68 of Kelly Slater's functions - its menu buttons, controls,
+            # demo AI and water - slow (2026-11-12: menu double steps, slow demo, water at 30 fps).
+            mid=base+0x18
+            self.assertNotIn(f'case 0x{mid:x}u: goto label_{mid:x};',body)
+            self.assertNotRegex(table,r'// 0x'+f'{mid:x}'+r'\b')

@@ -145,7 +145,9 @@ public:
             ps2port::SurfaceToken token{};
             if (!ps2port::decodeSurfaceToken(field.image().bytes(),&token)) return true;
             auto serial=token.serial; std::uint32_t width=0,height=0;
-            if (!hwgs_surface_wait(&serial,&width,&height,0)) return false;
+            // A moment for the newest picture's copy to finish, so the window shows it, not the one before it.
+            static const int waitMs=[] {const char *e=std::getenv("PS2_PORT_PRESENT_WAIT_MS");return e?std::max(0,std::min(8,std::atoi(e))):2;}();
+            if (!hwgs_surface_wait(&serial,&width,&height,waitMs)) return false;
             hwgs_surface_release(serial);
             if (serial!=token.serial || width!=token.width || height!=token.height)
                 throw std::runtime_error("Completed surface differs from submitted field");
