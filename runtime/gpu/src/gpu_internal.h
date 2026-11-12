@@ -69,6 +69,11 @@ public:
     template <typename F>
     void RecordInPass(F&& record);
     std::function<void(VkCommandBuffer)> end_pass;
+    /* Records into a command buffer of its own that runs before everything recorded for the same
+       submission: for work that only writes an image nothing recorded so far reads (a texture's new
+       version, UploadTexture), so that it never ends the rendering pass a frame's draws are in. */
+    template <typename F>
+    void RecordAhead(F&& record);
     /* Runs what has been recorded and waits for it, and for everything
        Flush handed over before; then what was waiting for that (AfterSubmit:
        freeing staging buffers, say) runs. */
@@ -110,6 +115,7 @@ public:
     VkCommandPool pool = VK_NULL_HANDLE;
     VkCommandBuffer cmd = VK_NULL_HANDLE;           /* the current slot's */
     VkCommandBuffer cmds[kSlots] = {};
+    VkCommandBuffer ahead_cmds[kSlots] = {};      /* RecordAhead's, a slot's: submitted before its cmds */
     VkFence fences[kSlots] = {};
     bool dual_source = false;       /* dualSrcBlend: the GS's blending */
     bool logic_op = false;          /* logicOp: FBMSK's partly masked channels */
@@ -119,6 +125,7 @@ public:
 private:
     std::string describe_;
     bool open_ = false;
+    bool ahead_open_ = false;
     std::uint64_t recordings_ = 0;
     // Two timestamps a slot: as its command buffer starts and as it ends.
     VkQueryPool timestamps_ = VK_NULL_HANDLE;
@@ -157,6 +164,20 @@ void VulkanGpu::RecordInPass(F&& record) {
         }
     }
     record(cmd);
+}
+
+template <typename F>
+void VulkanGpu::RecordAhead(F&& record) {
+    if (!open_) RecordInPass([](VkCommandBuffer) {});   // the submission it goes ahead of
+    VkCommandBuffer ahead = ahead_cmds[current_];
+    if (!ahead_open_) {
+        vkResetCommandBuffer(ahead, 0);
+        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(ahead, &begin);
+        ahead_open_ = true;
+    }
+    record(ahead);
 }
 
 template <typename F>
@@ -212,9 +233,13 @@ inline bool VulkanGpu::Flush() {
         stamped_[current_] = true;
     }
     vkEndCommandBuffer(cmd);
+    VkCommandBuffer both[2] = {ahead_cmds[current_], cmd};
+    const bool ahead = ahead_open_;
+    if (ahead) vkEndCommandBuffer(both[0]);
+    ahead_open_ = false;
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
+    submit.commandBufferCount = ahead ? 2 : 1;
+    submit.pCommandBuffers = ahead ? both : &cmd;
     vkResetFences(device, 1, &fences[current_]);
     bool ok;
     {

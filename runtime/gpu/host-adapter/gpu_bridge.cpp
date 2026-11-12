@@ -284,6 +284,7 @@ struct Bridge {
     u64 write_backs = 0, reloads = 0, decodes = 0;
     u64 unchanged = 0;              // textures invalidated whose texels proved the same
     u64 gpu_decodes = 0;            // textures decoded on the GPU from its copy of local memory
+    u64 cpu_decodes = 0;            // direct-colour textures decoded here, uploaded ahead (CpuDecode)
     u64 replacements = 0;           // a texture pack's in their place (texture_pack.h)
     // The CLUT, in rows of 16 entries (bit r for row r): which the GS model
     // holds as loaded (a load from blocks the CPU has), which the GPU's copy
@@ -958,6 +959,50 @@ bool RuntimeReplace(Bridge& b, Cached& t, const gs::Context& c, u64 texa, u32 le
     return true;
 }
 
+/* Claude 2026-11-11: a direct-colour texture (CT32, CT24, CT16, CT16S; one level) whose blocks the CPU holds,
+   decoded here as decode.comp decodes one, for UploadTexture - which fills a new image ahead of the frame's
+   rendering pass. A decode on the GPU is a dispatch between draws, and it ends the pass: SSX 3's movies are
+   ~120 strips a picture, each sent and drawn, and their passes cost the GPU 40-48 ms a frame. Palettized ones
+   read the GPU's CLUT, in order with the draws: still decoded there. PS2_PORT_HW_GS_CPU_DECODE=0: all on the GPU. */
+bool CpuDecodable(u32 psm, u32 levels, u32 tw, u32 th) {
+    static const bool on = [] { const char* e = std::getenv("PS2_PORT_HW_GS_CPU_DECODE"); return !(e && e[0] == '0'); }();
+    return on && levels == 1 && u64(tw) * th <= (1u << 20) &&
+           (psm == gs::PSMCT32 || psm == gs::PSMCT24 || psm == gs::PSMCT16 || psm == gs::PSMCT16S);
+}
+u32 DecodeWrap(int i, u32 size, u32 mode, u32 lo, u32 hi) {
+    if (mode == 0) return u32(i) & (size - 1);
+    if (mode == 1) return u32(std::clamp(i, 0, int(size) - 1));
+    if (mode == 2) return u32(std::clamp(i, int(lo), int(hi)));
+    return (u32(i) & lo) | hi;
+}
+u32 DecodeExpand(u32 psm, u32 raw, u64 texa) {
+    const u32 ta0 = u32(texa & 0xFF), ta1 = Bits(texa, 32, 8);
+    const bool aem = (texa & 0x8000) != 0;
+    if (psm == gs::PSMCT24) {
+        const u32 rgb = raw & 0xFFFFFF;
+        return rgb | ((aem && rgb == 0) ? 0u : ta0) << 24;
+    }
+    if (psm == gs::PSMCT16 || psm == gs::PSMCT16S) {
+        const u32 a = (raw & 0x8000) ? ta1 : ((aem && (raw & 0x7FFF) == 0) ? 0u : ta0);
+        return ((raw & 31) << 3) | (((raw >> 5) & 31) << 11) | (((raw >> 10) & 31) << 19) | (a << 24);
+    }
+    return raw;
+}
+void CpuDecode(const gs::Context& c, u64 texa, u32 tw, u32 th, std::vector<u32>& out) {
+    const u32 tbp = Bits(c.tex0, 0, 14), tbw = Bits(c.tex0, 14, 6), psm = Bits(c.tex0, 20, 6);
+    const u32 wms = Bits(c.clamp, 0, 2), wmt = Bits(c.clamp, 2, 2);
+    const u32 minu = Bits(c.clamp, 4, 10), maxu = Bits(c.clamp, 14, 10), minv = Bits(c.clamp, 24, 10), maxv = Bits(c.clamp, 34, 10);
+    const gs::Gs& m = gs::TheGs();
+    out.resize(size_t(tw) * th);
+    for (u32 v = 0; v < th; ++v) {
+        const u32 y = DecodeWrap(int(v), th, wmt, minv, maxv) & 2047;
+        for (u32 u = 0; u < tw; ++u) {
+            const u32 x = DecodeWrap(int(u), tw, wms, minu, maxu) & 2047;
+            out[size_t(v) * tw + u] = DecodeExpand(psm, m.memory.Read(tbp, tbw, x, y, psm), texa);
+        }
+    }
+}
+
 u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
     const u32 tbp = Bits(c.tex0, 0, 14), tbw = Bits(c.tex0, 14, 6), psm = Bits(c.tex0, 20, 6);
     // What decides the decoded texels: where and how it is stored (TBP0, TBW,
@@ -1173,7 +1218,18 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
             if (pack || dump_dir)
                 t.pack_name = texture_pack::NameOf(gs::TheGs().memory, c.tex0, c.clamp, texa,
                                                    gs::TheGs().Clut().data());
-            if (!RuntimeReplace(b, t, c, texa, mips.count, tcc_keyed, true) && (!pack || !Replace(b, t))) gpu_decode();
+            if (!RuntimeReplace(b, t, c, texa, mips.count, tcc_keyed, true) && (!pack || !Replace(b, t))) {
+                if (CpuDecodable(psm, mips.count, tw, th)) {
+                    static thread_local std::vector<u32> texels;
+                    CpuDecode(c, texa, tw, th, texels);
+                    ++g_mutations;
+                    b.renderer->UploadTexture(t.renderer_key, texels.data(), tw, th);
+                    t.decoded_serial = b.serial;
+                    ++b.cpu_decodes;
+                } else {
+                    gpu_decode();
+                }
+            }
             static std::set<std::string> dumped;
             std::vector<u32> pixels;
             u32 w = 0, h = 0;

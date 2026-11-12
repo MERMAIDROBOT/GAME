@@ -82,6 +82,9 @@ public:
             if(!pacingAnchored || std::abs(raw-pacingOffset)>60e6) {pacingOffset=raw;pacingAnchored=true;queue.clear();}
             else pacingOffset+=0.02*(raw-pacingOffset);
             queue.push_back(frame);while(queue.size()>8)queue.pop_front();
+        } else {
+            std::lock_guard<std::mutex> lock(pacingMutex);
+            recent.push_back(frame);while(recent.size()>8)recent.pop_front();
         }
         std::atomic_store_explicit(&completed,std::move(frame),std::memory_order_release);
     }
@@ -96,8 +99,7 @@ public:
             if(pacingDelayNs()>0)
                 pick=newestReadyDue(queue,double(now),pacingOffset,kFieldNs,double(pacingDelayNs()),floor);
             else {
-                auto newest=std::atomic_load_explicit(&completed,std::memory_order_acquire);
-                if(pixelsReady(newest) && newest->boundary.tick>=floor)pick=newest;
+                pick=newestReady(recent,floor);   // not only the newest: it is rarely done yet
             }
             if(!pick)return lastPresented;
         }
@@ -112,18 +114,19 @@ public:
         if(f->ready)return f;
         const auto& r=f->pending.get();
         auto done=std::make_shared<const CompletedField>(CompletedField{f->boundary,r.ingressSequence,r.generation,{},f->pending,true});
-        {std::lock_guard<std::mutex> lock(pacingMutex);for(auto &q:queue)if(q==f)q=done;}
+        {std::lock_guard<std::mutex> lock(pacingMutex);for(auto &q:queue)if(q==f)q=done;for(auto &q:recent)if(q==f)q=done;}
         auto expected=f;std::atomic_compare_exchange_strong(&const_cast<FieldPublisher*>(this)->completed,&expected,done);
         return done;
     }
     void clear(){
-        {std::lock_guard<std::mutex> lock(pacingMutex);queue.clear();pacingAnchored=false;lastPresented.reset();++presentationEpoch;}
+        {std::lock_guard<std::mutex> lock(pacingMutex);queue.clear();recent.clear();pacingAnchored=false;lastPresented.reset();++presentationEpoch;}
         std::atomic_store_explicit(&completed,std::shared_ptr<const CompletedField>{},std::memory_order_release);}
 private:
     static constexpr double kFieldNs=1e9/59.94;
     static int64_t pacingDelayNs(){static const int64_t v=[] {const char *e=std::getenv("PS2_PORT_ENHANCE_PACING_MS");return e?int64_t(std::atof(e)*1e6):int64_t(0);}();return v;}
     mutable std::mutex pacingMutex;
     mutable std::deque<std::shared_ptr<const CompletedField>> queue;
+    mutable std::deque<std::shared_ptr<const CompletedField>> recent;   // the last 8 published (no pacing delay)
     mutable std::shared_ptr<const CompletedField> lastPresented;
     uint64_t presentationEpoch=0;
     double pacingOffset=0;bool pacingAnchored=false;

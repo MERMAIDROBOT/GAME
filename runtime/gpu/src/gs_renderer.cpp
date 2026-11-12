@@ -182,6 +182,7 @@ struct Texture {
 
 // What the frames' command buffers hold (RendererCounters, PS2HOST_GPU_LOG).
 std::uint64_t g_barriers = 0, g_transitions = 0, g_dispatches = 0, g_draws = 0, g_passes = 0, g_feedback = 0;
+std::uint64_t g_uploads_ahead = 0;   /* UploadTexture's, ahead of the pass (RendererCounters) */
 
 void Transition(VkCommandBuffer cmd, Image& t, VkImageLayout to, VkAccessFlags dst_access,
                 VkPipelineStageFlags dst_stage) {
@@ -501,6 +502,7 @@ private:
     /* The depth buffer a draw uses: ZBP's, or the target's own when it tests
        nothing (dynamic rendering wants one attachment layout throughout). */
     Image* DepthFor(std::uint32_t key, std::uint32_t width, std::uint32_t height);
+    void Retire(Texture texture);   /* to the pool, or freed, once what is recorded has run */
     bool MakeImage(Image& image, std::uint32_t width, std::uint32_t height, VkImageUsageFlags usage,
                    VkFormat format = VK_FORMAT_R8G8B8A8_UNORM, std::uint32_t scale = 1, std::uint32_t levels = 1);
     void DestroyImage(Image& image);
@@ -2219,13 +2221,53 @@ void VulkanGsRenderer::Fill(Texture& texture, const std::uint32_t* pixels) {
     });
 }
 
+/* Claude 2026-11-11: each upload is a new image, filled ahead of everything recorded for this submission
+   (RecordAhead), the one the key named before retired once the draws already recorded have sampled it. A copy
+   into the key's own image had to end the rendering pass the frame's draws were in: SSX 3 shows its movies as
+   ~120 16-pixel-wide strips a picture, each sent and then drawn, and the passes ended and begun again around
+   each one (~80 a frame, ~1600 barriers) took 40-48 ms of the GPU's time a frame. */
 void VulkanGsRenderer::UploadTexture(std::uint64_t key, const std::uint32_t* pixels, std::uint32_t width,
                                      std::uint32_t height) {
-    Flush();                        // what is pending may sample the old contents
-    Texture* texture = TextureImage(key, width, height);
-    if (!texture) return;
-    texture->replacement = 0;
-    Fill(*texture, pixels);
+    Flush();                        // what is pending samples the old contents
+    Texture fresh;
+    auto pooled = texture_pool_.find(std::uint64_t(width) << 32 | height);
+    if (pooled != texture_pool_.end() && !pooled->second.empty()) {
+        fresh = pooled->second.back();
+        pooled->second.pop_back();
+        --pooled_textures_;
+    } else if (!MakeImage(fresh.image, width, height,
+                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                              (decode_image_pipeline_ ? VK_IMAGE_USAGE_STORAGE_BIT : 0))) {
+        return;
+    }
+    const VkDeviceSize bytes = VkDeviceSize(width) * height * 4;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceSize offset = 0;
+    void* mapped = Staging(bytes, &buffer, &offset);
+    if (!mapped) return;
+    std::memcpy(mapped, pixels, bytes);
+    Image& t = fresh.image;
+    g_.RecordAhead([&](VkCommandBuffer cmd) {
+        Transition(cmd, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkBufferImageCopy copy{};
+        copy.bufferOffset = offset;
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {width, height, 1};
+        vkCmdCopyBufferToImage(cmd, buffer, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        Transition(cmd, t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
+                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    });
+    ++g_uploads_ahead;
+    fresh.replacement = 0;
+    auto found = textures_.find(key);
+    if (found != textures_.end()) {
+        Texture old = found->second;
+        found->second = fresh;
+        Retire(old);
+    } else {
+        textures_[key] = fresh;
+    }
 }
 
 bool VulkanGsRenderer::UploadReplacement(std::uint64_t id, std::uint32_t format, std::uint32_t width,
@@ -2512,6 +2554,10 @@ void VulkanGsRenderer::ReleaseTexture(std::uint64_t key) {
     Flush();
     Texture texture = found->second;
     textures_.erase(found);
+    Retire(texture);
+}
+
+void VulkanGsRenderer::Retire(Texture texture) {
     texture.replacement = 0;
     // Recorded draws may still sample it: it goes after they have run - into
     // the pool, or away.
@@ -3768,14 +3814,15 @@ std::string GpuProfileReport() {
 }
 
 std::string RendererCounters() {
-    static std::uint64_t last[6] = {};
-    const std::uint64_t now[6] = {g_barriers, g_transitions, g_dispatches, g_draws, g_passes, g_feedback};
-    char text[200];
-    std::snprintf(text, sizeof text, "%llu barriers, %llu transitions, %llu dispatches, %llu draws, %llu passes, %llu feedback copies",
+    static std::uint64_t last[7] = {};
+    const std::uint64_t now[7] = {g_barriers, g_transitions, g_dispatches, g_draws, g_passes, g_feedback, g_uploads_ahead};
+    char text[240];
+    std::snprintf(text, sizeof text, "%llu barriers, %llu transitions, %llu dispatches, %llu draws, %llu passes, %llu feedback copies, %llu uploads ahead",
                   (unsigned long long)(now[0] - last[0]), (unsigned long long)(now[1] - last[1]),
                   (unsigned long long)(now[2] - last[2]), (unsigned long long)(now[3] - last[3]),
-                  (unsigned long long)(now[4] - last[4]), (unsigned long long)(now[5] - last[5]));
-    for (int i = 0; i < 6; ++i) last[i] = now[i];
+                  (unsigned long long)(now[4] - last[4]), (unsigned long long)(now[5] - last[5]),
+                  (unsigned long long)(now[6] - last[6]));
+    for (int i = 0; i < 7; ++i) last[i] = now[i];
     return text;
 }
 
