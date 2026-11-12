@@ -1371,6 +1371,7 @@ SOURCE_FILES = ('patches/display-lock.patch', 'tests/test_display_lock.py') + SO
 SOURCE_FILES = ('tests/test_upper_bits_texture.py',) + SOURCE_FILES
 SOURCE_FILES = ('tests/test_movie_pacing.py',) + SOURCE_FILES
 SOURCE_FILES = ('tests/test_depth_read_latency.py',) + SOURCE_FILES
+SOURCE_FILES = ('tests/test_pass_state.py',) + SOURCE_FILES
 
 
 SOURCE_FILES = ('runtime/gpu/native-plugin/fifo_formats.hpp', 'tests/fifo_formats.cpp', 'tests/native_sound_mixer.cpp', 'tests/test_native_sound_mixer.py', 'tests/test_runtime_patch_sync.py') + SOURCE_FILES

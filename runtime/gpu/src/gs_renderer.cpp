@@ -3192,6 +3192,12 @@ void VulkanGsRenderer::Flush() {
             vkCmdBeginRendering(cmd, &ri);
             open_target_ = t;
             open_depth_ = depth;
+            // Claude 2026-11-12: every state set again in each rendering pass. MoltenVK carries a pass's
+            // pipeline, sets, viewport, scissor and depth state to the next only in part (a Metal render
+            // encoder each), so a pass begun after a copy or an update between passes could draw with what this
+            // cache took to be set: SSX 3 lost the glare, colour grading and HUD of a race frame 100-200 times a
+            // minute in some runs (the HUD bars and the sun "flashing"), none with this.
+            drawn_ = DrawState{g_.recording_id()};
             }
             // ZTST: NEVER, ALWAYS, GEQUAL, GREATER - the larger Z is nearer.
             static const VkCompareOp kCompare[4] = {VK_COMPARE_OP_NEVER, VK_COMPARE_OP_ALWAYS,
