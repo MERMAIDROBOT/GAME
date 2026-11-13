@@ -1,0 +1,204 @@
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,5 +1,6 @@
+ #include "runtime/ps2_pad.h"
+ #include "direction_recovery.hpp"
++#include "stream_pad_input.hpp"
+ #include "raylib.h"
+ #include <cstring>
+ #include <array>
+@@ -273,6 +274,29 @@
+         data[7] = static_cast<uint8_t>(128 + 127 * (int(IsKeyDown(KEY_S)) - int(IsKeyDown(KEY_W))));
+         data[4] = static_cast<uint8_t>(128 + 127 * (int(IsKeyDown(KEY_L)) - int(IsKeyDown(KEY_J))));
+         data[5] = static_cast<uint8_t>(128 + 127 * (int(IsKeyDown(KEY_K)) - int(IsKeyDown(KEY_I))));
++    }
++    // A controller streamed by Sunshine/Moonlight without a virtual HID driver (stream_pad_input.hpp).
++    {
++        static const StreamPad::Ps2Bits bits{PAD_LEFT, PAD_DOWN, PAD_RIGHT, PAD_UP, PAD_START, PAD_R3, PAD_L3, PAD_SELECT,
++                                             PAD_SQUARE, PAD_CROSS, PAD_CIRCLE, PAD_TRIANGLE, PAD_R1, PAD_L1, PAD_R2, PAD_L2};
++        const StreamPad::Snapshot stream = StreamPad::Receiver::instance().take();
++        if (stream.active) {
++            StreamPad::Packet held{}, pressed{};
++            held.buttons = stream.buttons; held.lt = stream.lt; held.rt = stream.rt;
++            pressed.buttons = stream.pressedSince; pressed.lt = stream.ltPeak; pressed.rt = stream.rtPeak;
++            const uint16_t heldMask = StreamPad::buttonsFrom(held, bits);
++            const uint16_t tapMask = uint16_t(StreamPad::buttonsFrom(pressed, bits) & ~heldMask);
++            clearBit(uint16_t(heldMask | tapMask));
++            freshPresses |= tapMask;   // pressed and let go between two samples: latched until the game reads it
++            if (data[6] == kPadStickCenter && data[7] == kPadStickCenter) {
++                data[6] = StreamPad::axis(stream.lsX, false);
++                data[7] = StreamPad::axis(stream.lsY, true);
++            }
++            if (data[4] == kPadStickCenter && data[5] == kPadStickCenter) {
++                data[4] = StreamPad::axis(stream.rsX, false);
++                data[5] = StreamPad::axis(stream.rsY, true);
++            }
++        }
+     }
+     data[2] = static_cast<uint8_t>(btns & 0xFF);
+     data[3] = static_cast<uint8_t>(btns >> 8);
+--- /dev/null
++++ b/ps2xRuntime/src/lib/stream_pad_input.hpp
+@@ -0,0 +1,162 @@
++// PS2 Port Lab: a controller streamed by Sunshine (Moonlight on a phone or tablet) without a virtual HID driver.
++// A patched Sunshine sends each Moonlight controller's state as a 28-byte datagram to a local UNIX socket
++// (~/Library/Application Support/PS2 Port Lab/stream-pad.sock; PS2_PORT_STREAM_PAD_SOCKET overrides it,
++// PS2_PORT_STREAM_PAD=0 turns it off). Controller 0 becomes pad 1 alongside the keyboard and a local controller.
++// Presses that start and end between two pad samples are kept, so quick taps are not lost.
++#pragma once
++#include <array>
++#include <atomic>
++#include <cerrno>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <string>
++#include <thread>
++#if !defined(_WIN32)
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/un.h>
++#include <unistd.h>
++#endif
++
++namespace StreamPad
++{
++    // Moonlight button flags (Sunshine's gamepad_state_t.buttonFlags).
++    constexpr uint32_t kUp = 0x0001u, kDown = 0x0002u, kLeft = 0x0004u, kRight = 0x0008u;
++    constexpr uint32_t kStart = 0x0010u, kBack = 0x0020u, kLeftStick = 0x0040u, kRightStick = 0x0080u;
++    constexpr uint32_t kLeftShoulder = 0x0100u, kRightShoulder = 0x0200u;
++    constexpr uint32_t kA = 0x1000u, kB = 0x2000u, kX = 0x4000u, kY = 0x8000u;
++    constexpr uint32_t kMagic = 0x44415053u; // "SPAD"
++    constexpr uint8_t kTriggerPressed = 64u;
++
++    struct Packet
++    {
++        uint32_t magic;
++        uint16_t version;
++        uint8_t index, active;
++        uint32_t buttons;
++        uint8_t lt, rt;
++        uint16_t reserved;
++        int16_t lsX, lsY, rsX, rsY;
++        uint32_t sequence;
++    };
++    static_assert(sizeof(Packet) == 28, "stream pad packet layout");
++
++    // PS2 pad button bits (active-high here; the pad report is active-low).
++    struct Ps2Bits
++    {
++        uint16_t left, down, right, up, start, r3, l3, select, square, cross, circle, triangle, r1, l1, r2, l2;
++    };
++
++    // Moonlight's Xbox layout onto the DualShock: A/B/X/Y -> Cross/Circle/Square/Triangle, Back -> Select.
++    inline uint16_t buttonsFrom(const Packet &p, const Ps2Bits &b)
++    {
++        uint16_t m = 0;
++        const uint32_t f = p.buttons;
++        if (f & kUp) m |= b.up;
++        if (f & kDown) m |= b.down;
++        if (f & kLeft) m |= b.left;
++        if (f & kRight) m |= b.right;
++        if (f & kStart) m |= b.start;
++        if (f & kBack) m |= b.select;
++        if (f & kLeftStick) m |= b.l3;
++        if (f & kRightStick) m |= b.r3;
++        if (f & kLeftShoulder) m |= b.l1;
++        if (f & kRightShoulder) m |= b.r1;
++        if (f & kA) m |= b.cross;
++        if (f & kB) m |= b.circle;
++        if (f & kX) m |= b.square;
++        if (f & kY) m |= b.triangle;
++        if (p.lt >= kTriggerPressed) m |= b.l2;
++        if (p.rt >= kTriggerPressed) m |= b.r2;
++        return m;
++    }
++
++    // Moonlight sticks are -32768..32767 with Y up positive; the PS2 report is 0..255 with Y down.
++    inline uint8_t axis(int16_t v, bool invert)
++    {
++        int x = (int(v) + 32768) >> 8;
++        if (invert) x = 255 - x;
++        return uint8_t(x < 0 ? 0 : (x > 255 ? 255 : x));
++    }
++
++    struct Snapshot
++    {
++        bool active = false;
++        uint32_t buttons = 0;          // Moonlight flags held now
++        uint32_t pressedSince = 0;     // flags pressed at any time since the last take()
++        uint8_t lt = 0, rt = 0, ltPeak = 0, rtPeak = 0;
++        int16_t lsX = 0, lsY = 0, rsX = 0, rsY = 0;
++    };
++
++    class Receiver
++    {
++    public:
++        static Receiver &instance()
++        {
++            static Receiver receiver;
++            return receiver;
++        }
++        // The state for one pad sample: what is held now, plus what was pressed and let go since the last one.
++        Snapshot take()
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            Snapshot s = state_;
++            state_.pressedSince = state_.buttons;
++            state_.ltPeak = state_.lt;
++            state_.rtPeak = state_.rt;
++            return s;
++        }
++        // Applies one datagram (also the unit-test entry point).
++        void apply(const Packet &p)
++        {
++            if (p.magic != kMagic || p.version != 1u || p.index != 0u) return;
++            std::lock_guard<std::mutex> lock(mutex_);
++            if (!p.active) { state_ = Snapshot{}; return; }
++            state_.active = true;
++            state_.buttons = p.buttons;
++            state_.pressedSince |= p.buttons;
++            state_.lt = p.lt; state_.rt = p.rt;
++            if (p.lt > state_.ltPeak) state_.ltPeak = p.lt;
++            if (p.rt > state_.rtPeak) state_.rtPeak = p.rt;
++            state_.lsX = p.lsX; state_.lsY = p.lsY; state_.rsX = p.rsX; state_.rsY = p.rsY;
++        }
++
++    private:
++        Receiver()
++        {
++#if !defined(_WIN32)
++            const char *off = std::getenv("PS2_PORT_STREAM_PAD");
++            if (off && off[0] == '0' && !off[1]) return;
++            std::string path;
++            if (const char *v = std::getenv("PS2_PORT_STREAM_PAD_SOCKET"); v && *v) path = v;
++            else {
++                const char *home = std::getenv("HOME");
++                if (!home || !*home) return;
++                const std::string dir = std::string(home) + "/Library/Application Support/PS2 Port Lab";
++                ::mkdir(dir.c_str(), 0700);
++                path = dir + "/stream-pad.sock";
++            }
++            sockaddr_un address{};
++            address.sun_family = AF_UNIX;
++            if (path.size() >= sizeof(address.sun_path)) return;
++            std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
++            const int fd = ::socket(AF_UNIX, SOCK_DGRAM, 0);
++            if (fd < 0) return;
++            ::unlink(path.c_str()); // one game reads the streamed controller at a time; the newest takes it over
++            if (::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) { ::close(fd); return; }
++            std::thread([this, fd] {
++                Packet p{};
++                for (;;) {
++                    const ssize_t n = ::recv(fd, &p, sizeof(p), 0);
++                    if (n == ssize_t(sizeof(p))) apply(p);
++                    else if (n < 0 && errno != EINTR) return;
++                }
++            }).detach();
++#endif
++        }
++        std::mutex mutex_;
++        Snapshot state_{};
++    };
++}
