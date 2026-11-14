@@ -1369,6 +1369,7 @@ SOURCE_FILES = ('patches/screenshot-key.patch', 'tests/test_screenshot_key.py') 
 SOURCE_FILES = ('patches/path3-pulse-queue.patch', 'tests/test_path3_pulse_queue.py') + SOURCE_FILES
 SOURCE_FILES = ('patches/display-lock.patch', 'tests/test_display_lock.py') + SOURCE_FILES
 SOURCE_FILES = ('patches/stream-pad.patch', 'tests/test_stream_pad.py') + SOURCE_FILES
+SOURCE_FILES = ('patches/native-sound-display-catchup.patch',) + SOURCE_FILES
 SOURCE_FILES = ('tests/test_upper_bits_texture.py',) + SOURCE_FILES
 SOURCE_FILES = ('tests/test_movie_pacing.py',) + SOURCE_FILES
 SOURCE_FILES = ('tests/test_depth_read_latency.py',) + SOURCE_FILES

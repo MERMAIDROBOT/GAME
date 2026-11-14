@@ -56,6 +56,7 @@ namespace bozo::native::irx
         int32_t startImage(const std::string &name, std::span<const std::string> arguments = {});
         void reset();
         audio::Mixer *advanceTo(uint64_t eeCycle);
+        uint64_t cyclesUntilInputHalf(uint64_t eeCycle) const;
         void writeBuffer(uint32_t address, const uint8_t *data, uint32_t bytes);
         uint32_t allocateBuffer(uint32_t bytes);
         bool freeBuffer(uint32_t address);

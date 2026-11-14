@@ -1,0 +1,104 @@
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -493,6 +493,7 @@
+     bool deliverIopSifCommand(uint8_t *rdram, R5900Context *ctx, uint32_t commandId, const void *packet, size_t packetSize);
+     void notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer);
+     void advanceIopEeCycles(uint64_t eeCycles) noexcept;
++    uint64_t cyclesUntilNativeSoundHalf() const;
+     void resetIop();
+
+     friend class PS2IopTransport;
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -807,6 +807,11 @@
+ {
+     auto scope = m_iopHost->enterCall(nullptr, rdram);
+     m_iopSubsystem->onSifTransfer(transfer);
++}
++
++uint64_t PS2Runtime::cyclesUntilNativeSoundHalf() const
++{
++    return m_nativeSound ? m_nativeSound->cyclesUntilInputHalf() : UINT64_MAX;
+ }
+
+ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -1920,6 +1920,19 @@
+             if (scheduled.event.type == EeEventType::VBlankStart || scheduled.event.type == EeEventType::VBlankEnd)
+             {
+                 uint64_t remaining = scheduled.deadlineCycle > m_eeCycle ? scheduled.deadlineCycle - m_eeCycle : 0u;
++                const uint64_t soundHalf = m_runtime.cyclesUntilNativeSoundHalf();
++                if (soundHalf < remaining)
++                {
++                    // Let the EE process the sound interrupt before advancing through another DMA half.
++                    accountCycles(static_cast<uint32_t>(soundHalf));
++                    // Preserve the original insertion order of the deferred events.
++                    std::lock_guard lock(m_eventMutex);
++                    m_deadlines.insert(m_deadlines.end(),
++                                       std::make_move_iterator(&scheduled),
++                                       std::make_move_iterator(due.data() + due.size()));
++                    updateNextDeadline();
++                    return;
++                }
+                 while (remaining != 0u)
+                 {
+                     const uint32_t step = static_cast<uint32_t>(std::min<uint64_t>(remaining, std::numeric_limits<uint32_t>::max()));
+diff --git a/ps2xRuntime/src/lib/native_sound/ps2_native_sound.h b/ps2xRuntime/src/lib/native_sound/ps2_native_sound.h
+--- a/ps2xRuntime/src/lib/native_sound/ps2_native_sound.h
++++ b/ps2xRuntime/src/lib/native_sound/ps2_native_sound.h
+@@ -33,6 +33,7 @@
+     bool writeIopMemory(uint32_t address, const void *source, size_t size);
+     // EE cycles elapsed: advances native IOP time and hands the mixed PCM to the audio backend.
+     void advanceEeCycles(uint64_t eeCycles);
++    uint64_t cyclesUntilInputHalf() const;
+     // While native sound runs, the SPU2 model's output is not submitted.
+     bool ownsAudio() const;
+
+diff --git a/ps2xRuntime/src/lib/native_sound/ps2_native_sound.cpp b/ps2xRuntime/src/lib/native_sound/ps2_native_sound.cpp
+--- a/ps2xRuntime/src/lib/native_sound/ps2_native_sound.cpp
++++ b/ps2xRuntime/src/lib/native_sound/ps2_native_sound.cpp
+@@ -278,4 +278,10 @@
+     }
+ }
+
++uint64_t PS2NativeSound::cyclesUntilInputHalf() const
++{
++    const auto &p = *m_impl;
++    return ownsAudio() ? p.host->cyclesUntilInputHalf(p.eeCycle) : UINT64_MAX;
++}
++
+ bool PS2NativeSound::ownsAudio() const { return m_impl->host != nullptr && !m_impl->failed; }
+diff --git a/ps2xRuntime/src/lib/native_sound/bozo/include/bozo/native/compiled_libraries.h b/ps2xRuntime/src/lib/native_sound/bozo/include/bozo/native/compiled_libraries.h
+--- a/ps2xRuntime/src/lib/native_sound/bozo/include/bozo/native/compiled_libraries.h
++++ b/ps2xRuntime/src/lib/native_sound/bozo/include/bozo/native/compiled_libraries.h
+@@ -56,6 +56,7 @@
+         int32_t startImage(const std::string &name, std::span<const std::string> arguments = {});
+         void reset();
+         audio::Mixer *advanceTo(uint64_t eeCycle);
++        uint64_t cyclesUntilInputHalf(uint64_t eeCycle) const;
+         void writeBuffer(uint32_t address, const uint8_t *data, uint32_t bytes);
+         uint32_t allocateBuffer(uint32_t bytes);
+         bool freeBuffer(uint32_t address);
+diff --git a/ps2xRuntime/src/lib/native_sound/bozo/src/compiled_libraries.cpp b/ps2xRuntime/src/lib/native_sound/bozo/src/compiled_libraries.cpp
+--- a/ps2xRuntime/src/lib/native_sound/bozo/src/compiled_libraries.cpp
++++ b/ps2xRuntime/src/lib/native_sound/bozo/src/compiled_libraries.cpp
+@@ -1820,6 +1820,15 @@
+         p.syncEe(eeCycle);
+         return &p.mixer;
+     }
++    uint64_t CompiledLibraries::cyclesUntilInputHalf(uint64_t eeCycle) const
++    {
++        const auto &p = *impl_;
++        const uint64_t half = p.mixer.nextInputHalfCycle();
++        if (!p.origin || half == 0)
++            return UINT64_MAX;
++        const uint64_t deadline = p.eeOrigin + half * 8;
++        return deadline > eeCycle ? deadline - eeCycle : 1u;
++    }
+     void CompiledLibraries::writeBuffer(uint32_t address, const uint8_t *data, uint32_t bytes)
+     {
+         impl_->copy(address, data, bytes);

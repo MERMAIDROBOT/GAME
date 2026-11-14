@@ -33,6 +33,7 @@ class PS2NativeSound
     bool writeIopMemory(uint32_t address, const void *source, size_t size);
     // EE cycles elapsed: advances native IOP time and hands the mixed PCM to the audio backend.
     void advanceEeCycles(uint64_t eeCycles);
+    uint64_t cyclesUntilInputHalf() const;
     // While native sound runs, the SPU2 model's output is not submitted.
     bool ownsAudio() const;
 
