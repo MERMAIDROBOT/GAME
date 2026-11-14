@@ -1,5 +1,7 @@
 // Claude 2026-10-20: libclaude-hwgs - ps2-port-engine's GS model + hardware renderer (MIT) behind a small C API for
 // our GS plugin (PS2_PORT_HW_GS=1). Everything here runs on the plugin's single GS worker thread.
+#include <algorithm>
+#include <bitset>
 #include <cstdio>
 #include <chrono>
 #include <atomic>
@@ -18,7 +20,7 @@
 using namespace ps2host;
 namespace ps2host { void RuntimePackForgetAll(); void ClaudeHwScanoutRegister(unsigned,gs::u64); }
 namespace ps2host { gs::u32 GpuCurrentScale(); }
-namespace ps2host { bool ClaudeHwContentStamp(unsigned*,unsigned*,unsigned*,unsigned long long*); bool ClaudeHwFrame(gs::u64 frame, const std::vector<gs::u32> **rgba, gs::u32 *w, gs::u32 *h, gs::u32 *scale); }
+namespace ps2host { const gs::Memory* LatentDepthRead(gs::u32,gs::u32,gs::u32,gs::u32,gs::u32,gs::u32,gs::u32); bool ClaudeHwContentStamp(unsigned*,unsigned*,unsigned*,unsigned long long*); bool ClaudeHwFrame(gs::u64 frame, const std::vector<gs::u32> **rgba, gs::u32 *w, gs::u32 *h, gs::u32 *scale); }
 static bool g_started = false;
 // Claude 2026-10-25: GS input recorder for offline replay (hw_replay, PGSCAP2). PS2_PORT_HW_GS_RECORD=<file>: armed;
 // recording starts when <file>.start exists (checked once a displayed frame) with a Reset record (all 4 MB, the GPU's
@@ -133,6 +135,9 @@ __attribute__((visibility("default"))) int hwgs_start(unsigned scale, char *erro
     std::string e;
     if (!StartGpuRenderer(&e, GpuMode::Primary, false)) { std::snprintf(error, errorSize, "%s", e.c_str()); return 0; }
     GpuSetScale(scale ? scale : 2u);
+    // hwgs_read_fifo syncs the blocks a local-to-host read reads, no more (PS2_PORT_HW_GS_EXACT_READ=0: the rows too).
+    static const bool exact = [] { const char *e = std::getenv("PS2_PORT_HW_GS_EXACT_READ"); return !(e && e[0] == '0'); }();
+    gs::TheGs().exact_read_sync = exact;
     g_started = true;
     return 1;
 }
@@ -238,12 +243,40 @@ __attribute__((visibility("default"))) size_t hwgs_read_fifo(void *out, size_t b
     const gs::u32 sbp = gs::u32(bb & 0x3FFF), sbw = gs::u32((bb >> 16) & 0x3F), spsm = gs::u32((bb >> 24) & 0x3F);
     const gs::u32 sx = gs::u32(pos & 0x7FF), sy = gs::u32((pos >> 16) & 0x7FF);
     const gs::u32 w = gs::u32(reg & 0xFFF), h = gs::u32((reg >> 32) & 0xFFF);
-    const gs::u32 bpp = spsm == 0x00 ? 4 : spsm == 0x01 ? 3 : (spsm == 0x02 || spsm == 0x0A) ? 2 : spsm == 0x13 ? 1 : 0;
+    const gs::u32 bpp = (spsm == 0x00 || spsm == 0x30) ? 4 : (spsm == 0x01 || spsm == 0x31) ? 3 : (spsm == 0x02 || spsm == 0x0A) ? 2 : spsm == 0x13 ? 1 : 0; // Z32/Z24 read as CT32/CT24 (fifo_formats.hpp)
     const size_t rowBytes = size_t(w) * (bpp ? bpp : 1);
     size_t offset = size_t(g.LocalReadOffset(gs::u32(rowBytes)));
     static const bool fifo_trace=std::getenv("PS2_PORT_FIFO_TRACE")!=nullptr;
     if(fifo_trace) std::fprintf(stderr,"[fifo cursor] read offset=%zu bytes=%zu row=%zu\n",offset,bytes,rowBytes);
-    if (offset == 0 && g.on_memory) g.on_memory(0, 16384, false);
+    // A small depth read the GPU holds: from its earlier copy (PS2_PORT_HW_GS_ZREAD_LATENCY), nothing waiting.
+    static const gs::Memory* latent = nullptr;
+    if (offset == 0) latent = dir == 1 ? ps2host::LatentDepthRead(sbp, sbw, spsm, sx, sy, w, h) : nullptr;
+    const gs::Memory& source = latent ? *latent : g.memory;
+    if (offset == 0 && g.on_memory && !latent) {
+        if (dir == 1 && bpp >= 3 && w && h) {
+            // CT32/24 and Z32/24 use 8x8 blocks, including the packed 24-bit FIFO formats.
+            // Resolve physical blocks through the GS swizzle so VRAM wrapping stays correct.
+            std::bitset<16384> seen;
+            std::vector<gs::u32> blocks;
+            for (gs::u32 y = sy & ~7u; y < sy + h; y += 8)
+                for (gs::u32 x = sx & ~7u; x < sx + w; x += 8) {
+                    gs::u32 nibble = 0;
+                    const auto block = gs::Memory::Address(sbp, sbw, x, y, spsm, &nibble) / 256;
+                    if (!seen.test(block)) {
+                        seen.set(block);
+                        blocks.push_back(block);
+                    }
+                }
+            std::sort(blocks.begin(), blocks.end());
+            for (size_t first = 0, next = 0; first < blocks.size(); first = next) {
+                for (next = first + 1; next < blocks.size() && blocks[next] == blocks[next - 1] + 1; ++next) {}
+                g.on_memory(blocks[first], blocks[next - 1] + 1, false);
+            }
+            if (fifo_trace) std::fprintf(stderr, "[fifo sync] source blocks=%zu\n", blocks.size());
+        } else {
+            g.on_memory(0, 16384, false);
+        }
+    }
     auto *o = static_cast<unsigned char *>(out);
     std::memset(o, 0, bytes);
     static int warned = 0;
@@ -253,7 +286,7 @@ __attribute__((visibility("default"))) size_t hwgs_read_fifo(void *out, size_t b
     {
         const size_t at = offset + i, px = at / bpp; const unsigned byte = unsigned(at % bpp);
         const gs::u32 x = gs::u32(px % w), y = gs::u32(px / w);
-        const gs::u32 v = g.memory.Read(sbp, sbw, sx + x, sy + y, spsm);
+        const gs::u32 v = source.Read(sbp, sbw, sx + x, sy + y, spsm);
         o[i] = (unsigned char)(v >> (8 * byte));
     }
     static int told = 0;

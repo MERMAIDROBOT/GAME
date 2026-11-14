@@ -341,7 +341,7 @@ void Gs::WriteRegister(u32 address, u64 value) {
                 if (trxdir_ == 0 || trxdir_ == 2)       // into local memory
                     Touch(Bits(bitbltbuf_, 32, 14), Bits(bitbltbuf_, 48, 6), Bits(bitbltbuf_, 56, 6),
                           Bits(trxpos_, 32, 11), Bits(trxpos_, 48, 11), w, h, true);
-                if (trxdir_ == 1 || trxdir_ == 2)       // out of it
+                if ((trxdir_ == 1 && !exact_read_sync) || trxdir_ == 2)       // out of it
                     Touch(Bits(bitbltbuf_, 0, 14), Bits(bitbltbuf_, 16, 6), Bits(bitbltbuf_, 24, 6),
                           Bits(trxpos_, 0, 11), Bits(trxpos_, 16, 11), w, h, false);
             }
@@ -467,9 +467,14 @@ void Gs::LoadClut(u64 tex0) {
     Finish();                                   // the CLUT may have been drawn
     ++clut_loads_;
     if (on_clut_load && on_clut_load(tex0, texa_)) return;
-    if (on_memory) on_memory(cbp, cbp + 8, false);
-    auto clut = std::make_shared<std::array<u32, 256>>(*clut_);
     const bool eight = psm == PSMT8 || psm == PSMT8H;
+    // Claude 2026-11-11: the blocks the CLUT is read from - a 16x16 (eight-bit) or 8x2 (four-bit) CSM1 table is in
+    // the first four blocks or the first one at CBP; CSM2 reads a row of a CT16 buffer (the generous eight). Eight
+    // for every load brought back GPU-drawn blocks the CLUT never reads: SSX 3 loads a four-bit CLUT at CBP 0
+    // beside its frame buffer's first blocks, and each load waited for the GPU (~50 a second, 7-12 ms each).
+    const u32 clut_blocks = Bits(tex0, 55, 1) ? 8u : eight ? 4u : 1u;
+    if (on_memory) on_memory(cbp, cbp + clut_blocks, false);
+    auto clut = std::make_shared<std::array<u32, 256>>(*clut_);
     const u32 count = eight ? 256 : 16;
     // CSM2 (TEX0 bit 55): the CLUT is one row of a CT16 buffer, entry i at
     // (TEXCLUT COU * 16 + i, COV) in a buffer CBW wide - no swizzle, no CSA.
@@ -533,8 +538,10 @@ void Gs::Touch(u32 bp, u32 bw, u32 psm, u32 x, u32 y, u32 w, u32 h, bool write) 
     (void)x;
     // Whole rows of pages: buffers are laid out a page (8 KB, 32 blocks) at a
     // time, rows of FBW pages, 32 to 128 pixels tall by format.
-    const u32 page_rows = (psm == PSMCT32 || psm == PSMCT24 || psm == PSMZ32 || psm == PSMZ24) ? 32
-                        : (psm == PSMT4) ? 128 : 64;
+    // High-index formats occupy the high byte or nibble of a CT32 pixel.
+    const bool layout32 = psm == PSMCT32 || psm == PSMCT24 || psm == PSMZ32 || psm == PSMZ24 ||
+                          psm == PSMT8H || psm == PSMT4HL || psm == PSMT4HH;
+    const u32 page_rows = layout32 ? 32 : psm == PSMT4 ? 128 : 64;
     const u32 pages_wide = std::max(1u, (psm == PSMT8 || psm == PSMT4) ? bw / 2 : bw);
     const u32 rows = (y + h + page_rows - 1) / page_rows;
     const u32 begin = bp;
@@ -542,11 +549,13 @@ void Gs::Touch(u32 bp, u32 bw, u32 psm, u32 x, u32 y, u32 w, u32 h, bool write) 
     // Written, which blocks the rectangle covers, whole or in part, a block's
     // pixels at a time (8x8 32-bit, 16x8 16-bit, 16x16 8-bit, 32x16 4-bit):
     // only those in part need what was there (with --gpu, brought back from
-    // the GPU, which waits for it). Formats that write part of a pixel
-    // (8H, 4HL, 4HH), and a rectangle past the buffer's width, as before.
+    // the GPU, which waits for it). A rectangle past the buffer's width, as before.
     u32 cw = 0, ch = 0;
     switch (psm) {
         case PSMCT32: case PSMCT24: case PSMZ32: case PSMZ24: cw = 8; ch = 8; break;
+        // The upper-bits formats share CT32's 8x8 blocks; they write only bits 24-31 of
+        // each word, which the GPU side merges (SyncWrite) instead of replacing blocks.
+        case PSMT8H: case PSMT4HL: case PSMT4HH: cw = 8; ch = 8; break;
         case PSMCT16: case PSMCT16S: case PSMZ16: case PSMZ16S: cw = 16; ch = 8; break;
         case PSMT8: cw = 16; ch = 16; break;
         case PSMT4: cw = 32; ch = 16; break;

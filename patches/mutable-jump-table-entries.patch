@@ -1,15 +1,50 @@
 --- a/ps2xRecomp/src/lib/control_flow_analyzer.cpp
 +++ b/ps2xRecomp/src/lib/control_flow_analyzer.cpp
-@@ -403,7 +403,11 @@
+@@ -200,6 +200,10 @@
+         if (hasIndirectRegisterJump)
+         {
+             bool needsIndirectFallback = false;
++            // A JR with no recognized table can go anywhere in the function: every decoded instruction is an
++            // entry. A recognized table's JR can only reach where the compiler placed code to jump to - the
++            // starts of blocks - even if the game rewrites the table at run time (mutable tables).
++            bool unresolvedIndirectJump = false;
+             for (const Instruction *jrInst : indirectJumps)
+             {
+                 if (jrInst->function == SPECIAL_JALR)
+@@ -403,7 +407,16 @@
                          }
                      }
                  }
--                if (!foundTable)
 +                // A recognized static table does not prove the complete set of
 +                // runtime JR destinations. Writable/relocated tables can select
 +                // another decoded block in this function. Keep native reentry
-+                // coverage even while retaining the fast switch for known cases.
-+                if (!foundTable || jrInst->function == SPECIAL_JR)
++                // coverage for block starts while retaining the fast switch for known cases.
+                 if (!foundTable)
++                {
++                    needsIndirectFallback = true;
++                    unresolvedIndirectJump = true;
++                }
++                else if (jrInst->function == SPECIAL_JR)
                  {
                      needsIndirectFallback = true;
                  }
+@@ -422,9 +435,18 @@
+                     m_reporter->recordIndirectFallbackPromotion(function.name, jumpAddresses, instructionAddresses.size());
+                 }
+ 
++                // Block starts: the function's start, every branch, jump and table target already found, and
++                // the instruction after each branch's or jump's delay slot. Every instruction only where a JR's
++                // destinations are unknown: labelling them all costs a translated function its speed.
++                std::unordered_set<uint32_t> blockStarts(result.entryPoints.begin(), result.entryPoints.end());
++                blockStarts.insert(function.start);
++                for (const auto &inst : instructions)
++                    if (inst.hasDelaySlot)
++                        blockStarts.insert(inst.address + 8u);
+                 for (uint32_t addr : instructionAddresses)
+                 {
+-                    if (addr >= function.start && addr < function.end)
++                    if (addr >= function.start && addr < function.end &&
++                        (unresolvedIndirectJump || blockStarts.contains(addr)))
+                     {
+                         result.entryPoints.insert(addr);
+                         // Keep labels and runtime registration for unresolved JR/JALR targets

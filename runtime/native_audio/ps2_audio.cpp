@@ -94,6 +94,14 @@ struct PS2AudioBackend::Impl
     // of settling below it (proportional alone holds a 1%-slow producer at half the target, too little for a stall).
     // PS2_PORT_AUDIO_DRIFT_PI=0 restores proportional-only.
     double driftTrim = 0.0;
+    // Claude 2026-11-08: the producer submits in bursts (one per guest frame or mixer slice), so the instantaneous queue
+    // swings by thousands of samples within a frame. Steering the read step from it frequency-modulates the output at
+    // the burst rate, heard as fuzz and a robotic voice. The step follows a ~0.5 s average of the queue instead.
+    static constexpr double kQueueAverageRate = 1.0 / 24000.0;
+    double queueAverage = double(kTargetSamples);
+    double minStep = 2.0, maxStep = 0.0;
+    std::FILE *outputDump = nullptr;
+    uint32_t outputDumpBytes = 0u;
     std::array<int16_t, kRingSamples> ring{};
     size_t read = 0u;
     size_t queued = 0u;
@@ -136,6 +144,7 @@ struct PS2AudioBackend::Impl
         {
             owner->primed = true;
             owner->everPrimed = true;
+            owner->queueAverage = double(owner->queued);
             owner->fadePosition = 0;
             owner->fadeSource = owner->lastOutput;
         }
@@ -144,6 +153,8 @@ struct PS2AudioBackend::Impl
             if (owner->primed && owner->queued < 2u)
             {
                 owner->primed = false;
+                owner->readPhase = 0.0;
+                owner->driftTrim = 0.0;
                 ++owner->underruns;
                 owner->gapRemaining = kFadeFrames;
                 owner->gapSource = owner->lastOutput;
@@ -152,10 +163,13 @@ struct PS2AudioBackend::Impl
             {
                 // Linear interpolation between the frame at read and the next, advancing by step frames: step > 1
                 // drains a queue above target, < 1 lets one below refill (at most 2%, gradual).
-                const double error = (double(owner->queued) - double(kTargetSamples)) / double(kTargetSamples);
+                owner->queueAverage += (double(owner->queued) - owner->queueAverage) * kQueueAverageRate;
+                const double error = (owner->queueAverage - double(kTargetSamples)) / double(kTargetSamples);
                 const double proportional = std::clamp(error, -1.0, 1.0) * 0.02;
                 const double correction = proportional + owner->driftTrim;
                 const double step = 1.0 + std::clamp(correction, -0.02, 0.02);
+                owner->minStep = std::min(owner->minStep, step);
+                owner->maxStep = std::max(owner->maxStep, step);
                 // integrate over ~4 s of output; hold the trim while the total is saturated (anti-windup)
                 if (driftPi && std::fabs(correction) < 0.02)
                     owner->driftTrim = std::clamp(owner->driftTrim + proportional / (4.0 * 48000.0), -0.02, 0.02);
@@ -170,7 +184,7 @@ struct PS2AudioBackend::Impl
                     owner->lastOutput[channel] = static_cast<int16_t>((sample * fade + owner->fadeSource[channel] * (kFadeFrames - fade)) / kFadeFrames);
                 }
                 owner->readPhase += step;
-                while (owner->readPhase >= 1.0 && owner->queued >= 4u)
+                while (owner->readPhase >= 1.0 && owner->queued >= 2u)
                 {
                     owner->readPhase -= 1.0;
                     owner->read = (owner->read + 2u) % kRingSamples;
@@ -179,6 +193,8 @@ struct PS2AudioBackend::Impl
             }
             else if (owner->primed)
             {
+                // With no lookahead, consume the final frame without interpolation.
+                owner->readPhase = 0.0;
                 owner->fadePosition = std::min(owner->fadePosition + 1, kFadeFrames);
                 const int32_t fade = owner->fadePosition;
                 for (size_t channel = 0u; channel < 2u; ++channel)
@@ -199,6 +215,9 @@ struct PS2AudioBackend::Impl
             output[frame * 2u] = owner->lastOutput[0];
             output[frame * 2u + 1u] = owner->lastOutput[1];
         }
+        // PS2X_AUDIO_DUMP_OUTPUT: raw 48 kHz stereo s16 exactly as handed to the device (after drift and fades).
+        if (owner->outputDump && requested * sizeof(int16_t) <= 0xFFFFFF00u - owner->outputDumpBytes)
+            owner->outputDumpBytes += uint32_t(std::fwrite(output, sizeof(int16_t), requested, owner->outputDump) * sizeof(int16_t));
     }
 
     void finishDump()
@@ -273,6 +292,8 @@ void PS2AudioBackend::setAudioReady(bool ready)
             SetAudioStreamCallback(m_impl->stream, &Impl::audioCallback);
             PlayAudioStream(m_impl->stream);
         }
+        if (const char *outputPath = std::getenv("PS2X_AUDIO_DUMP_OUTPUT"); outputPath && *outputPath)
+            m_impl->outputDump = std::fopen(outputPath, "wb");
         const char *path = std::getenv("PS2X_AUDIO_DUMP");
         if (path && *path)
         {
@@ -295,6 +316,11 @@ void PS2AudioBackend::setAudioReady(bool ready)
             Impl::streamOwner = nullptr;
         }
         m_impl->finishDump();
+        if (m_impl->outputDump)
+        {
+            std::fclose(m_impl->outputDump);
+            m_impl->outputDump = nullptr;
+        }
         resetPcm();
     }
 #endif
@@ -305,6 +331,9 @@ void PS2AudioBackend::resetPcm()
     std::lock_guard<std::mutex> lock(m_impl->pcmMutex);
     m_impl->read = 0u;
     m_impl->queued = 0u;
+    m_impl->readPhase = 0.0;
+    m_impl->driftTrim = 0.0;
+    m_impl->queueAverage = double(Impl::kTargetSamples);
     m_impl->primed = false;
     m_impl->fadePosition = 0;
     m_impl->gapRemaining = 0;
@@ -340,6 +369,7 @@ void PS2AudioBackend::submitPcm(std::span<const int16_t> samples)
         m_impl->read = (m_impl->read + drop) % Impl::kRingSamples;
         m_impl->queued -= drop;
         m_impl->droppedFrames += drop / 2u;
+        m_impl->readPhase = 0.0;
         m_impl->fadePosition = 0;
         m_impl->fadeSource = m_impl->lastOutput;
     }
@@ -353,10 +383,13 @@ void PS2AudioBackend::submitPcm(std::span<const int16_t> samples)
         const double elapsed = std::chrono::duration<double>(now - m_impl->statsStart).count();
         if (elapsed >= 2.0)
         {
-            std::fprintf(stderr, "[audio] %.0f produced/s, %.0f requested/s, %.2f ms queued, %llu missing frames, %llu underruns, %llu dropped frames\n",
+            std::fprintf(stderr, "[audio] %.0f produced/s, %.0f requested/s, %.2f ms queued, %llu missing frames, %llu underruns, %llu dropped frames, step %.5f..%.5f\n",
                          m_impl->producedFrames / elapsed, m_impl->requestedFrames / elapsed,
                          m_impl->queued / 96.0, static_cast<unsigned long long>(m_impl->missingFrames),
-                         static_cast<unsigned long long>(m_impl->underruns), static_cast<unsigned long long>(m_impl->droppedFrames));
+                         static_cast<unsigned long long>(m_impl->underruns), static_cast<unsigned long long>(m_impl->droppedFrames),
+                         m_impl->minStep <= m_impl->maxStep ? m_impl->minStep : 1.0, m_impl->maxStep >= m_impl->minStep ? m_impl->maxStep : 1.0);
+            m_impl->minStep = 2.0;
+            m_impl->maxStep = 0.0;
             m_impl->producedFrames = 0u;
             m_impl->requestedFrames = 0u;
             m_impl->missingFrames = 0u;

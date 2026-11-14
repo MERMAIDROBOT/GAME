@@ -2,6 +2,8 @@
 
 Click the game window to give it keyboard focus. The guide is visible by default.
 F1 hides or restores it; on some Mac keyboards use Fn + F1.
+F12 (Fn + F12 on some keyboards) saves the picture on screen as a PNG in
+`~/Pictures/PS2 Port Lab Screenshots/`.
 
 | PS2 control | Keyboard / mouse |
 | --- | --- |

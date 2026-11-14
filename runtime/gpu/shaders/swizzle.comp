@@ -32,7 +32,8 @@ layout(push_constant) uniform Params {
     uint depth;         // the linear side is depth (float)
     uint row0;          // the image's row that linear row 0 holds
     uint scale;         // the image's pixels to a GS pixel, each way (the internal resolution)
-    uint keep_colour;   // memory -> image, 32-bit: the square's colour kept where memory differs in alpha alone
+    uint keep_colour;   // bit 0, memory -> image, 32-bit: the square's colour kept where memory differs in alpha
+                        // alone; bit 1 (SUBK): the square's first sub-pixel is the GS pixel, not its middle
 } p;
 
 #include "gs_address.glsl"
@@ -70,16 +71,20 @@ void main() {
     // - left the square's first one out, and its column stale).
     const uint k = specialized_scale == 0u ? max(p.scale, 1u) : specialized_scale;
     const uint li = (y * k) * p.stride + x * k;
-    const uint mid = li + (k / 2u) * p.stride + k / 2u;
+    // SUBK (keep_colour bit 1): with the sub-pixel mapping, vertices are placed so that a GS pixel's sample
+    // point is its square's first sub-pixel (gpu_bridge.cpp's Convert: +0.5/k, not +0.5), so that is the
+    // one taken to memory. Without it the write-back was half a GS pixel off whatever was drawn.
+    const uint sub = (p.keep_colour & 2u) != 0u ? 0u : k / 2u;
+    const uint mid = li + sub * p.stride + sub;
 #if defined(IMAGE) || defined(DEPTH_IMAGE)
     const ivec2 at = ivec2(x * k, (y + p.row0) * k);
 #endif
     const bool z24 = Format() == PSMCT24 || Format() == PSMZ24;
     if (direction == 1u) {
 #ifdef IMAGE
-        uint v = packUnorm4x8(imageLoad(target, at + ivec2(k / 2u)));
+        uint v = packUnorm4x8(imageLoad(target, at + ivec2(sub)));
 #elif defined(DEPTH_IMAGE)
-        uint v = floatBitsToUint(texelFetch(depth_image, at + ivec2(k / 2u), 0).r);
+        uint v = floatBitsToUint(texelFetch(depth_image, at + ivec2(sub), 0).r);
 #else
         uint v = lin[mid];
 #endif
@@ -87,9 +92,9 @@ void main() {
         if (Is16()) {
             if(paired) {
 #ifdef IMAGE
-                uint other=packUnorm4x8(imageLoad(target,at+ivec2(8u*k+k/2u,k/2u)));
+                uint other=packUnorm4x8(imageLoad(target,at+ivec2(8u*k+sub,sub)));
 #elif defined(DEPTH_IMAGE)
-                uint other=floatBitsToUint(texelFetch(depth_image,at+ivec2(8u*k+k/2u,k/2u),0).r);
+                uint other=floatBitsToUint(texelFetch(depth_image,at+ivec2(8u*k+sub,sub),0).r);
 #else
                 uint other=lin[mid+8u*k];
 #endif
@@ -122,8 +127,8 @@ void main() {
 #ifdef IMAGE
         // Memory differing from the square's middle (what went to memory) in
         // alpha alone: each pixel keeps its colour, takes memory's alpha.
-        const bool keep = p.keep_colour == 1u && k > 1u && !Is16() && !z24 &&
-                          ((packUnorm4x8(imageLoad(target, at + ivec2(k / 2u))) ^ value) & 0xFFFFFFu) == 0u;
+        const bool keep = (p.keep_colour & 1u) != 0u && k > 1u && !Is16() && !z24 &&
+                          ((packUnorm4x8(imageLoad(target, at + ivec2(sub))) ^ value) & 0xFFFFFFu) == 0u;
         for (uint dy = 0u; dy < k; ++dy)
             for (uint dx = 0u; dx < k; ++dx) {
                 const ivec2 xy = at + ivec2(dx, dy);

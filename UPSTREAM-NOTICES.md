@@ -74,3 +74,10 @@ informed by GT4 decomp's `tools/dedup.py` and `tools/crossgame.py` at
 `ec4261f8572d377f13de6f37d3825a95051075af`. No GT4 source recovery, game code,
 asset or compiler binary is bundled. A candidate hash does not prove equivalence;
 target original/native comparisons remain mandatory.
+
+## Native sound (BozoEngine)
+
+`runtime/native_sound/bozo/` vendors BozoEngine's native IOP host, libsd and mixer under its MIT licence
+(`runtime/native_sound/bozo/LICENSE`, pinned in `UPSTREAM_COMMIT`). Local edits are marked "PS2 Port Lab change".
+The mixer's voice interpolation uses the SPU2's 4-tap Gaussian filter, with weights generated as in PS2Recomp's
+SPU2 model (`ps2xIOP/src/emulator/devices/iop_spu2.cpp`, GPL) instead of upstream's Catmull-Rom curve.

@@ -25,6 +25,9 @@ int main()
     expect(gsHostFrameStride(1280, 896, 1280u * 896u * 4u) == 1280u * 4u, "packed 2x movie frame");
     expect(gsHostFrameStride(2560, 1792, 2560u * 1792u * 4u) == 2560u * 4u, "packed 4x movie frame");
     expect(gsHostFrameStride(512, 448, 640u * 480u * 4u) == 640u * 4u, "padded software frame");
+    // The CPU backend's buffer is 640x512; a 512x448 interlaced title must not be rejected (was a magenta screen).
+    expect(gsHostFrameStride(512, 448, 640u * 512u * 4u) == 640u * 4u, "padded CPU-backend 640x512 frame");
+    expect(gsHostFrameStride(640, 513, 640u * 512u * 4u) == 0, "taller than the CPU buffer rejected");
     expect(gsHostFrameStride(1024, 896, 640u * 480u * 4u) == 0, "mismatched bytes rejected");
     expect(gsHostFrameStride(0, 448, 0) == 0 && gsHostFrameStride(5000, 10, 5000u * 10u * 4u) == 0, "bounds");
 

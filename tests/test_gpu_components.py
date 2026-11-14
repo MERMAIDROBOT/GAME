@@ -22,3 +22,13 @@ class GpuWorker(unittest.TestCase):
             run=subprocess.run([str(out)],env=env,capture_output=True,text=True,timeout=30)
             self.assertEqual(run.returncode,0,run.stdout+run.stderr)
             self.assertIn('1000 draws preserved',run.stdout)
+
+
+class Ct24DestinationAlpha(unittest.TestCase):
+    def test_ct24_target_blends_by_unit_alpha(self):
+        # GS: a PSMCT24 frame has no stored alpha, so C = Ad reads 0x80 (1.0).
+        source = (Path(__file__).resolve().parents[1] / 'runtime/gpu/host-adapter/gpu_bridge.cpp').read_text()
+        rule = source[source.index('state.fix = Bits(c.alpha, 32, 8);'):source.index('state.pabe = call.pabe;')]
+        self.assertIn('state.psm == gs::PSMCT24 && state.c == ps2gpu::BlendAlpha::Dest', rule)
+        self.assertIn('state.c = ps2gpu::BlendAlpha::Fix', rule)
+        self.assertIn('state.fix = 0x80', rule)

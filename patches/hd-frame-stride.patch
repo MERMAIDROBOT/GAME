@@ -3,13 +3,14 @@ new file mode 100644
 index 0000000..d3c91b5
 --- /dev/null
 +++ b/ps2xRuntime/include/runtime/gs/gs_frame_layout.h
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,19 @@
 +#pragma once
 +#include <cstddef>
 +#include <cstdint>
 +
 +// Row stride of a latched host frame: a GPU renderer delivers packed RGBA at its own size (for example 1024x896
-+// at 2x); the software renderer pads to the 640x480 display buffer. 0 when the bytes fit neither layout.
++// at 2x); the software renderer pads to its 640-wide display buffer, 480 rows on the window path and 512 rows
++// in the CPU backend (448-line interlaced titles use the latter). 0 when the bytes fit no layout.
 +inline size_t gsHostFrameStride(uint32_t width, uint32_t height, size_t bytes)
 +{
 +    if (!width || !height || width > 4096 || height > 4096)
@@ -17,6 +18,8 @@ index 0000000..d3c91b5
 +    if (bytes == size_t(width) * height * 4)
 +        return size_t(width) * 4;
 +    if (width <= 640 && height <= 480 && bytes == size_t(640) * 480 * 4)
++        return size_t(640) * 4;
++    if (width <= 640 && height <= 512 && bytes == size_t(640) * 512 * 4)
 +        return size_t(640) * 4;
 +    return 0;
 +}

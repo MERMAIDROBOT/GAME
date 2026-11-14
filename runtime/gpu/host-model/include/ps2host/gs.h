@@ -166,6 +166,11 @@ public:
        loads, the displayed picture. */
     bool rasterize = true;
     std::function<void(u32 begin, u32 end, bool write)> on_memory;
+    /* Claude 2026-11-11: the reader of a local-to-host transfer (TRXDIR 1) brings back exactly the blocks it reads
+       (hwgs_read_fifo): the model does not sync the rectangle's whole rows when TRXDIR is written. Those rows waited
+       for everything the GPU had queued - SSX 3's 16x8 depth reads at its suns and lights synced 256-512 blocks,
+       7-12 ms each. */
+    bool exact_read_sync = false;
     /* An image transfer about to write blocks [begin, end), when set (else
        on_memory): cover[i] for block begin + i - 0 not written, 1 written in
        part, 2 written whole. A block written whole needs nothing of what was

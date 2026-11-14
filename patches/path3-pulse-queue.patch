@@ -1,0 +1,211 @@
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index be6f885..b1abcd0 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -426,6 +426,7 @@ public:
+     std::vector<uint8_t> m_vif1DeferredData;
+     bool m_vif1DmaAwaitingCompletion = false;
+     std::vector<std::vector<uint8_t>> m_path3MaskedFifo;
++    size_t m_path3MaskedHead = 0;  // bytes of m_path3MaskedFifo.front() already released
+ 
+     struct PendingTransfer
+     {
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index c28e288..8ae43d4 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -340,6 +340,7 @@ bool PS2Memory::initialize(size_t ramSize)
+     m_codeRegions.clear();
+     m_path3Masked = false;
+     m_path3MaskedFifo.clear();
++    m_path3MaskedHead = 0;
+     m_vif1DeferredData.clear();
+     m_vif1DmaAwaitingCompletion = false;
+     m_vif1PendingPath2ImageQwc = 0u;
+@@ -2190,12 +2191,15 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
+             m_gifPacketCallback(packetData, packetSize);
+     };
+ 
+-    for (const auto &packet : m_path3MaskedFifo)
++    for (size_t i = 0; i < m_path3MaskedFifo.size(); ++i)
+     {
+-        if (packet.size() >= 16u)
+-            emit(packet.data(), static_cast<uint32_t>(packet.size()));
++        const auto &packet = m_path3MaskedFifo[i];
++        const size_t head = i == 0u ? std::min(m_path3MaskedHead, packet.size()) : 0u;
++        if (packet.size() - head >= 16u)
++            emit(packet.data() + head, static_cast<uint32_t>(packet.size() - head));
+     }
+     m_path3MaskedFifo.clear();
++    m_path3MaskedHead = 0;
+ 
+     if (m_gifArbiter && drainImmediately)
+         m_gifArbiter->drain();
+@@ -2216,17 +2220,28 @@ void PS2Memory::releaseOneMaskedPath3Packet()
+     if (m_path3Masked || m_path3MaskedFifo.empty())
+         return;
+ 
+-    std::vector<uint8_t> queued;
+-    for (const auto &chunk : m_path3MaskedFifo)
+-        queued.insert(queued.end(), chunk.begin(), chunk.end());
+-
+-    // Walk GIF tags up to and including the first one with EOP.
+-    size_t offset = 0;
+-    size_t packetEnd = 0;
+-    while (offset + 16u <= queued.size())
++    // Walk GIF tags up to and including the first one with EOP, in place. The queue is
++    // consumed from a read head: copying the whole remainder for every pulse made a large
++    // masked upload cost O(bytes x packets) (SSX 3 races spent ~25% of the EE thread here).
++    size_t chunk = 0u;
++    size_t offset = m_path3MaskedHead;
++    auto normalize = [&]()
++    {
++        while (chunk < m_path3MaskedFifo.size() && offset >= m_path3MaskedFifo[chunk].size())
++        {
++            offset -= m_path3MaskedFifo[chunk].size();
++            ++chunk;
++        }
++    };
++    bool found = false;
++    normalize();
++    while (chunk < m_path3MaskedFifo.size())
+     {
++        const auto &bytes = m_path3MaskedFifo[chunk];
++        if (offset + 16u > bytes.size())
++            break; // tag split across chunks or truncated: treat as the open packet
+         uint64_t tag = 0;
+-        std::memcpy(&tag, queued.data() + offset, sizeof(tag));
++        std::memcpy(&tag, bytes.data() + offset, sizeof(tag));
+         const uint64_t nloop = tag & 0x7FFFu;
+         const bool eop = (tag & 0x8000u) != 0u;
+         const uint32_t flg = static_cast<uint32_t>((tag >> 58) & 0x3u);
+@@ -2241,30 +2256,73 @@ void PS2Memory::releaseOneMaskedPath3Packet()
+         offset += 16u + static_cast<size_t>(dataQw) * 16u;
+         if (eop)
+         {
+-            packetEnd = offset;
++            found = true;
+             break;
+         }
++        normalize();
+     }
+ 
+-    m_path3MaskedFifo.clear();
+-    if (packetEnd == 0u || packetEnd >= queued.size())
++    // Packet end must lie inside the queue, before its last byte.
++    bool endsInside = false;
++    if (found)
++    {
++        size_t c = chunk, o = offset;
++        while (c < m_path3MaskedFifo.size() && o > m_path3MaskedFifo[c].size())
++        {
++            o -= m_path3MaskedFifo[c].size();
++            ++c;
++        }
++        if (c < m_path3MaskedFifo.size())
++        {
++            chunk = c;
++            offset = o;
++            endsInside = !(c + 1u == m_path3MaskedFifo.size() && o == m_path3MaskedFifo[c].size());
++        }
++    }
++    if (!endsInside)
+     {
+         // No complete packet boundary inside the queue: the open packet completes.
+-        m_path3MaskedFifo.push_back(std::move(queued));
+         flushMaskedPath3Packets();
+         return;
+     }
+ 
++    std::vector<uint8_t> spanned;
++    const uint8_t *packetData = nullptr;
++    size_t packetSize = 0u;
++    if (chunk == 0u)
++    {
++        packetData = m_path3MaskedFifo[0].data() + m_path3MaskedHead;
++        packetSize = offset - m_path3MaskedHead;
++    }
++    else
++    {
++        spanned.insert(spanned.end(), m_path3MaskedFifo[0].begin() + static_cast<std::ptrdiff_t>(m_path3MaskedHead),
++                       m_path3MaskedFifo[0].end());
++        for (size_t i = 1u; i < chunk; ++i)
++            spanned.insert(spanned.end(), m_path3MaskedFifo[i].begin(), m_path3MaskedFifo[i].end());
++        spanned.insert(spanned.end(), m_path3MaskedFifo[chunk].begin(),
++                       m_path3MaskedFifo[chunk].begin() + static_cast<std::ptrdiff_t>(offset));
++        packetData = spanned.data();
++        packetSize = spanned.size();
++    }
++
+     if (m_gifArbiter)
+     {
+-        m_gifArbiter->submit(GifPathId::Path3, queued.data(), static_cast<uint32_t>(packetEnd), false);
++        m_gifArbiter->submit(GifPathId::Path3, packetData, static_cast<uint32_t>(packetSize), false);
+         m_gifArbiter->drain();
+     }
+     else if (m_gifPacketCallback)
+     {
+-        m_gifPacketCallback(queued.data(), static_cast<uint32_t>(packetEnd));
++        m_gifPacketCallback(packetData, static_cast<uint32_t>(packetSize));
++    }
++
++    m_path3MaskedFifo.erase(m_path3MaskedFifo.begin(), m_path3MaskedFifo.begin() + static_cast<std::ptrdiff_t>(chunk));
++    m_path3MaskedHead = offset;
++    if (!m_path3MaskedFifo.empty() && m_path3MaskedHead >= m_path3MaskedFifo.front().size())
++    {
++        m_path3MaskedFifo.erase(m_path3MaskedFifo.begin());
++        m_path3MaskedHead = 0u;
+     }
+-    m_path3MaskedFifo.emplace_back(queued.begin() + static_cast<std::ptrdiff_t>(packetEnd), queued.end());
+ }
+ 
+ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately, bool path2DirectHl)
+diff --git a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+index c2d8c1f..5feba7a 100644
+--- a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -18,6 +18,18 @@ bool GifArbiter::isImagePacket(const uint8_t *data, uint32_t sizeBytes)
+     return flg == 2u || flg == 3u;
+ }
+ 
++namespace
++{
++constexpr size_t kMaxSpareBuffers = 16u;
++constexpr size_t kMaxSpareBytes = 4u * 1024u * 1024u;
++std::vector<std::vector<uint8_t>> &spareBuffers()
++{
++    // The arbiter is driven by the EE thread only; per-thread pools keep this lock-free.
++    thread_local std::vector<std::vector<uint8_t>> spare;
++    return spare;
++}
++}
++
+ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
+ {
+     if (!data || sizeBytes < 16 || !m_processFn)
+@@ -27,6 +39,13 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
+     pkt.pathId = pathId;
+     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
+     pkt.path3Image = (pathId == GifPathId::Path3) && isImagePacket(data, sizeBytes);
++    // Reuse drained packet buffers: a fresh allocation per packet (and its free in drain)
++    // made large PATH3 uploads page-fault and madvise on every packet.
++    if (!spareBuffers().empty())
++    {
++        pkt.data = std::move(spareBuffers().back());
++        spareBuffers().pop_back();
++    }
+     pkt.data.resize(sizeBytes);
+     std::memcpy(pkt.data.data(), data, sizeBytes);
+     m_queue.push_back(std::move(pkt));
+@@ -59,6 +78,11 @@ void GifArbiter::drain()
+             m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+         }
+     }
++    for (auto &pkt : m_queue)
++    {
++        if (spareBuffers().size() < kMaxSpareBuffers && pkt.data.capacity() <= kMaxSpareBytes)
++            spareBuffers().push_back(std::move(pkt.data));
++    }
+     m_queue.clear();
+ }
+ 

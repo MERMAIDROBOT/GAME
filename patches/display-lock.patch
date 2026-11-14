@@ -1,0 +1,203 @@
+--- a/ps2xRuntime/include/runtime/presentation_pacing.hpp
++++ b/ps2xRuntime/include/runtime/presentation_pacing.hpp
+@@ -2,10 +2,17 @@
+ // Window pacing. PS2_PORT_ENHANCE_VSYNC=1 presents on the display's refresh instead of a 60 Hz timer, so frames
+ // are not dropped or doubled against the panel. PS2_PORT_PRESENT_TRACE=FILE records each swap (ns, field tick,
+ // generation, ingress sequence) for frame-pacing analysis.
++#include <atomic>
+ #include <chrono>
++#include <condition_variable>
+ #include <cstdint>
+ #include <cstdio>
+ #include <cstdlib>
++#include <mutex>
++#if defined(__APPLE__)
++#include <dlfcn.h>
++#include <mach/mach_time.h>
++#endif
+ 
+ namespace PresentationPacing
+ {
+@@ -19,6 +26,137 @@
+         }();
+         return value;
+     }
++    // PS2_PORT_ENHANCE_DISPLAY_LOCK=1 (with VSYNC): the display's own refresh clock (CVDisplayLink) wakes the window
++    // once per refresh, and the emulated vertical blank is phase-locked half a refresh away from it. Two free-running
++    // 60 Hz clocks otherwise beat against each other: a field finished near a refresh edge reaches the panel one
++    // refresh early or late (seen as judder at a steady frame rate), and a vsync'd swap blocks unevenly.
++    inline bool displayLockRequested()
++    {
++        static const bool value = [] {
++            const char *v = std::getenv("PS2_PORT_ENHANCE_DISPLAY_LOCK");
++            return vsync() && v && v[0] == '1' && !v[1];
++        }();
++        return value;
++    }
++    inline int64_t steadyNs()
++    {
++        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    }
++    struct DisplayClock
++    {
++        std::atomic<int64_t> lastNs{0};   // steady_clock time of the latest display refresh
++        std::atomic<int64_t> periodNs{0}; // measured refresh period
++        std::atomic<uint64_t> count{0};
++        std::mutex mutex;
++        std::condition_variable cv;
++        bool started = false;
++        // Called on every refresh (the display link thread). `hostTime` is mach_absolute_time of that refresh.
++        void refreshed(uint64_t hostTime, int64_t nowNs, uint64_t machNow, uint32_t numer, uint32_t denom)
++        {
++            const int64_t age = machNow > hostTime ? int64_t((machNow - hostTime) * numer / denom) : 0;
++            const int64_t at = nowNs - (age < 50'000'000 ? age : 0);
++            const int64_t previous = lastNs.load(std::memory_order_relaxed);
++            if (previous && at > previous) {
++                const int64_t step = at - previous, p = periodNs.load(std::memory_order_relaxed);
++                // Average whole-refresh steps only; a skipped callback is two periods.
++                if (step > 4'000'000 && step < 45'000'000) {
++                    const int64_t n = p ? (step + p / 2) / p : 1;
++                    const int64_t one = step / (n ? n : 1);
++                    periodNs.store(p ? p + (one - p) / 16 : one, std::memory_order_relaxed);
++                }
++            }
++            lastNs.store(at, std::memory_order_release);
++            {
++                std::lock_guard<std::mutex> lock(mutex);
++                count.fetch_add(1, std::memory_order_acq_rel);
++            }
++            cv.notify_all();
++        }
++        // Blocks until the display refreshes after `seen` (at most `timeoutMs`); returns the new count.
++        uint64_t waitAfter(uint64_t seen, int timeoutMs)
++        {
++            std::unique_lock<std::mutex> lock(mutex);
++            cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return count.load(std::memory_order_acquire) != seen; });
++            return count.load(std::memory_order_acquire);
++        }
++        bool running() const
++        {
++            const int64_t last = lastNs.load(std::memory_order_acquire), p = periodNs.load(std::memory_order_relaxed);
++            return started && last && p && steadyNs() - last < 200'000'000;
++        }
++    };
++    inline DisplayClock &displayClock()
++    {
++        static DisplayClock clock;
++        return clock;
++    }
++#if defined(__APPLE__)
++    // CoreVideo is linked; its entry points are looked up so this header needs no Apple framework headers.
++    inline int32_t displayLinkCallback(void *, const void *now, const void *, uint64_t, uint64_t *, void *)
++    {
++        static const mach_timebase_info_data_t base = [] { mach_timebase_info_data_t b{}; mach_timebase_info(&b); return b; }();
++        uint64_t hostTime = 0;
++        if (now) hostTime = *reinterpret_cast<const uint64_t *>(static_cast<const char *>(now) + 16); // CVTimeStamp.hostTime
++        displayClock().refreshed(hostTime, steadyNs(), mach_absolute_time(), base.numer, base.denom);
++        return 0;
++    }
++#endif
++    // Starts the display clock once; false when it cannot run (the window then keeps its vsync'd swap).
++    inline bool startDisplayLock()
++    {
++        if (!displayLockRequested()) return false;
++        DisplayClock &clock = displayClock();
++        if (clock.started) return true;
++#if defined(__APPLE__)
++        using Create = int32_t (*)(void **);
++        using SetCallback = int32_t (*)(void *, int32_t (*)(void *, const void *, const void *, uint64_t, uint64_t *, void *), void *);
++        using Start = int32_t (*)(void *);
++        auto create = reinterpret_cast<Create>(dlsym(RTLD_DEFAULT, "CVDisplayLinkCreateWithActiveCGDisplays"));
++        auto setCallback = reinterpret_cast<SetCallback>(dlsym(RTLD_DEFAULT, "CVDisplayLinkSetOutputCallback"));
++        auto start = reinterpret_cast<Start>(dlsym(RTLD_DEFAULT, "CVDisplayLinkStart"));
++        void *link = nullptr;
++        if (!create || !setCallback || !start || create(&link) != 0 || !link ||
++            setCallback(link, displayLinkCallback, nullptr) != 0 || start(link) != 0) {
++            std::fprintf(stderr, "[pacing] display lock unavailable; using the vsync'd swap\n");
++            return false;
++        }
++        clock.started = true;
++        // Wait for the measured period, so the scheduler and window agree from the first field.
++        for (int i = 0; i < 20 && !clock.running(); ++i) clock.waitAfter(clock.count.load(), 50);
++        std::fprintf(stderr, "[pacing] display lock: refresh %.3f ms\n", clock.periodNs.load() / 1e6);
++        return clock.running();
++#else
++        return false;
++#endif
++    }
++    inline bool displayLocked() { return displayClock().running(); }
++    // The emulated field after one due at `previousNs`: one refresh period (or the whole number of refreshes nearest
++    // a 60 Hz field) later, nudged toward half a refresh after the display's refresh. Returns 0 when not locked.
++    inline int64_t lockedFieldAfter(int64_t previousNs, int64_t nominalNs)
++    {
++        if (!displayLocked()) return 0;
++        const DisplayClock &clock = displayClock();
++        const int64_t p = clock.periodNs.load(std::memory_order_relaxed), last = clock.lastNs.load(std::memory_order_acquire);
++        if (p < 4'000'000) return 0;
++        const int64_t n = (nominalNs + p / 2) / p;
++        const int64_t field = n * p;
++        if (n < 1 || field < nominalNs - 1'200'000 || field > nominalNs + 1'200'000) return 0;
++        int64_t error = (previousNs - last - p / 2) % p;
++        if (error < 0) error += p;
++        if (error > p / 2) error -= p;
++        int64_t correction = error / 4;
++        if (correction > 500'000) correction = 500'000;
++        if (correction < -500'000) correction = -500'000;
++        return previousNs + field - correction;
++    }
++    // Window side: wait for the next display refresh, so each refresh presents exactly once.
++    inline void waitDisplayRefresh()
++    {
++        static uint64_t seen = 0;
++        DisplayClock &clock = displayClock();
++        if (!clock.started) return;
++        seen = clock.waitAfter(seen, 40);
++    }
+     inline uint64_t tick = 0, generation = 0, ingress = 0;
+     inline void uploaded(uint64_t t, uint64_t g, uint64_t i) { tick = t; generation = g; ingress = i; }
+     inline void swapped()
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -1,5 +1,6 @@
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/gs/gs_frontend.h"
++#include "runtime/presentation_pacing.hpp"
+ 
+ #include "ps2_log.h"
+ #include "ps2_runtime_macros.h"
+@@ -1931,8 +1932,13 @@
+                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
+                               scheduled.hostDeadline + kVBlankDuration,
+                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
++                // PS2_PORT_ENHANCE_DISPLAY_LOCK: the next field follows the display's refresh clock (presentation_pacing.hpp).
++                auto nextField = scheduled.hostDeadline + kVBlankPeriod;
++                const int64_t previousNs = std::chrono::duration_cast<std::chrono::nanoseconds>(scheduled.hostDeadline.time_since_epoch()).count();
++                if (const int64_t locked = PresentationPacing::lockedFieldAfter(previousNs, std::chrono::duration_cast<std::chrono::nanoseconds>(kVBlankPeriod).count()))
++                    nextField = std::chrono::steady_clock::time_point(std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::nanoseconds(locked)));
+                 scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
+-                              scheduled.hostDeadline + kVBlankPeriod,
++                              nextField,
+                               EeEvent{EeEventType::VBlankStart, 0, 0});
+             }
+             processEvent(scheduled.event);
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -990,7 +990,9 @@
+ #endif
+  // raylib vita does not support audio
+ #else
+-        SetConfigFlags(FLAG_WINDOW_RESIZABLE | (PresentationPacing::vsync() ? FLAG_VSYNC_HINT : 0));
++        // With the display lock the window waits for the display's refresh itself and swaps without blocking.
++        const bool displayLocked = PresentationPacing::startDisplayLock();
++        SetConfigFlags(FLAG_WINDOW_RESIZABLE | (PresentationPacing::vsync() && !displayLocked ? FLAG_VSYNC_HINT : 0));
+         int windowWidth = HOST_WINDOW_WIDTH, windowHeight = HOST_WINDOW_HEIGHT;
+         if (const char *value = std::getenv("PS2_PORT_ENHANCE_WINSIZE")) {
+             int w = 0, h = 0; char extra = 0;
+@@ -2942,6 +2944,7 @@
+         });
+         uint32_t presentWidth = FB_WIDTH;
+         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
++        PresentationPacing::waitDisplayRefresh(); // display lock: one present per refresh, right after it
+         UploadFrame(frameTex, this, presentWidth, presentHeight);
+ 
+         BeginDrawing();

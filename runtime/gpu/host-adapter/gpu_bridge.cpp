@@ -284,6 +284,7 @@ struct Bridge {
     u64 write_backs = 0, reloads = 0, decodes = 0;
     u64 unchanged = 0;              // textures invalidated whose texels proved the same
     u64 gpu_decodes = 0;            // textures decoded on the GPU from its copy of local memory
+    u64 cpu_decodes = 0;            // direct-colour textures decoded here, uploaded ahead (CpuDecode)
     u64 replacements = 0;           // a texture pack's in their place (texture_pack.h)
     // The CLUT, in rows of 16 entries (bit r for row r): which the GS model
     // holds as loaded (a load from blocks the CPU has), which the GPU's copy
@@ -515,13 +516,22 @@ void SyncWrite(Bridge& b, u32 begin, u32 end, const u8* cover) {
         if (o.gpu_newer && o.dirty_begin < last && first < o.dirty_end) WriteBack(b, o);
     // Blocks written in part where the GPU's are newer: the transfer's pixels
     // patched into the GPU's when it is done, the blocks still the GPU's.
+    // T8H/T4HL/T4HH write only bits 24-31 of each 32-bit word, so even a block
+    // they cover whole keeps the GPU's lower 24 bits: patched, never replaced.
     b.patch.transfer = gs::TheGs().last_transfer;
+    const u32 tpsm = b.patch.transfer.psm;
+    const bool high_bits = tpsm == gs::PSMT8H || tpsm == gs::PSMT4HL || tpsm == gs::PSMT4HH;
+    const auto partial = [&](u32 i) { return cover[i - begin] == 1 || (high_bits && cover[i - begin]); };
     for (u32 i = first; i < last; ++i)
-        if (cover[i - begin] == 1 && b.blocks[i] == Bridge::kGpuNewer) b.patch.blocks.push_back(i);
+        if (partial(i) && b.blocks[i] == Bridge::kGpuNewer) b.patch.blocks.push_back(i);
     for (u32 i = first; i < last; ++i)
-        if (cover[i - begin] && !(cover[i - begin] == 1 && b.blocks[i] == Bridge::kGpuNewer)) b.blocks[i] = Bridge::kCpuNewer;
+        if (cover[i - begin] && !(partial(i) && b.blocks[i] == Bridge::kGpuNewer)) b.blocks[i] = Bridge::kCpuNewer;
     for (auto& [key, o] : b.owned) {
         if (last <= o.begin || o.full_end <= first) continue;
+        // A 24-bit colour or depth buffer stores nothing in bits 24-31: an
+        // upper-bits texture uploaded into it (SSX 3's button-prompt atlas in
+        // its CT24 front end) leaves its picture as drawn.
+        if (high_bits && (o.psm == gs::PSMCT24 || o.psm == gs::PSMZ24)) continue;
         if (first < o.end) { MarkStale(o, 1, first, last);o.cpu_writes.written(first,last); }
         else o.stale_beyond = true;
     }
@@ -548,9 +558,35 @@ void ApplyPatch(Bridge& b) {
         case 0x02: case 0x0A: case 0x32: case 0x3A: bytes = 2; base_mask = 0xFFFFu; break;
         case 0x13: bytes = 1; base_mask = 0xFFu; break;                           // T8
         case 0x14: bytes = 0; base_mask = 0xFu; break;                            // T4
+        case 0x1B: case 0x24: case 0x2C: break;                                   // T8H, T4HL, T4HH: below
         default: return;                    // (Touch sends no others here)
     }
+    // The upper-bits formats share CT32's layout: a pixel is the top byte or
+    // nibble of the 32-bit word at the CT32 address of the same (x, y).
+    const u32 high_mask = t.psm == 0x1B ? 0xFF000000u : t.psm == 0x24 ? 0x0F000000u : t.psm == 0x2C ? 0xF0000000u : 0u;
     const u8* memory = gs::TheGs().memory.data();
+    if (high_mask) {
+        // One pixel is one word here, so the list needs no merging: straight
+        // into it (a map node a word was most of the menus' GS-thread time -
+        // SSX 3's 256x256 prompt atlas, 131,072 words a frame).
+        std::bitset<16384> wanted;
+        for (const u32 block : blocks) wanted.set(block);
+        std::vector<u32> words;
+        words.reserve(std::size_t(t.w) * t.h * 3);
+        for (u32 y = t.y; y < t.y + t.h; ++y)
+            for (u32 x = t.x; x < t.x + t.w; ++x) {
+                u32 nibble = 0;
+                const u32 address = gs::Memory::Address(t.bp, t.bw, x % 2048, y % 2048, u32(gs::PSMCT32), &nibble);
+                if (!wanted.test(address / 256)) continue;
+                u32 value;
+                std::memcpy(&value, memory + std::size_t(address / 4) * 4, 4);
+                words.insert(words.end(), {address / 4, value, high_mask});
+            }
+        b.renderer->MemoryPatch(words.data(), words.size() / 3);
+        b.patched_words += words.size() / 3;
+        ++b.patches;
+        return;
+    }
     std::map<u32, u32> masks;               // word -> its mask
     for (u32 y = t.y; y < t.y + t.h; ++y)
         for (u32 x = t.x; x < t.x + t.w; ++x) {
@@ -923,6 +959,50 @@ bool RuntimeReplace(Bridge& b, Cached& t, const gs::Context& c, u64 texa, u32 le
     return true;
 }
 
+/* Claude 2026-11-11: a direct-colour texture (CT32, CT24, CT16, CT16S; one level) whose blocks the CPU holds,
+   decoded here as decode.comp decodes one, for UploadTexture - which fills a new image ahead of the frame's
+   rendering pass. A decode on the GPU is a dispatch between draws, and it ends the pass: SSX 3's movies are
+   ~120 strips a picture, each sent and drawn, and their passes cost the GPU 40-48 ms a frame. Palettized ones
+   read the GPU's CLUT, in order with the draws: still decoded there. PS2_PORT_HW_GS_CPU_DECODE=0: all on the GPU. */
+bool CpuDecodable(u32 psm, u32 levels, u32 tw, u32 th) {
+    static const bool on = [] { const char* e = std::getenv("PS2_PORT_HW_GS_CPU_DECODE"); return !(e && e[0] == '0'); }();
+    return on && levels == 1 && u64(tw) * th <= (1u << 20) &&
+           (psm == gs::PSMCT32 || psm == gs::PSMCT24 || psm == gs::PSMCT16 || psm == gs::PSMCT16S);
+}
+u32 DecodeWrap(int i, u32 size, u32 mode, u32 lo, u32 hi) {
+    if (mode == 0) return u32(i) & (size - 1);
+    if (mode == 1) return u32(std::clamp(i, 0, int(size) - 1));
+    if (mode == 2) return u32(std::clamp(i, int(lo), int(hi)));
+    return (u32(i) & lo) | hi;
+}
+u32 DecodeExpand(u32 psm, u32 raw, u64 texa) {
+    const u32 ta0 = u32(texa & 0xFF), ta1 = Bits(texa, 32, 8);
+    const bool aem = (texa & 0x8000) != 0;
+    if (psm == gs::PSMCT24) {
+        const u32 rgb = raw & 0xFFFFFF;
+        return rgb | ((aem && rgb == 0) ? 0u : ta0) << 24;
+    }
+    if (psm == gs::PSMCT16 || psm == gs::PSMCT16S) {
+        const u32 a = (raw & 0x8000) ? ta1 : ((aem && (raw & 0x7FFF) == 0) ? 0u : ta0);
+        return ((raw & 31) << 3) | (((raw >> 5) & 31) << 11) | (((raw >> 10) & 31) << 19) | (a << 24);
+    }
+    return raw;
+}
+void CpuDecode(const gs::Context& c, u64 texa, u32 tw, u32 th, std::vector<u32>& out) {
+    const u32 tbp = Bits(c.tex0, 0, 14), tbw = Bits(c.tex0, 14, 6), psm = Bits(c.tex0, 20, 6);
+    const u32 wms = Bits(c.clamp, 0, 2), wmt = Bits(c.clamp, 2, 2);
+    const u32 minu = Bits(c.clamp, 4, 10), maxu = Bits(c.clamp, 14, 10), minv = Bits(c.clamp, 24, 10), maxv = Bits(c.clamp, 34, 10);
+    const gs::Gs& m = gs::TheGs();
+    out.resize(size_t(tw) * th);
+    for (u32 v = 0; v < th; ++v) {
+        const u32 y = DecodeWrap(int(v), th, wmt, minv, maxv) & 2047;
+        for (u32 u = 0; u < tw; ++u) {
+            const u32 x = DecodeWrap(int(u), tw, wms, minu, maxu) & 2047;
+            out[size_t(v) * tw + u] = DecodeExpand(psm, m.memory.Read(tbp, tbw, x, y, psm), texa);
+        }
+    }
+}
+
 u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
     const u32 tbp = Bits(c.tex0, 0, 14), tbw = Bits(c.tex0, 14, 6), psm = Bits(c.tex0, 20, 6);
     // What decides the decoded texels: where and how it is stored (TBP0, TBW,
@@ -992,8 +1072,14 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
             if (t.overlaps(o.begin,o.full_end)) t.over.push_back(&o);
         t.owned_seen = b.owned.size();
     }
+    // Drawing into a 24-bit colour or depth buffer writes bits 0-23 alone: a texture of the upper bits there
+    // (T8H, T4HL, T4HH) keeps its texels. SSX 3 keeps its HUD textures in the top byte of its Z24 buffer and
+    // draws the HUD with depth written, so each HUD primitive made the next one decode its texture again (a
+    // depth write-back and a decode, ~16 a frame of one 256x256 texture).
+    const bool upper_bits = psm == gs::PSMT8H || psm == gs::PSMT4HL || psm == gs::PSMT4HH;
     for (const Owned* o : t.over)
-        if (o->drawn_serial > t.decoded_serial && t.overlaps(o->begin,o->drawn_end)) t.valid = false;
+        if (o->drawn_serial > t.decoded_serial && t.overlaps(o->begin,o->drawn_end) &&
+            !(upper_bits && (o->psm == gs::PSMCT24 || o->psm == gs::PSMZ24))) t.valid = false;
     // A texture pack (texture_pack.h), for textures from memory - not ones the
     // GPU drew, as PCSX2 replaces none of those. Turned on or off (Tab):
     // every texture comes back once, replaced or as the game has it.
@@ -1132,7 +1218,18 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
             if (pack || dump_dir)
                 t.pack_name = texture_pack::NameOf(gs::TheGs().memory, c.tex0, c.clamp, texa,
                                                    gs::TheGs().Clut().data());
-            if (!RuntimeReplace(b, t, c, texa, mips.count, tcc_keyed, true) && (!pack || !Replace(b, t))) gpu_decode();
+            if (!RuntimeReplace(b, t, c, texa, mips.count, tcc_keyed, true) && (!pack || !Replace(b, t))) {
+                if (CpuDecodable(psm, mips.count, tw, th)) {
+                    static thread_local std::vector<u32> texels;
+                    CpuDecode(c, texa, tw, th, texels);
+                    ++g_mutations;
+                    b.renderer->UploadTexture(t.renderer_key, texels.data(), tw, th);
+                    t.decoded_serial = b.serial;
+                    ++b.cpu_decodes;
+                } else {
+                    gpu_decode();
+                }
+            }
             static std::set<std::string> dumped;
             std::vector<u32> pixels;
             u32 w = 0, h = 0;
@@ -1792,6 +1889,12 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     state.c = ps2gpu::BlendAlpha(std::min(2u, Bits(c.alpha, 4, 2)));
     state.d = ps2gpu::BlendColour(std::min(2u, Bits(c.alpha, 6, 2)));
     state.fix = Bits(c.alpha, 32, 8);
+    // A 24-bit target stores no alpha: the GS reads Ad as 0x80 (1.0). Reading the
+    // host target's leftover alpha tinted and dropped blended layers.
+    if (state.psm == gs::PSMCT24 && state.c == ps2gpu::BlendAlpha::Dest) {
+        state.c = ps2gpu::BlendAlpha::Fix;
+        state.fix = 0x80;
+    }
     state.pabe = call.pabe;
     // FBA: alpha's top bit forced on write (a 24-bit target has no alpha to set).
     state.fba = Bits(c.fba, 0, 1) != 0 && state.psm != gs::PSMCT24;
@@ -2256,6 +2359,65 @@ bool ClaudeHwFrameSurface(u64 frame, u32 sx, u32 sy, u32 dw, u32 dh, u32 ow, u32
     return true;
 }
 
+/* Claude 2026-11-11: PS2_PORT_HW_GS_ZREAD_LATENCY=1 (a title's profile opts in). A small local-to-host read of a
+   depth buffer the GPU holds is answered from a copy of that depth buffer the GPU made earlier - normally the
+   previous frame's, at the same point of the frame - instead of waiting for the GPU to finish everything drawn so
+   far. SSX 3 reads 16x16 of depth at each sun and light every frame to size its glare: each read waited 10-16 ms
+   for the frame's scene, and a race held 30 frames a second wherever a light was in view. Each frame's first such
+   read writes the depth buffer back to GPU memory and starts the next copy (no wait). Null: read as before
+   (nothing copied yet, another buffer, a large read, the setting off). */
+const gs::Memory* LatentDepthRead(u32 sbp, u32 sbw, u32 spsm, u32 sx, u32 sy, u32 w, u32 h) {
+    static const bool on = [] { const char* e = std::getenv("PS2_PORT_HW_GS_ZREAD_LATENCY"); return e && e[0] == '1' && !e[1]; }();
+    if (!on || !g_bridge || !g_bridge->primary || (spsm != gs::PSMZ24 && spsm != gs::PSMZ32) || !w || !h || w * h > 64 * 64)
+        return nullptr;
+    Bridge& b = *g_bridge;
+    FlushPendingClear(0);
+    u32 first = 16384, last = 0;
+    for (u32 y = sy & ~7u; y < sy + h; y += 8)
+        for (u32 x = sx & ~7u; x < sx + w; x += 8) {
+            u32 nibble = 0;
+            const u32 block = gs::Memory::Address(sbp, sbw, x, y, spsm, &nibble) / 256;
+            first = std::min(first, block); last = std::max(last, block + 1);
+        }
+    const Owned* depth = nullptr;
+    for (const auto& [key, o] : b.owned)
+        if (o.depth && o.psm == spsm && o.begin <= first && last <= o.end) { depth = &o; break; }
+    if (!depth || !GpuHolds(b, first, last)) return nullptr;
+    static gs::Memory shadow;
+    static std::vector<u8> copy, gpu_blocks;
+    static u64 serial = 0, requested_frame = ~0ull, delivered = 0;
+    static u32 copy_begin = 0, copy_end = 0;
+    static std::vector<u8> pending_gpu_blocks[64];
+    std::uint64_t done = 0;
+    if (b.frame != requested_frame) {
+        requested_frame = b.frame;
+        for (auto& [key, o] : b.owned)
+            if (o.gpu_newer && o.dirty_begin < depth->end && depth->begin < o.dirty_end) WriteBack(b, o);
+        copy_begin = depth->begin; copy_end = depth->end;
+        // Which blocks the GPU's copy is newer for: the CPU's are taken for the rest.
+        auto& mask = pending_gpu_blocks[(serial + 1) % 64];
+        mask.assign(copy_end - copy_begin, 0);
+        for (u32 i = copy_begin; i < copy_end; ++i) mask[i - copy_begin] = b.blocks[i] == Bridge::kGpuNewer;
+        b.renderer->MemoryReadAsync(copy_begin, copy_end, ++serial, &copy, &done);
+    } else {
+        b.renderer->MemoryReadAsync(copy_begin, copy_end, 0, &copy, &done);
+    }
+    if (done) {
+        delivered = done;
+        gpu_blocks = pending_gpu_blocks[done % 64];
+        std::memcpy(shadow.data() + std::size_t(copy_begin) * 256, gs::TheGs().memory.data() + std::size_t(copy_begin) * 256,
+                    std::size_t(copy_end - copy_begin) * 256);
+        for (u32 i = 0; i < gpu_blocks.size() && copy.size() >= std::size_t(i + 1) * 256; ++i)
+            if (gpu_blocks[i]) std::memcpy(shadow.data() + std::size_t(copy_begin + i) * 256, copy.data() + std::size_t(i) * 256, 256);
+    }
+    static u64 served = 0, synced = 0;
+    if (!delivered || first < copy_begin || last > copy_end) { ++synced; return nullptr; }
+    if ((++served & 1023) == 1)
+        std::fprintf(stderr, "[zread latency] %llu reads answered from the earlier copy, %llu waited\n",
+                     (unsigned long long)served, (unsigned long long)synced);
+    return &shadow;
+}
+
 bool ClaudeHwContentStamp(unsigned* fbp, unsigned* fbw, unsigned* psm, unsigned long long* serial) {
     if (!g_bridge || !gs::TheGs().Displayed(fbp,fbw,psm)) return false;
     auto i=g_bridge->owned.find(std::make_tuple(*fbp,*fbw,*psm,false));
@@ -2327,6 +2489,7 @@ void GpuShadowFrame(u64 frame, const std::string& dump_dir) {
                          (unsigned long long)frame, double(ns - last_ns) / 1e6 / 100.0, (wait - last_wait) * 1000.0 / 100.0,
                          std::chrono::duration<double>(t - last_t).count() * 1000.0 / 100.0, std::size_t(0));
             last_ns = ns; last_wait = wait; last_t = t;
+            std::fprintf(stderr, "[gpu-waits] %s\n", ps2gpu::SubmitStats().c_str());
         }
         if (frame % 100 == 0)
             std::fprintf(stderr, "[gpu] frame %llu: %llu draws, %llu write-backs, %llu reloads, %llu decodes, %zu images, %zu textures\n",

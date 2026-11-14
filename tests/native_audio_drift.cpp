@@ -62,6 +62,20 @@ int main() {
         in.assign(16384 * 2, 12000); a.submitPcm(in); pull(out, 4096);
         CHECK(std::abs(out[4000 * 2] - 12000) <= 1, "re-prime: expected 12000, got %d", out[4000 * 2]);
     }
+    // A reset discards the previous stream's fractional sample position.
+    {
+        PS2AudioBackend a; a.setAudioReady(true);
+        std::vector<int16_t> in(8192 * 2, 12000), out;
+        a.submitPcm(in);
+        pull(out, 4096);
+        a.resetPcm();
+        for (size_t frame = 0; frame < in.size() / 2; ++frame)
+            in[frame * 2] = in[frame * 2 + 1] = frame % 2 ? -12000 : 12000;
+        a.submitPcm(in);
+        pull(out, 1);
+        CHECK(out[0] == 12000 / 128 && out[1] == out[0],
+              "reset: expected first sample at phase zero, got %d and %d", out[0], out[1]);
+    }
     // stereo across wraparound: L = +7000, R = -3000, 40 ring lengths
     {
         PS2AudioBackend a; a.setAudioReady(true);

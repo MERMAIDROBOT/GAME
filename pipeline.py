@@ -546,6 +546,8 @@ def translate(profile, private, feedback=None):
     if feedback is not None:
         from feedback import consume
         config, feedback_receipt = consume(profile, private, feedback)
+    from sdk_shapes import configuration as sdk_shape_configuration
+    config, sdk_shape_entries = sdk_shape_configuration(profile, private, config)
     from resident_closure import configuration as resident_configuration
     config, resident_entries = resident_configuration(profile, private, config)
     (private / 'analysis/translation-stage.json').unlink(missing_ok=True)
@@ -582,7 +584,7 @@ def translate(profile, private, feedback=None):
          'translation_rule_implementation': __import__('knowledge').translation_implementation(),
          'tool_revision': LOCK['ps2recomp']['revision'],
          'native_build_verified': False, 'runtime_verified': False,
-         'runtime_target_feedback': feedback_receipt, 'overlay_resident_entries': resident_entries,
+         'runtime_target_feedback': feedback_receipt, 'overlay_resident_entries': resident_entries, 'sdk_shape_bindings': sdk_shape_entries,
          'knowledge_bank_revision': learned['bank_revision'], 'knowledge_bank_sha256': learned['bank_sha256']})
     counts = acceptance['counts']
     print(f'Translation emitted {len(files)} C++ files; {counts.get("stubs", "unknown")} stub and '
@@ -1355,8 +1357,28 @@ SOURCE_FILES = ('runtime/gpu/src/alpha_proof.h', 'tests/alpha_proof.cpp') + SOUR
 
 SOURCE_FILES = ('tests/test_alpha_proof.py', 'tests/alpha_gpu_compare.cpp') + SOURCE_FILES
 
+SOURCE_FILES = ('sdk_shapes.py', 'tests/test_sdk_shapes.py') + SOURCE_FILES
 SOURCE_FILES = ('runtime/gpu/src/ordered_coverage.h', 'tests/ordered_coverage.cpp', 'tests/test_module_layout.py') + SOURCE_FILES
 
+
+SOURCE_FILES = ('patches/native-sound-host.patch', 'runtime/native_sound/bozo/LICENSE', 'runtime/native_sound/bozo/UPSTREAM_COMMIT', 'runtime/native_sound/bozo/include/bozo/audio/libsd.h', 'runtime/native_sound/bozo/include/bozo/audio/mixer.h', 'runtime/native_sound/bozo/include/bozo/audio/port_stream.h', 'runtime/native_sound/bozo/include/bozo/ee/dispatcher.h', 'runtime/native_sound/bozo/include/bozo/libs/libraries.h', 'runtime/native_sound/bozo/include/bozo/libs/sif.h', 'runtime/native_sound/bozo/include/bozo/native/compiled_irx.h', 'runtime/native_sound/bozo/include/bozo/native/compiled_libraries.h', 'runtime/native_sound/bozo/src/compiled_libraries.cpp', 'runtime/native_sound/bozo/src/iop_heap.cpp', 'runtime/native_sound/bozo/src/libsd.cpp', 'runtime/native_sound/bozo/src/mixer.cpp', 'runtime/native_sound/bozo/src/port_stream.cpp', 'runtime/native_sound/ps2_native_sound.cpp', 'runtime/native_sound/ps2_native_sound.h',) + SOURCE_FILES
+
+SOURCE_FILES = ('patches/native-sound-dma.patch',) + SOURCE_FILES
+SOURCE_FILES = ('patches/dma-chain-length.patch', 'tests/test_dma_chain_length.py') + SOURCE_FILES
+SOURCE_FILES += ('patches/vif1-gs-download.patch',)
+SOURCE_FILES = ('patches/screenshot-key.patch', 'tests/test_screenshot_key.py') + SOURCE_FILES
+SOURCE_FILES = ('patches/path3-pulse-queue.patch', 'tests/test_path3_pulse_queue.py') + SOURCE_FILES
+SOURCE_FILES = ('patches/display-lock.patch', 'tests/test_display_lock.py') + SOURCE_FILES
+SOURCE_FILES = ('patches/stream-pad.patch', 'tests/test_stream_pad.py') + SOURCE_FILES
+SOURCE_FILES = ('tests/test_upper_bits_texture.py',) + SOURCE_FILES
+SOURCE_FILES = ('tests/test_movie_pacing.py',) + SOURCE_FILES
+SOURCE_FILES = ('tests/test_depth_read_latency.py',) + SOURCE_FILES
+SOURCE_FILES = ('tests/test_pass_state.py',) + SOURCE_FILES
+
+
+SOURCE_FILES = ('runtime/gpu/native-plugin/fifo_formats.hpp', 'tests/fifo_formats.cpp', 'tests/native_sound_mixer.cpp', 'tests/test_native_sound_mixer.py', 'tests/test_runtime_patch_sync.py') + SOURCE_FILES
+
+SOURCE_FILES += ('patches/native-sound-pcm-mailbox.patch',)
 
 if __name__ == '__main__':
     cli()

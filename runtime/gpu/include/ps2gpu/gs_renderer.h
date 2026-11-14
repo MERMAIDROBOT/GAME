@@ -271,6 +271,9 @@ public:
        as memory holds it (a GS pixel a square). Where the colour differs,
        memory's, as ever. */
     virtual void ReloadKeepsColour(bool keep) { (void)keep; }
+    /* Depth-tested alpha tests failing to FB_ONLY drawn a batch at a time
+       (PS2_PORT_HW_GS_DEPTH_TWOPASS_BATCH=1 at creation sets it; see gs_renderer.cpp). */
+    virtual void SetDepthTwoPassBatch(bool on) { (void)on; }
     /* TargetFromMemory / DepthFromMemory for rows [first_row, first_row +
        rows) alone (the rest of the image as it is). */
     virtual void TargetRowsFromMemory(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::uint32_t width,
@@ -310,6 +313,12 @@ public:
         std::uint32_t maxH,std::uint64_t serial,std::vector<std::uint32_t>* pixels,std::uint32_t* width,
         std::uint32_t* height,std::uint64_t* done_serial) {
         *done_serial=serial; return ReadTargetRect(fbp,fbw,psm,maxW,maxH,pixels,width,height);}
+    // Claude 2026-11-11: GPU memory blocks [begin, end) copied without waiting (tagged `serial`; a serial already
+    // requested only collects), and into *bytes the newest copy the GPU has finished (*done_serial its tag, 0 for
+    // none yet). For reads a frame behind is good enough for (ZReadLatency). Default: synchronous.
+    virtual bool MemoryReadAsync(std::uint32_t begin, std::uint32_t end, std::uint64_t serial,
+        std::vector<std::uint8_t>* bytes, std::uint64_t* done_serial) {
+        bytes->resize(std::size_t(end - begin) * 256); MemoryRead(begin, end, bytes->data()); *done_serial = serial; return true; }
     // The producer submits the crop without a CPU readback. Unsupported devices
     // return false so callers retain the ordinary pixel path.
     virtual bool BlitTargetToSurface(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm,

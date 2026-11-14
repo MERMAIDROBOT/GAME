@@ -14,6 +14,18 @@ class LaunchConfig(unittest.TestCase):
   self.assertEqual(prepare({'native_launch':{'environment':environment}},self.p,{})['Environment']['PS2_PORT_HW_GS_ADAPTIVE_STALLS'],'6')
   for value in ['0','-1','1.5','100001','infinity']:
    with self.subTest(value=value),self.assertRaises(ValueError):prepare({'native_launch':{'environment':{'PS2_PORT_HW_GS_ADAPTIVE_STALLS':value}}},self.p,{})
+ def test_native_sound_dma_requires_opt_in_and_a_bounded_image_range(self):
+  key='PS2_PORT_NATIVE_SOUND_DMA'
+  window='1234567890abcdef:1000:200'
+  env={'PS2_PORT_NATIVE_SOUND':'1',key:window}
+  self.assertEqual(prepare({'native_launch':{'environment':env}},self.p,{})['Environment'],env)
+  for value in ['abc:1000:200','1234567890abcdef:1000:0','1234567890abcdef:1fffff:2',
+                '1234567890abcdef:1000:200:1','1234567890abcdef:-1:200']:
+   with self.subTest(value=value),self.assertRaises(ValueError):
+    prepare({'native_launch':{'environment':{**env,key:value}}},self.p,{})
+  with self.assertRaises(ValueError):
+   prepare({'native_launch':{'environment':{key:window}}},self.p,{})
+
  def test_diagnostic_automated_input_and_unknown_settings_rejected(self):
   for key in ['PS2_PORT_PAD_COMMAND','PS2_PORT_HEADLESS','DYLD_INSERT_LIBRARIES','PS2_PORT_IO_ROOT','PS2_PORT_ENHANCE_UNKNOWN']:
    with self.subTest(key=key),self.assertRaises(ValueError):prepare({'native_launch':{'environment':{key:'1'}}},self.p,{})

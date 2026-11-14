@@ -620,11 +620,139 @@ static void testTrianglePixelCenters() {
     std::cout<<"PASS: fractional triangle covers exactly ten integer pixel centers"<<std::endl;
 }
 
+static void testVif1GsDownload() {
+    setenv("PS2_PORT_HEADLESS", "1", 1);
+    PS2Runtime runtime;
+    if (!runtime.initialize("Synthetic VIF1 GS download") || !runtime.syncCoreSubsystems())
+        throw std::runtime_error("VIF1 download fixture initialization failed");
+    auto &memory = runtime.memory();
+    auto &gs = runtime.gs();
+    constexpr uint32_t chcr = 0x10009000u, madr = chcr + 0x10u, qwc = chcr + 0x20u;
+    constexpr uint32_t stat = 0x10003C00u, busdir = 0x12001040u, dstat = 0x1000E010u;
+    constexpr uint32_t start = 0x100u, reverse = 1u << 23u, dst = 0x200000u;
+    constexpr uint32_t block = 64, psm = 0x31; // PSMZ24: packed three-byte depth values.
+    std::array<uint8_t, 48> expected{};
+    for (unsigned x = 0; x < 16; ++x) {
+        const uint32_t z = 0x123450u + x * 257u;
+        gs.WriteVram(psm, block, 1, x, 0, z);
+        for (unsigned byte = 0; byte < 3; ++byte)
+            expected[x * 3 + byte] = uint8_t(z >> (8u * byte));
+    }
+    gs.writeRegister(GS_REG_BITBLTBUF, block | (1ull << 16u) | (uint64_t(psm) << 24u));
+    gs.writeRegister(GS_REG_TRXPOS, 0u);
+    gs.writeRegister(GS_REG_TRXREG, 16u | (1ull << 32u));
+    gs.writeRegister(GS_REG_TRXDIR, 1u);
+    auto *ram = memory.getRDRAM();
+    std::memset(ram + dst - 1u, 0xa5, 50u);
+    memory.writeIORegister(0x1000E000u, 1u);
+    memory.writeIORegister(stat, reverse | 0x7fu);
+    if ((memory.readIORegister(stat) & (reverse | 0x7fu)) != reverse)
+        throw std::runtime_error("VIF1 STAT did not apply its FDR write mask");
+    memory.writeIORegister(madr, dst);
+    memory.writeIORegister(qwc, 3u);
+    memory.writeIORegister(chcr, start);
+    if (!(memory.readIORegister(chcr) & start) || (memory.readIORegister(dstat) & 2u) ||
+        ram[dst] != 0xa5u)
+        throw std::runtime_error("Reverse VIF1 DMA must wait until GS BUSDIR allows reads");
+    memory.write32(busdir, 1u);
+    if ((memory.readIORegister(chcr) & start) || !(memory.readIORegister(dstat) & 2u) ||
+        memory.readIORegister(qwc) != 0u || memory.readIORegister(madr) != dst + 48u ||
+        std::memcmp(ram + dst, expected.data(), expected.size()) ||
+        ram[dst - 1u] != 0xa5u || ram[dst + 48u] != 0xa5u)
+        throw std::runtime_error("Reverse VIF1 DMA did not transfer three packed depth quadwords");
+    memory.write32(busdir, 0u);
+    memory.writeIORegister(stat, 0u);
+    const uint32_t mark = 0x07004321u;
+    std::memcpy(ram + dst, &mark, sizeof(mark));
+    std::memset(ram + dst + sizeof(mark), 0, 12u);
+    memory.writeIORegister(madr, dst);
+    memory.writeIORegister(qwc, 1u);
+    memory.writeIORegister(chcr, start | 1u);
+    memory.processPendingTransfers();
+    if (memory.vif1_regs.mark != 0x4321u)
+        throw std::runtime_error("Forward VIF1 DMA stopped processing guest commands");
+    std::cout << "PASS: reverse VIF1 DMA reads packed depth; forward DMA still processes VIF commands" << std::endl;
+}
+
 // libgraph image transfers: vram_addr is already the GS block number, and StoreImage must not need guest
 // heap space (titles may claim the whole heap). Negative control: block 0 holds different pixels.
 // VIF1 DIRECT: a GIF IMAGE packet may span several DIRECTs; its remaining quadwords arrive as the next DIRECT's
 // payload, never as raw VIF stream data. A DIRECT split across VIF1 data chunks continues in the next chunk.
 // The MARK after them proves the interpreter stayed on the command stream (the old path ate the second DIRECT).
+// A VIF1 source chain longer than 4096 tags must run to its END tag. SSX 3's race chains reach 650-770 KB;
+// a tag cap cut them short and dropped the tail (rider geometry, STCYCL resets, MSCALs).
+static void testLongVif1Chain() {
+ setenv("PS2_PORT_HEADLESS","1",1);PS2Runtime runtime;if(!runtime.initialize("Synthetic long VIF1 chain"))throw std::runtime_error("Synthetic long chain initialization failed");
+ auto &memory=runtime.memory();uint8_t *ram=memory.getRDRAM();
+ constexpr uint32_t base=0x200000u,entries=5000u;
+ for(uint32_t i=0;i<entries;++i){
+  const uint64_t cnt=1ull|(1ull<<28);                                   // CNT, one quadword follows
+  uint32_t payload[4]={0u,0u,0u,0u};                                    // four VIF NOPs
+  if(i==entries-1)payload[3]=0x07004321u;                               // the last one: MARK 0x4321
+  std::memcpy(ram+base+i*32u,&cnt,8);std::memset(ram+base+i*32u+8u,0,8);
+  std::memcpy(ram+base+i*32u+16u,payload,16);
+ }
+ const uint64_t end=7ull<<28;std::memcpy(ram+base+entries*32u,&end,8);std::memset(ram+base+entries*32u+8u,0,8);
+ memory.vif1_regs.mark=0;
+ memory.writeIORegister(0x1000e000u,1u);
+ memory.writeIORegister(0x10009030u,base);                             // TADR
+ memory.writeIORegister(0x10009020u,0u);                               // QWC
+ memory.writeIORegister(0x10009000u,0x105u);                           // CHCR: from memory, chain, start
+ memory.processPendingTransfers();
+ if(memory.vif1_regs.mark!=0x4321u)
+  throw std::runtime_error("VIF1 chain of "+std::to_string(entries)+" tags stopped before its END tag (MARK "+std::to_string(memory.vif1_regs.mark)+")");
+ std::cout<<"PASS: a VIF1 chain longer than 4096 tags runs to its END tag"<<std::endl;
+}
+
+static void testMaskedPath3Pulses() {
+ setenv("PS2_PORT_HEADLESS","1",1);PS2Runtime runtime;if(!runtime.initialize("Synthetic masked PATH3 pulses"))throw std::runtime_error("Masked PATH3 initialization failed");
+ auto &memory=runtime.memory();
+ std::vector<std::vector<uint8_t>> seen;
+ memory.setGifArbiter(nullptr);
+ memory.setGifPacketCallback([&](const uint8_t *d,uint32_t n){seen.emplace_back(d,d+n);});
+ auto qw=[](std::vector<uint8_t> &v,uint64_t lo,uint64_t hi){const size_t o=v.size();v.resize(o+16);std::memcpy(&v[o],&lo,8);std::memcpy(&v[o+8],&hi,8);};
+ auto image=[](uint64_t nloop,bool eop){return nloop|(eop?0x8000ull:0ull)|(2ull<<58);};
+ std::vector<uint8_t> p1,p2,p3,p4;
+ qw(p1,image(1,true),0);qw(p1,0x11,0x11);
+ qw(p2,image(2,false),0);qw(p2,0x21,0x21);qw(p2,0x22,0x22);qw(p2,image(1,true),0);qw(p2,0x23,0x23);
+ qw(p3,image(1,true),0);qw(p3,0x31,0x31);
+ qw(p4,image(1,true),0);qw(p4,0x41,0x41);
+ std::vector<uint8_t> a=p1;a.insert(a.end(),p2.begin(),p2.begin()+48);   // P2 spans both DMA chunks
+ std::vector<uint8_t> b(p2.begin()+48,p2.end());b.insert(b.end(),p3.begin(),p3.end());b.insert(b.end(),p4.begin(),p4.end());
+ auto vif=[&](uint32_t code){const uint32_t w[4]={0u,0u,0u,code};memory.processVIF1Data(reinterpret_cast<const uint8_t*>(w),16);};
+ vif(0x06008000u);                                                   // MSKPATH3 on
+ memory.submitGifPacket(GifPathId::Path3,a.data(),uint32_t(a.size()));
+ memory.submitGifPacket(GifPathId::Path3,b.data(),uint32_t(b.size()));
+ if(!seen.empty())throw std::runtime_error("Masked PATH3 packets reached the GS");
+ const std::vector<uint8_t> *expect[4]={&p1,&p2,&p3,&p4};
+ for(unsigned i=0;i<4;++i){
+  vif(0x06000000u);vif(0x06008000u);                                 // one MSKPATH3 pulse
+  if(seen.size()!=i+1u||seen.back()!=*expect[i])
+   throw std::runtime_error("MSKPATH3 pulse "+std::to_string(i+1)+" did not release exactly the next queued packet");
+ }
+ // A large masked upload: every pulse used to copy the whole remaining queue (quadratic in packets).
+ seen.clear();
+ std::vector<uint8_t> big;constexpr unsigned packets=60000u;
+ for(unsigned i=0;i<packets;++i){qw(big,image(1,true),0);qw(big,i,i);}
+ memory.submitGifPacket(GifPathId::Path3,big.data(),uint32_t(big.size()));
+ std::vector<uint32_t> pulses;for(unsigned i=0;i<packets;++i){pulses.insert(pulses.end(),{0u,0u,0x06000000u,0x06008000u});}
+ const auto started=std::chrono::steady_clock::now();
+ memory.processVIF1Data(reinterpret_cast<const uint8_t*>(pulses.data()),uint32_t(pulses.size()*4));
+ const auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-started).count();
+ if(seen.size()!=packets)throw std::runtime_error("Large masked upload released "+std::to_string(seen.size())+" packets");
+ for(unsigned i=0;i<packets;i+=997u){uint64_t v=0;std::memcpy(&v,seen[i].data()+16,8);if(v!=i)throw std::runtime_error("Large masked upload released packets out of order");}
+ if(ms>300)throw std::runtime_error("Releasing "+std::to_string(packets)+" masked PATH3 packets took "+std::to_string(ms)+" ms (queue copied per pulse)");
+ vif(0x06000000u);memory.setGifPacketCallback({});
+ // The GIF arbiter reuses drained buffers: contents must never leak between packets of different sizes.
+ std::vector<std::vector<uint8_t>> drained;
+ GifArbiter arbiter([&](const uint8_t *d,uint32_t n){drained.emplace_back(d,d+n);});
+ arbiter.submit(GifPathId::Path3,big.data(),640u);arbiter.drain();
+ arbiter.submit(GifPathId::Path3,p3.data(),uint32_t(p3.size()));arbiter.submit(GifPathId::Path2,p1.data(),uint32_t(p1.size()));arbiter.drain();
+ if(drained.size()!=3u||drained[0]!=std::vector<uint8_t>(big.begin(),big.begin()+640)||drained[1]!=p1||drained[2]!=p3)
+  throw std::runtime_error("GIF arbiter buffer reuse changed packet contents or order");
+ std::cout<<"PASS: MSKPATH3 pulses release one packet each, across DMA chunks, in linear time ("<<ms<<" ms for "<<packets<<")\n";
+}
+
 static void testVif1DirectImageSpan() {
  setenv("PS2_PORT_HEADLESS","1",1);PS2Runtime runtime;if(!runtime.initialize("Synthetic VIF1 DIRECT image span"))throw std::runtime_error("Synthetic VIF1 initialization failed");
  auto &memory=runtime.memory();
@@ -927,6 +1055,31 @@ static void testConcurrentVu0Server(PS2Runtime &runtime) {
     std::cout<<"PASS: concurrent VU0 server survives start budget, accepts EE handshake and publishes before interlock returns\n";
 }
 
+static void testLongVu0ProgramFinishes(PS2Runtime &runtime) {
+    // A program that ends after ~90,000 instructions (past the 16-slice start budget of 2026-11-08) finishes before
+    // the EE goes on: the EE reads such results from VU0 memory without a COP2 instruction (Kelly Slater's
+    // splashes froze in the air when they were read while the program still ran).
+    auto *code=runtime.memory().getVU0Code();
+    std::memset(code,0,PS2_VU0_CODE_SIZE);
+    const auto pair=[&](unsigned at,uint32_t lower,uint32_t upper){
+        std::memcpy(code+at,&lower,4);std::memcpy(code+at+4,&upper,4);
+    };
+    constexpr uint32_t upperNop=0x000002ffu;
+    pair(0,(0x08u<<25)|(0xEu<<21)|(1u<<16)|0x530u,upperNop);   // IADDIU vi1,vi0,30000
+    pair(8,(0x09u<<25)|(1u<<16)|(1u<<11)|1u,upperNop);         // ISUBIU vi1,vi1,1
+    pair(16,(0x29u<<25)|(1u<<11)|0x7feu,upperNop);             // IBNE vi1,vi0,-2
+    pair(24,0,upperNop);                                       // branch delay
+    pair(32,(0x08u<<25)|(2u<<16)|9u,upperNop|0x40000000u);     // IADDIU vi2,vi0,9; E
+    pair(40,0,upperNop);                                       // end delay
+    R5900Context ctx{};
+    runtime.vu0StartMicroProgram(runtime.memory().getRDRAM(),&ctx,0);
+    if(ctx.vu0_concurrent || ctx.vi[1]!=0)
+        throw std::runtime_error("A VU0 program that ends was left running alongside the EE: concurrent="+std::to_string(ctx.vu0_concurrent)+
+                                 " vi1="+std::to_string(ctx.vi[1])+" vi2="+std::to_string(ctx.vi[2]));
+    std::memset(code,0,PS2_VU0_CODE_SIZE);
+    std::cout<<"PASS: a long VU0 program that ends finishes before VCALLMS returns\n";
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && std::string(argv[1]) == "--gs-image-only") {
         testGsLibgraphPacketABI();
@@ -984,6 +1137,9 @@ int main(int argc, char **argv) {
     testGsImageTransferWidths();
     testGsLibgraphPacketABI();
     testVif1DirectImageSpan();
+    testLongVif1Chain();
+    testVif1GsDownload();
+    testMaskedPath3Pulses();
     testGsDisplayEnvironment();
     testGsAnalogCRT();
     testGsDoubleBufferGeometry();
@@ -1078,6 +1234,7 @@ int main(int argc, char **argv) {
     PS2Runtime runtime;
     if (!runtime.initialize("Synthetic timer test")) return 2;
     testConcurrentVu0Server(runtime);
+    testLongVu0ProgramFinishes(runtime);
     // An ELF starts after platform initialization; environment setup must not
     // silently turn the initially runnable DMA controller off.
     uint8_t *dmaRam = runtime.memory().getRDRAM();

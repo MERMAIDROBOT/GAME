@@ -1,0 +1,20 @@
+#version 450
+// patch.comp for many words at once: the (word, value, mask) list copied into
+// the linear scratch buffer (binding 1) first, one invocation a word. An
+// upper-bits upload (PSMT8H/T4HL/T4HH) over blocks the GPU holds newer patches
+// every word it covers - SSX 3's 256x256 prompt atlas, twice a frame in its
+// menus: 131,072 words, 16,384 dispatches eight at a time.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Memory { uint mem[]; };          // 4 MB
+layout(std430, binding = 1) readonly buffer List { uvec4 words[]; };  // the linear scratch buffer
+
+layout(push_constant) uniform Count { uint count; } list;
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= list.count) return;
+    const uvec4 w = words[i];
+    if (w.z != 0u) mem[w.x] = (mem[w.x] & ~w.z) | (w.y & w.z);
+}

@@ -47,7 +47,7 @@ layout(push_constant) uniform Params {
     uint texa;          // TEXA: TA0 in bits 0-7, TA1 8-15, AEM 16
     uint image_size;    // the bound image's size in its pixels, width in bits 0-15, height 16-31 - not
                         // asked of the image (textureSize: a sampler's message per pixel on some GPUs)
-    uint logic;         // FBMSK masking part of a channel: 1 the AND pass, 2 the OR pass, 0 neither
+    uint logic;         // FBMSK masking part of a channel: 1 AND, 2 OR, 3 shader merge, 0 none
     uint keep;          // ...the bits FBMSK keeps, RGBA bytes as the target holds them
     uint scale;         // a target drawn larger (the internal resolution): its pixels to a GS texel
     uint blend_ops;     // bits 0-7, SHADER_BLEND: ALPHA's A, B, C, D, two bits each; 8-15: Snap's scale;
@@ -443,7 +443,12 @@ void main() {
     // ORed with the rest of the source's bits (the pipelines' logic ops).
     if (Has(kLogic)) {
         if (p.logic == 1u) colour = unpackUnorm4x8(p.keep);
-        if (p.logic == 2u) colour = unpackUnorm4x8(packUnorm4x8(c / 255.0) & ~p.keep);
+        if (p.logic == 2u) colour = unpackUnorm4x8(packUnorm4x8(colour) & ~p.keep);
+#ifdef SHADER_BLEND
+        if (p.logic == 3u)
+            colour = unpackUnorm4x8((packUnorm4x8(dst / 255.0) & p.keep) |
+                                   (packUnorm4x8(colour) & ~p.keep));
+#endif
     }
 #ifndef SINGLE_OUTPUT
     float k = p.fix_factor != 0u ? float(p.fix) : blend_alpha;

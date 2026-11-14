@@ -896,3 +896,12 @@ RUNTIME_PATCHES += ('patches/libgraph-image-packet-abi.patch',)
 RUNTIME_PATCHES += ('patches/discovered-sdk-bindings.patch',)
 
 RUNTIME_PATCHES += ('patches/mutable-jump-table-entries.patch',)
+RUNTIME_PATCHES += ('patches/native-sound-host.patch', 'patches/native-sound-dma.patch')
+RUNTIME_PATCHES += ('patches/dma-chain-length.patch',)
+RUNTIME_PATCHES += ('patches/vif1-gs-download.patch',)
+RUNTIME_PATCHES += ('patches/screenshot-key.patch',)
+RUNTIME_PATCHES += ('patches/path3-pulse-queue.patch',)
+RUNTIME_PATCHES += ('patches/display-lock.patch',)
+RUNTIME_PATCHES += ('patches/stream-pad.patch',)
+
+RUNTIME_PATCHES += ('patches/native-sound-pcm-mailbox.patch',)

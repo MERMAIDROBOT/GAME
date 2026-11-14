@@ -17,13 +17,21 @@ public:
         if (latest->generation != generation_) {
             clear(); generation_ = latest->generation;
         }
+        // Claude 2026-11-12: the newest finished image is shown. Waiting on one pending candidate while newer ones
+        // arrived ignored them, and showed that candidate late when it finished: a picture shown twice, then one
+        // skipped - uneven motion in every title (Kelly Slater: its demo and water judder). The pending candidate
+        // still guarantees progress when no newest one is ever finished at the moment of asking.
+        const bool newer = !completed_ || latest->boundary.tick > completed_->boundary.tick;
+        if (newer && ready(*latest)) {
+            completed_ = std::move(latest);
+            pending_.reset();
+            return completed_;
+        }
         if (pending_ && ready(*pending_)) {
             completed_ = std::move(pending_);
         }
-        if (!pending_ && (!completed_ || latest->boundary.tick > completed_->boundary.tick)) {
-            if (ready(*latest)) completed_ = std::move(latest);
-            else pending_ = std::move(latest);
-        }
+        if (newer && latest && (!completed_ || latest->boundary.tick > completed_->boundary.tick) && !pending_)
+            pending_ = std::move(latest);
         return completed_;
     }
 };

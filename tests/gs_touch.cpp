@@ -34,5 +34,13 @@ int main(int argc,char**) {
  exact=coarse=false;
  gs->Touch(0x3fef,1,PSMT8,0,0,64,64,false);
  assert(coarse&&!exact); // CPU read barriers must not be relaxed by write optimization.
- std::puts("VRAM boundary: false wrap removed; real wrap/read barriers preserved");
+ // Upper-bits formats (T8H/T4HL/T4HH) write bits 24-31 of CT32-layout words: an exact block cover, so the GPU side
+ // merges those bits instead of replacing whole blocks (SSX 3 keeps its 256x256 prompt atlas in its CT24 front end).
+ for(u32 psm:{u32(PSMT8H),u32(PSMT4HL),u32(PSMT4HH)}){
+  exact=coarse=false;
+  gs->Touch(0x1280,4,psm,0,0,256,256,true);
+  assert(exact&&!coarse&&first==0x1280&&last==0x1680);
+  for(u32 y=0;y<256;++y)for(u32 x=0;x<256;++x){u32 n=0;auto b=Memory::Address(0x1280,4,x,y,psm,&n)/256;assert(b>=first&&b<last&&coverage[b-first]);}
+ }
+ std::puts("VRAM boundary: false wrap removed; real wrap/read barriers preserved; upper-bits uploads covered exactly");
 }

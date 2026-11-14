@@ -1,0 +1,41 @@
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 55825c2..c28e288 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1432,7 +1432,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
+                     uint32_t asp = (chcr >> 4) & 0x3u;
+                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
+-                    const int kMaxChainTags = 4096;
++                    // PS2 Port Lab change: the DMAC follows a chain until END/REFE/RET or a TIE interrupt, however
++                    // many tags it has. SSX 3's race chains reach 650-770 KB in more than 4096 tags; a tag cap cut
++                    // them short and dropped their tail (geometry, STCYCL resets, MSCALs). Bound only a runaway chain:
++                    // more tags or payload than the whole of main memory could hold.
++                    const int kMaxChainTags = 1 << 21;
++                    const size_t kMaxChainBytes = PS2_RAM_SIZE;
+                     std::vector<uint8_t> chainBuf;
+ 
+                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
+@@ -1493,7 +1498,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+                     int tagsProcessed = 0;
+                     uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
+ 
+-                    while (tagsProcessed < kMaxChainTags)
++                    while (tagsProcessed < kMaxChainTags && chainBuf.size() <= kMaxChainBytes)
+                     {
+                         const uint32_t currentTagAddr = tagAddr;
+                         const bool tagInSPR = isScratchpad(tagAddr);
+@@ -1613,6 +1618,13 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+                             break;
+                     }
+ 
++                    if (tagsProcessed >= kMaxChainTags || chainBuf.size() > kMaxChainBytes)
++                    {
++                        static std::atomic<unsigned> reported{0};
++                        if (reported.fetch_add(1, std::memory_order_relaxed) < 4u)
++                            std::fprintf(stderr, "[dma] channel 0x%x chain stopped after %d tags and %zu bytes without an end tag; next tag 0x%x\n",
++                                         channelBase, tagsProcessed, chainBuf.size(), tagAddr);
++                    }
+                     m_ioRegisters[channelBase + 0x30] = tagAddr;
+                     m_ioRegisters[channelBase + 0x40] = asr0;
+                     m_ioRegisters[channelBase + 0x50] = asr1;

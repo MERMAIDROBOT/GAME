@@ -1,0 +1,170 @@
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -320,6 +320,7 @@
+     // MADR/TADR advance past the data and the channel completes (D_STAT bit 4).
+     using IpuInputSink = std::function<void(const uint8_t *, uint32_t)>;
+     void setIpuInputSink(IpuInputSink sink) { m_ipuInputSink = std::move(sink); }
++    void setVif1DownloadSource(GS *gs) { m_vif1DownloadSource = gs; }
+     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
+
+     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
+@@ -472,6 +473,8 @@
+     void flushLazyEeTimers() noexcept;
+     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
+     bool tryProcessIpuInputDma(uint32_t channelBase, uint32_t chcr);
++    GS *m_vif1DownloadSource = nullptr;
++    void processVif1Download();
+     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
+     void queueCompletedDmacCause(uint32_t cause);
+ };
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -911,6 +911,7 @@
+     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
+                                     { m_gs.processGIFPacket(data, size); });
+     m_memory.setGifArbiter(&m_gifArbiter);
++    m_memory.setVif1DownloadSource(&m_gs);
+     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
+                                  {
+                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -160,6 +160,7 @@
+     uint64_t nativeImageUploadCount() const { return m_nativeImageUploadCount; }
+     uint64_t nativePackedGIFPacketCount() const { return m_nativePackedGIFPacketCount; }
+
++    uint32_t consumeLocalToHostQwords(uint8_t *dst, uint32_t maxQwords);
+     uint32_t consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes);
+
+     void refreshDisplaySnapshot();
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -1814,6 +1814,16 @@
+     return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
+ }
+
++uint32_t GS::consumeLocalToHostQwords(uint8_t *dst, uint32_t maxQwords)
++{
++    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    if (!m_backend)
++        return 0u;
++    const size_t pending = m_backend->GetTransferSnapshot().localToHostPendingBytes;
++    const auto qwords = static_cast<uint32_t>(std::min<size_t>(pending / 16u, maxQwords));
++    return qwords ? m_backend->ConsumeLocalToHostBytes(dst, qwords * 16u) / 16u : 0u;
++}
++
+ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -15,6 +15,16 @@
+
+ namespace
+ {
++    constexpr uint32_t kVif1Channel = 0x10009000u;
++    constexpr uint32_t kVif1Fdr = 1u << 23u;
++    constexpr uint32_t kDmacStart = 1u << 8u;
++
++    bool isVif1Download(uint32_t chcr)
++    {
++        // DIR=0, MOD=0: normal DMA from VIF1 to EE memory.
++        return (chcr & 0xDu) == 0u;
++    }
++
+     inline void inRange(uint32_t offset, size_t bytes, size_t regionSize, const char *op, uint32_t address)
+     {
+         if (static_cast<uint64_t>(offset) + static_cast<uint64_t>(bytes) > static_cast<uint64_t>(regionSize))
+@@ -1299,6 +1309,9 @@
+
+         switch (address)
+         {
++        case 0x10003C00u:     // VIF1_STAT: only FDR is writable
++            vif1_regs.stat = (vif1_regs.stat & ~kVif1Fdr) | (value & kVif1Fdr);
++            break;
+         case 0x10003C10u:     // VIF1_FBRST
+             if (value & 0x1u) // RST
+             {
+@@ -1390,6 +1403,12 @@
+             const uint32_t madr = m_ioRegisters[channelBase + 0x10];
+             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
+             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
++
++            if (channelBase == kVif1Channel && isVif1Download(value))
++            {
++                processVif1Download();
++                return true;
++            }
+
+             if (tryProcessScratchpadDma(channelBase, value))
+             {
+@@ -1893,6 +1912,43 @@
+     return processSourceInputDma(*this, channelBase, chcr, m_ipuInputSink, 4u);
+ }
+
++void PS2Memory::processVif1Download()
++{
++    const auto dctrl = m_ioRegisters.find(0x1000E000u);
++    if ((dctrl != m_ioRegisters.end() && !(dctrl->second & 1u)) ||
++        !(vif1_regs.stat & kVif1Fdr) || !(gs_regs.busdir & 1u) || !m_vif1DownloadSource)
++        return;
++
++    // The setup GIF packet may still be queued when the EE starts the download.
++    if (m_gifArbiter)
++        m_gifArbiter->drain();
++
++    auto &madr = m_ioRegisters[kVif1Channel + 0x10u];
++    auto &qwc = m_ioRegisters[kVif1Channel + 0x20u];
++    qwc &= 0xFFFFu;
++    if (qwc != 0u)
++    {
++        const uint32_t address = madr & ~0xFu;
++        const bool scratch = isScratchpad(address) || (address & 0x80000000u);
++        const uint32_t capacity = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
++        const uint32_t offset = scratch ? address & (PS2_SCRATCHPAD_SIZE - 1u) : translateAddress(address);
++        uint8_t *const dst = scratch ? m_scratchpad : m_rdram;
++        if (!dst || offset >= capacity || qwc > (capacity - offset) / 16u)
++            return;
++
++        const uint32_t copied = m_vif1DownloadSource->consumeLocalToHostQwords(dst + offset, qwc);
++        if (copied != 0u)
++        {
++            if (!scratch)
++                markModified(offset, copied * 16u);
++            madr = address + copied * 16u;
++            qwc -= copied;
++        }
++    }
++    if (qwc == 0u)
++        completeDmacChannel(kVif1Channel, 1u);
++}
++
+ void PS2Memory::completeDmacChannel(uint32_t channelBase, uint32_t cause)
+ {
+     static constexpr uint32_t kDStat = 0x1000E010u;
+@@ -2746,8 +2802,18 @@
+         {
+             if ((address & 0xFF) == 0x00)
+             {
+-                if (address == 0x10009000u && m_vif1DmaAwaitingCompletion)
+-                    return m_ioRegisters[address];
++                if (address == kVif1Channel)
++                {
++                    const uint32_t chcr = m_ioRegisters[address];
++                    if ((chcr & kDmacStart) && isVif1Download(chcr))
++                    {
++                        // The FIFO or bus direction may have become ready since STR was set.
++                        processVif1Download();
++                        return m_ioRegisters[address];
++                    }
++                    if (m_vif1DmaAwaitingCompletion)
++                        return chcr;
++                }
+                 uint32_t channelStatus = m_ioRegisters[address] & ~0x100u;
+                 m_ioRegisters[address] = channelStatus;
+                 return channelStatus;

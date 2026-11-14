@@ -361,6 +361,178 @@ void PartlyMaskedChannels(ps2gpu::GsRenderer& renderer) {
     Check(!pixels.empty() && pixels[0] == 0x80F8E030u, "a 16-bit target's FBMSK in RGBA32 bit positions");
 }
 
+// A = B blends to D alone: into a 16-bit target as into any other, the blender's
+// (no copy of the target for the shader), the colour cut to five bits as stored.
+// SSX 3's shadow maps: ALPHA 0x2A, (0 - 0) * FIX + Cs, every few triangles.
+std::uint64_t FeedbackCopies() {
+    const std::string c = ps2gpu::RendererCounters();
+    const auto at = c.find(" feedback copies");
+    if (at == std::string::npos) return ~0ull;
+    const auto from = c.rfind(", ", at);
+    return std::stoull(c.substr(from == std::string::npos ? 0 : from + 2, at - (from == std::string::npos ? 0 : from + 2)));
+}
+
+void SixteenBitPassThroughBlend(ps2gpu::GsRenderer& renderer) {
+    ps2gpu::GsDrawState state = Target(0x96);
+    state.psm = 0x02;
+    Rect(renderer, state, 0, 0, 16, 16, 0x00102030u);
+    std::vector<std::uint32_t> pixels;
+    std::uint32_t w = 0, h = 0;
+    renderer.ReadTarget(0x96, 1, 0x02, &pixels, &w, &h);
+    (void)FeedbackCopies();
+    ps2gpu::GsDrawState pass = state;
+    pass.blend = true;
+    pass.a = ps2gpu::BlendColour::Zero;
+    pass.b = ps2gpu::BlendColour::Zero;
+    pass.c = ps2gpu::BlendAlpha::Fix;
+    pass.fix = 0x80;
+    pass.d = ps2gpu::BlendColour::Source;
+    for (int i = 0; i < 4; ++i) Rect(renderer, pass, 0, 0, 16, 16, 0x80C3854Bu);   // overlapping: each a copy before
+    renderer.ReadTarget(0x96, 1, 0x02, &pixels, &w, &h);
+    Check(!pixels.empty() && pixels[0] == 0x80C08048u, "a 16-bit target's A = B blend stores Cs cut to five bits");
+    Check(FeedbackCopies() == 0, "a 16-bit target's A = B blend needs no copy of the target");
+}
+
+std::uint64_t VulkanDraws() {
+    const std::string c = ps2gpu::RendererCounters();
+    const auto at = c.find(" draws,");
+    if (at == std::string::npos) return ~0ull;
+    const auto from = c.rfind(", ", at);
+    return std::stoull(c.substr(from + 2, at - from - 2));
+}
+
+// PS2_PORT_HW_GS_DEPTH_TWOPASS_BATCH=1: overlapping depth-tested primitives whose
+// alpha test fails to FB_ONLY are drawn a batch at a time, not one at a time -
+// same picture where the depth test orders them (SSX 3's soft-edged scenery).
+std::uint32_t OverlappingAlphaTested(ps2gpu::GsRenderer& renderer, std::uint64_t* draws) {
+    ps2gpu::GsDrawState state = Target(0x58);
+    state.depth = true;
+    state.zbp = 0x68;
+    state.ztst = 2;
+    state.alpha_test = true;
+    state.atst = 6;                                   // GREATER
+    state.aref = 0x40;
+    state.afail = 1;                                  // FB_ONLY
+    DepthRect(renderer, state, 0, 0, 64, 64, 0, Rgba(0, 0, 0, 0x80));
+    std::vector<std::uint32_t> pixels;
+    std::uint32_t w = 0, h = 0;
+    renderer.ReadTarget(0x58, 1, 0, &pixels, &w, &h);
+    (void)VulkanDraws();
+    for (int i = 1; i <= 8; ++i)                      // each nearer, each over the last
+        DepthRect(renderer, state, float(i), float(i), 48.0f + float(i), 48.0f + float(i), 0x100000u * i,
+                  Rgba(std::uint8_t(i * 30), 0x40, std::uint8_t(255 - i * 30), 0x80));
+    renderer.ReadTarget(0x58, 1, 0, &pixels, &w, &h);
+    *draws = VulkanDraws();
+    return Pixel(renderer, 0x58, 30, 30);
+}
+
+void BatchedDepthTwoPass(ps2gpu::GsRenderer& renderer) {
+    std::uint64_t exact_draws = 0, batched_draws = 0;
+    renderer.SetDepthTwoPassBatch(false);
+    const std::uint32_t a = OverlappingAlphaTested(renderer, &exact_draws);
+    renderer.SetDepthTwoPassBatch(true);
+    const std::uint32_t b = OverlappingAlphaTested(renderer, &batched_draws);
+    renderer.SetDepthTwoPassBatch(false);
+    Check(a == Rgba(240, 0x40, 15, 0x80) && a == b, "depth-ordered alpha-tested primitives: the same picture batched");
+    Check(batched_draws * 4 <= exact_draws, "depth-ordered alpha-tested primitives: a batch, not one per primitive");
+}
+
+// A long memory patch (an upper-bits upload over whole blocks, SSX 3's prompt
+// atlas) merges each word under its mask, in one dispatch rather than one an
+// eight words.
+void LongMemoryPatch(ps2gpu::GsRenderer& renderer) {
+    constexpr std::uint32_t first = 0x3000, blocks = 16, words_n = blocks * 64;
+    std::vector<std::uint8_t> bytes(std::size_t(blocks) * 256);
+    for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = std::uint8_t(i * 7 + 3);
+    renderer.MemoryWrite(first, first + blocks, bytes.data());
+    std::vector<std::uint32_t> patch;
+    for (std::uint32_t i = 0; i < words_n - 24; ++i)            // all but the last 24 words
+        patch.insert(patch.end(), {first * 64 + i, 0xA5000000u + i, i % 3 == 0 ? 0xF0000000u : 0xFF000000u});
+    (void)ps2gpu::RendererCounters();
+    renderer.MemoryPatch(patch.data(), patch.size() / 3);
+    std::vector<std::uint8_t> back(bytes.size());
+    renderer.MemoryRead(first, first + blocks, back.data());
+    std::uint64_t dispatches = 0;
+    {
+        const std::string c = ps2gpu::RendererCounters();
+        const auto at = c.find(" dispatches");
+        const auto from = c.rfind(", ", at);
+        dispatches = std::stoull(c.substr(from + 2, at - from - 2));
+    }
+    bool same = true;
+    for (std::uint32_t i = 0; i < words_n; ++i) {
+        std::uint32_t was = 0, now = 0;
+        std::memcpy(&was, bytes.data() + i * 4, 4);
+        std::memcpy(&now, back.data() + i * 4, 4);
+        std::uint32_t want = was;
+        if (i < words_n - 24) {
+            const std::uint32_t mask = i % 3 == 0 ? 0xF0000000u : 0xFF000000u;
+            want = (was & ~mask) | ((0xA5000000u + i) & mask);
+        }
+        same = same && now == want;
+    }
+    Check(same, "a long memory patch merges each word under its mask");
+    Check(dispatches <= 2, "a long memory patch is one dispatch, not one an eight words");
+}
+
+// Drawn larger (2x), a GS pixel is a 2x2 square whose first sub-pixel is its sample point (the sub-pixel
+// mapping): that one goes to memory, so a write-back at 2x gives the bytes 1x gives. An edge a quarter into
+// a GS pixel covers its first sub-pixel only - the middle one, taken before, missed it (SSX 3: dark dashes a
+// block's row apart after a write-back and reload; everything read back at 2x or 3x was half a pixel off).
+std::vector<std::uint8_t> EdgeToMemory(ps2gpu::GsRenderer& renderer, std::uint32_t scale) {
+    renderer.SetScale(scale);
+    ps2gpu::GsDrawState state = Target(0x98);
+    state.fbw = 8;                                   // a full-size target: small ones stay at 1x
+    state.width = 512;
+    state.height = 448;
+    state.scissor_x1 = 511;
+    state.scissor_y1 = 447;
+    const float delta = 0.5f / float(scale) - 0.5f;  // the bridge's Convert at this scale
+    Rect(renderer, state, 0.0f + delta, 0.0f + delta, 512.0f + delta, 448.0f + delta, Rgba(0, 0, 0, 0x80));
+    Rect(renderer, state, 0.0f + delta, 0.0f + delta, 4.25f + delta, 6.25f + delta, Rgba(0xFF, 0x80, 0x40, 0x80));
+    std::vector<std::uint8_t> bytes(4 * 256);
+    const bool wrote = renderer.TargetToMemory(0x98, 8, 0, 512, 448, 0);
+    renderer.MemoryRead(0x98 * 32, 0x98 * 32 + 4, bytes.data());
+    if (!wrote) bytes.clear();
+    return bytes;
+}
+
+void FirstSubPixelToMemory(ps2gpu::GsRenderer& renderer) {
+    const auto one = EdgeToMemory(renderer, 1);
+    const auto two = EdgeToMemory(renderer, 2);
+    const auto three = EdgeToMemory(renderer, 3);
+    renderer.SetScale(1);
+    std::uint32_t lit = 0;
+    for (std::size_t i = 0; i + 4 <= one.size(); i += 4) lit += one[i] == 0xFF;
+    Check(!one.empty() && lit == 5 * 7, "1x: an edge a quarter into a GS pixel covers it");
+    Check(!two.empty() && two == one, "2x: a target goes to memory as at 1x (from each square's first sub-pixel)");
+    Check(!three.empty() && three == one, "3x: a target goes to memory as at 1x");
+}
+
+void FeedbackRegionClamp(ps2gpu::GsRenderer& renderer) {
+    auto state = Target(0xD0);
+    Rect(renderer, state, 0, 0, 64, 64, Rgba(255, 0, 0, 128));
+
+    state.textured = true;
+    state.texture_target = true;
+    state.tex_fbp = state.fbp;
+    state.tex_fbw = state.fbw;
+    state.tw = state.th = 64;
+    state.wms = state.wmt = 2;
+    state.minu = state.maxu = state.minv = state.maxv = 2;
+    const auto draw = [&](float x, std::uint8_t red) {
+        const ps2gpu::GsVertex triangle[] = {
+            {x, 0, 0, red, 0, 0, 128, 0.75f, 0.75f, 1},
+            {x + 12, 0, 0, red, 0, 0, 128, 0.75f, 0.75f, 1},
+            {x, 12, 0, red, 0, 0, 128, 0.75f, 0.75f, 1}};
+        renderer.DrawTriangles(state, triangle, 3);
+    };
+    draw(0, 0);
+    draw(16, 128);
+    Check(Pixel(renderer, state.fbp, 18, 2) == Rgba(0, 0, 0, 128),
+          "feedback must see the previous draw at the region-clamped coordinates");
+}
+
 void TargetFromMemory(ps2gpu::GsRenderer& renderer) {
     std::vector<std::uint32_t> pixels(64 * 64);
     for (std::uint32_t i = 0; i < pixels.size(); ++i) pixels[i] = Rgba(std::uint8_t(i), std::uint8_t(i >> 6), 7, 0x80);
@@ -436,8 +608,13 @@ int main() {
     PerPixelBlending(*renderer);
     Addressed(*renderer);
     RenderToTexture(*renderer);
+    FeedbackRegionClamp(*renderer);
     TargetFromMemory(*renderer);
     PartlyMaskedChannels(*renderer);
+    SixteenBitPassThroughBlend(*renderer);
+    BatchedDepthTwoPass(*renderer);
+    LongMemoryPatch(*renderer);
+    FirstSubPixelToMemory(*renderer);
     if (g_failures) std::printf("gpu renderer tests: %d failed\n", g_failures);
     else std::printf("gpu renderer tests: all passed (%s)\n", gpu->Describe().c_str());
     return g_failures ? EXIT_FAILURE : EXIT_SUCCESS;
