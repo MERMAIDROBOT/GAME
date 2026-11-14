@@ -11,6 +11,7 @@
 #include <charconv>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -112,6 +113,41 @@ struct PS2NativeSound::Impl
     std::optional<StaticDmaWindow> staticDma;
     std::optional<uint32_t> staticDmaAddress;
 
+    // The configured driver exchanges one PCM packet per buffer refill. Its
+    // static mailbox has room for one packet, even when the EE sends a burst.
+    static constexpr size_t kPcmPacketBytes = 0x8f0;
+    static constexpr size_t kPcmQueueCapacity = 8;
+    static constexpr uint32_t kPcmRefillCommand = 1;
+    static constexpr size_t kPcmRefillReplyBytes = 0x240;
+    std::deque<std::array<uint8_t, kPcmPacketBytes>> pcmPackets;
+    bool reportedPcmOverrun = false;
+
+    bool stagePcmPacket(uint32_t address, const void *source, size_t size)
+    {
+        if (!staticDmaAddress || address != *staticDmaAddress || size != kPcmPacketBytes ||
+            staticDma->bytes != kPcmPacketBytes)
+            return false;
+
+        const auto *bytes = static_cast<const uint8_t *>(source);
+        const auto word = [bytes](size_t offset) {
+            uint32_t value;
+            std::memcpy(&value, bytes + offset, sizeof(value));
+            return value;
+        };
+        if (word(0) != 0 || word(8) != size || word(0x2c0) != 1 || (word(0x2c4) & 0xffffu) != 0x600u)
+            return false;
+
+        if (pcmPackets.size() == kPcmQueueCapacity)
+        {
+            pcmPackets.pop_front();
+            if (!reportedPcmOverrun)
+                std::cerr << "[native-sound] PCM mailbox queue overrun" << std::endl;
+            reportedPcmOverrun = true;
+        }
+        std::memcpy(pcmPackets.emplace_back().data(), bytes, size);
+        return true;
+    }
+
     void activateStaticDma(const bozo::native::irx::Image &image)
     {
         if (!staticDma || staticDma->imageHash != image.hash ||
@@ -156,6 +192,12 @@ struct PS2NativeSound::Impl
         libraries.sif.receiveCommand = [this](uint32_t command, std::span<const uint8_t> data, uint32_t destination,
                                               std::span<const uint8_t> extra) -> uint32_t
         {
+            if (command == kPcmRefillCommand && extra.size() == kPcmRefillReplyBytes && !pcmPackets.empty())
+            {
+                const auto &packet = pcmPackets.front();
+                host->writeBuffer(*staticDmaAddress, packet.data(), static_cast<uint32_t>(packet.size()));
+                pcmPackets.pop_front();
+            }
             if (destination && !extra.empty()) RdramGuest(rdram()).write(destination, extra.data(), uint32_t(extra.size()));
             return ps2_stubs::dispatchSifCommand(rdram(), &runtime, command, data.data(), data.size()) ? 1u : 0u;
         };
@@ -251,7 +293,8 @@ bool PS2NativeSound::writeIopMemory(uint32_t address, const void *source, size_t
             return false;
         }
     }
-    p.host->writeBuffer(address, static_cast<const uint8_t *>(source), uint32_t(size));
+    if (!p.stagePcmPacket(address, source, size))
+        p.host->writeBuffer(address, static_cast<const uint8_t *>(source), uint32_t(size));
     return true;
 }
 

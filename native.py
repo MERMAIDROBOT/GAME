@@ -903,3 +903,5 @@ RUNTIME_PATCHES += ('patches/screenshot-key.patch',)
 RUNTIME_PATCHES += ('patches/path3-pulse-queue.patch',)
 RUNTIME_PATCHES += ('patches/display-lock.patch',)
 RUNTIME_PATCHES += ('patches/stream-pad.patch',)
+
+RUNTIME_PATCHES += ('patches/native-sound-pcm-mailbox.patch',)
