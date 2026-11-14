@@ -153,6 +153,8 @@ struct PS2AudioBackend::Impl
             if (owner->primed && owner->queued < 2u)
             {
                 owner->primed = false;
+                owner->readPhase = 0.0;
+                owner->driftTrim = 0.0;
                 ++owner->underruns;
                 owner->gapRemaining = kFadeFrames;
                 owner->gapSource = owner->lastOutput;
@@ -182,7 +184,7 @@ struct PS2AudioBackend::Impl
                     owner->lastOutput[channel] = static_cast<int16_t>((sample * fade + owner->fadeSource[channel] * (kFadeFrames - fade)) / kFadeFrames);
                 }
                 owner->readPhase += step;
-                while (owner->readPhase >= 1.0 && owner->queued >= 4u)
+                while (owner->readPhase >= 1.0 && owner->queued >= 2u)
                 {
                     owner->readPhase -= 1.0;
                     owner->read = (owner->read + 2u) % kRingSamples;
@@ -191,6 +193,8 @@ struct PS2AudioBackend::Impl
             }
             else if (owner->primed)
             {
+                // With no lookahead, consume the final frame without interpolation.
+                owner->readPhase = 0.0;
                 owner->fadePosition = std::min(owner->fadePosition + 1, kFadeFrames);
                 const int32_t fade = owner->fadePosition;
                 for (size_t channel = 0u; channel < 2u; ++channel)
@@ -327,6 +331,9 @@ void PS2AudioBackend::resetPcm()
     std::lock_guard<std::mutex> lock(m_impl->pcmMutex);
     m_impl->read = 0u;
     m_impl->queued = 0u;
+    m_impl->readPhase = 0.0;
+    m_impl->driftTrim = 0.0;
+    m_impl->queueAverage = double(Impl::kTargetSamples);
     m_impl->primed = false;
     m_impl->fadePosition = 0;
     m_impl->gapRemaining = 0;
@@ -362,6 +369,7 @@ void PS2AudioBackend::submitPcm(std::span<const int16_t> samples)
         m_impl->read = (m_impl->read + drop) % Impl::kRingSamples;
         m_impl->queued -= drop;
         m_impl->droppedFrames += drop / 2u;
+        m_impl->readPhase = 0.0;
         m_impl->fadePosition = 0;
         m_impl->fadeSource = m_impl->lastOutput;
     }
