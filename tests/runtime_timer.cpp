@@ -620,6 +620,60 @@ static void testTrianglePixelCenters() {
     std::cout<<"PASS: fractional triangle covers exactly ten integer pixel centers"<<std::endl;
 }
 
+static void testVif1GsDownload() {
+    setenv("PS2_PORT_HEADLESS", "1", 1);
+    PS2Runtime runtime;
+    if (!runtime.initialize("Synthetic VIF1 GS download") || !runtime.syncCoreSubsystems())
+        throw std::runtime_error("VIF1 download fixture initialization failed");
+    auto &memory = runtime.memory();
+    auto &gs = runtime.gs();
+    constexpr uint32_t chcr = 0x10009000u, madr = chcr + 0x10u, qwc = chcr + 0x20u;
+    constexpr uint32_t stat = 0x10003C00u, busdir = 0x12001040u, dstat = 0x1000E010u;
+    constexpr uint32_t start = 0x100u, reverse = 1u << 23u, dst = 0x200000u;
+    constexpr uint32_t block = 64, psm = 0x31; // PSMZ24: packed three-byte depth values.
+    std::array<uint8_t, 48> expected{};
+    for (unsigned x = 0; x < 16; ++x) {
+        const uint32_t z = 0x123450u + x * 257u;
+        gs.WriteVram(psm, block, 1, x, 0, z);
+        for (unsigned byte = 0; byte < 3; ++byte)
+            expected[x * 3 + byte] = uint8_t(z >> (8u * byte));
+    }
+    gs.writeRegister(GS_REG_BITBLTBUF, block | (1ull << 16u) | (uint64_t(psm) << 24u));
+    gs.writeRegister(GS_REG_TRXPOS, 0u);
+    gs.writeRegister(GS_REG_TRXREG, 16u | (1ull << 32u));
+    gs.writeRegister(GS_REG_TRXDIR, 1u);
+    auto *ram = memory.getRDRAM();
+    std::memset(ram + dst - 1u, 0xa5, 50u);
+    memory.writeIORegister(0x1000E000u, 1u);
+    memory.writeIORegister(stat, reverse | 0x7fu);
+    if ((memory.readIORegister(stat) & (reverse | 0x7fu)) != reverse)
+        throw std::runtime_error("VIF1 STAT did not apply its FDR write mask");
+    memory.writeIORegister(madr, dst);
+    memory.writeIORegister(qwc, 3u);
+    memory.writeIORegister(chcr, start);
+    if (!(memory.readIORegister(chcr) & start) || (memory.readIORegister(dstat) & 2u) ||
+        ram[dst] != 0xa5u)
+        throw std::runtime_error("Reverse VIF1 DMA must wait until GS BUSDIR allows reads");
+    memory.write32(busdir, 1u);
+    if ((memory.readIORegister(chcr) & start) || !(memory.readIORegister(dstat) & 2u) ||
+        memory.readIORegister(qwc) != 0u || memory.readIORegister(madr) != dst + 48u ||
+        std::memcmp(ram + dst, expected.data(), expected.size()) ||
+        ram[dst - 1u] != 0xa5u || ram[dst + 48u] != 0xa5u)
+        throw std::runtime_error("Reverse VIF1 DMA did not transfer three packed depth quadwords");
+    memory.write32(busdir, 0u);
+    memory.writeIORegister(stat, 0u);
+    const uint32_t mark = 0x07004321u;
+    std::memcpy(ram + dst, &mark, sizeof(mark));
+    std::memset(ram + dst + sizeof(mark), 0, 12u);
+    memory.writeIORegister(madr, dst);
+    memory.writeIORegister(qwc, 1u);
+    memory.writeIORegister(chcr, start | 1u);
+    memory.processPendingTransfers();
+    if (memory.vif1_regs.mark != 0x4321u)
+        throw std::runtime_error("Forward VIF1 DMA stopped processing guest commands");
+    std::cout << "PASS: reverse VIF1 DMA reads packed depth; forward DMA still processes VIF commands" << std::endl;
+}
+
 // libgraph image transfers: vram_addr is already the GS block number, and StoreImage must not need guest
 // heap space (titles may claim the whole heap). Negative control: block 0 holds different pixels.
 // VIF1 DIRECT: a GIF IMAGE packet may span several DIRECTs; its remaining quadwords arrive as the next DIRECT's
@@ -1084,6 +1138,7 @@ int main(int argc, char **argv) {
     testGsLibgraphPacketABI();
     testVif1DirectImageSpan();
     testLongVif1Chain();
+    testVif1GsDownload();
     testMaskedPath3Pulses();
     testGsDisplayEnvironment();
     testGsAnalogCRT();
