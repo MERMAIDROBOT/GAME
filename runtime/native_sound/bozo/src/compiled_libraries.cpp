@@ -1820,15 +1820,6 @@ namespace bozo::native::irx
         p.syncEe(eeCycle);
         return &p.mixer;
     }
-    uint64_t CompiledLibraries::cyclesUntilInputHalf(uint64_t eeCycle) const
-    {
-        const auto &p = *impl_;
-        const uint64_t half = p.mixer.nextInputHalfCycle();
-        if (!p.origin || half == 0)
-            return UINT64_MAX;
-        const uint64_t deadline = p.eeOrigin + half * 8;
-        return deadline > eeCycle ? deadline - eeCycle : 1u;
-    }
     void CompiledLibraries::writeBuffer(uint32_t address, const uint8_t *data, uint32_t bytes)
     {
         impl_->copy(address, data, bytes);

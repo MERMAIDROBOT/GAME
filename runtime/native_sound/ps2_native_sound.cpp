@@ -278,10 +278,4 @@ void PS2NativeSound::advanceEeCycles(uint64_t eeCycles)
     }
 }
 
-uint64_t PS2NativeSound::cyclesUntilInputHalf() const
-{
-    const auto &p = *m_impl;
-    return ownsAudio() ? p.host->cyclesUntilInputHalf(p.eeCycle) : UINT64_MAX;
-}
-
 bool PS2NativeSound::ownsAudio() const { return m_impl->host != nullptr && !m_impl->failed; }
