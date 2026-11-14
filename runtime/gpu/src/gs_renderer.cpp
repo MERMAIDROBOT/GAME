@@ -2725,15 +2725,10 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& input, const GsVertex* v
         const auto overlaps = [&](int l, int t, int r, int bottom) {
             return drawn_any_ && r >= drawn_x0_ && l <= drawn_x1_ && bottom >= drawn_y0_ && t <= drawn_y1_;
         };
-        if ((feedback && overlaps(tu0, tv0, tu1, tv1)) || ((reads_dest || (two_pass && split_overlaps)) && overlaps(x0, y0, x1, y1))) {
-            bool independent=refine && count==3 && !alpha_coverage_unknown_;
-            if(independent) {
-                const auto next=coverageTriangle(v);
-                for(const auto& prior:alpha_coverage_)if(!independentCoverage(prior,next)){independent=false;break;}
-            }
-            if(!independent)Flush();
-        }
-        // What the copy must hold: the texels as CLAMP leaves them.
+        // Use the same wrapped bounds for hazards and for the copy. When
+        // wrapping can split the source rectangle, conservatively end the batch.
+        int ra = 0, rb = 0, rc = 0, rd = 0;
+        bool bounded = false;
         if (feedback) {
             const int w = int(tw), h = int(th);
             auto axis = [&](int lo, int hi, std::uint32_t mode, std::uint32_t min, std::uint32_t max, int size,
@@ -2745,12 +2740,20 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& input, const GsVertex* v
                 *b = hi;
                 return true;
             };
-            int ra = 0, rb = 0, rc = 0, rd = 0;
-            if (axis(tu0, tu1, state.wms, state.minu, state.maxu, w, &ra, &rb) &&
-                axis(tv0, tv1, state.wmt, state.minv, state.maxv, h, &rc, &rd))
-                Reads(ra, rc, rb, rd);
-            else
-                read_all_ = true;
+            bounded = axis(tu0, tu1, state.wms, state.minu, state.maxu, w, &ra, &rb) &&
+                      axis(tv0, tv1, state.wmt, state.minv, state.maxv, h, &rc, &rd);
+        }
+        if ((feedback && drawn_any_ && (!bounded || overlaps(ra, rc, rb, rd))) || ((reads_dest || (two_pass && split_overlaps)) && overlaps(x0, y0, x1, y1))) {
+            bool independent=refine && count==3 && !alpha_coverage_unknown_;
+            if(independent) {
+                const auto next=coverageTriangle(v);
+                for(const auto& prior:alpha_coverage_)if(!independentCoverage(prior,next)){independent=false;break;}
+            }
+            if(!independent)Flush();
+        }
+        if (feedback) {
+            if (bounded) Reads(ra, rc, rb, rd);
+            else read_all_ = true;
         }
         if (reads_dest) Reads(x0, y0, x1, y1);
     }

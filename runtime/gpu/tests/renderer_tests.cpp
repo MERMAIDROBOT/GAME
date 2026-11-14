@@ -509,6 +509,30 @@ void FirstSubPixelToMemory(ps2gpu::GsRenderer& renderer) {
     Check(!three.empty() && three == one, "3x: a target goes to memory as at 1x");
 }
 
+void FeedbackRegionClamp(ps2gpu::GsRenderer& renderer) {
+    auto state = Target(0xD0);
+    Rect(renderer, state, 0, 0, 64, 64, Rgba(255, 0, 0, 128));
+
+    state.textured = true;
+    state.texture_target = true;
+    state.tex_fbp = state.fbp;
+    state.tex_fbw = state.fbw;
+    state.tw = state.th = 64;
+    state.wms = state.wmt = 2;
+    state.minu = state.maxu = state.minv = state.maxv = 2;
+    const auto draw = [&](float x, std::uint8_t red) {
+        const ps2gpu::GsVertex triangle[] = {
+            {x, 0, 0, red, 0, 0, 128, 0.75f, 0.75f, 1},
+            {x + 12, 0, 0, red, 0, 0, 128, 0.75f, 0.75f, 1},
+            {x, 12, 0, red, 0, 0, 128, 0.75f, 0.75f, 1}};
+        renderer.DrawTriangles(state, triangle, 3);
+    };
+    draw(0, 0);
+    draw(16, 128);
+    Check(Pixel(renderer, state.fbp, 18, 2) == Rgba(0, 0, 0, 128),
+          "feedback must see the previous draw at the region-clamped coordinates");
+}
+
 void TargetFromMemory(ps2gpu::GsRenderer& renderer) {
     std::vector<std::uint32_t> pixels(64 * 64);
     for (std::uint32_t i = 0; i < pixels.size(); ++i) pixels[i] = Rgba(std::uint8_t(i), std::uint8_t(i >> 6), 7, 0x80);
@@ -584,6 +608,7 @@ int main() {
     PerPixelBlending(*renderer);
     Addressed(*renderer);
     RenderToTexture(*renderer);
+    FeedbackRegionClamp(*renderer);
     TargetFromMemory(*renderer);
     PartlyMaskedChannels(*renderer);
     SixteenBitPassThroughBlend(*renderer);
